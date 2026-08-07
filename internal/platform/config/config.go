@@ -1,0 +1,115 @@
+// Package config loads and validates process configuration.
+package config
+
+import (
+	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	databaseURLEnvironment     = "WATCHTRACE_DATABASE_URL"
+	httpAddressEnvironment     = "WATCHTRACE_HTTP_ADDRESS"
+	shutdownTimeoutEnvironment = "WATCHTRACE_SHUTDOWN_TIMEOUT"
+
+	defaultHTTPAddress     = "127.0.0.1:8080"
+	defaultShutdownTimeout = 10 * time.Second
+)
+
+// Config contains the validated settings needed to start the API.
+type Config struct {
+	DatabaseURL     string
+	HTTPAddress     string
+	ShutdownTimeout time.Duration
+}
+
+// Load reads configuration from the process environment and validates it.
+func Load() (Config, error) {
+	return load(os.LookupEnv)
+}
+
+func load(lookup func(string) (string, bool)) (Config, error) {
+	databaseURL, ok := lookup(databaseURLEnvironment)
+	databaseURL = strings.TrimSpace(databaseURL)
+	if !ok || databaseURL == "" {
+		return Config{}, fmt.Errorf("%s is required", databaseURLEnvironment)
+	}
+	if err := validateDatabaseURL(databaseURL); err != nil {
+		return Config{}, err
+	}
+
+	httpAddress := defaultHTTPAddress
+	if value, exists := lookup(httpAddressEnvironment); exists {
+		httpAddress = strings.TrimSpace(value)
+		if httpAddress == "" {
+			return Config{}, fmt.Errorf("%s must not be empty", httpAddressEnvironment)
+		}
+	}
+	if err := validateHTTPAddress(httpAddress); err != nil {
+		return Config{}, err
+	}
+
+	shutdownTimeout := defaultShutdownTimeout
+	if value, exists := lookup(shutdownTimeoutEnvironment); exists {
+		value = strings.TrimSpace(value)
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 {
+			return Config{}, fmt.Errorf("%s must be a positive duration", shutdownTimeoutEnvironment)
+		}
+		shutdownTimeout = parsed
+	}
+
+	return Config{
+		DatabaseURL:     databaseURL,
+		HTTPAddress:     httpAddress,
+		ShutdownTimeout: shutdownTimeout,
+	}, nil
+}
+
+func validateDatabaseURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid PostgreSQL URL", databaseURLEnvironment)
+	}
+	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
+		return fmt.Errorf("%s must use the postgres or postgresql scheme", databaseURLEnvironment)
+	}
+	if parsed.User == nil || parsed.User.Username() == "" {
+		return fmt.Errorf("%s must include a database user", databaseURLEnvironment)
+	}
+	if parsed.Hostname() == "" {
+		return fmt.Errorf("%s must include a database host", databaseURLEnvironment)
+	}
+	if parsed.Port() != "" {
+		port, portErr := strconv.Atoi(parsed.Port())
+		if portErr != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("%s contains an invalid database port", databaseURLEnvironment)
+		}
+	}
+	if strings.Trim(parsed.Path, "/") == "" {
+		return fmt.Errorf("%s must include a database name", databaseURLEnvironment)
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("%s must not contain a fragment", databaseURLEnvironment)
+	}
+
+	return nil
+}
+
+func validateHTTPAddress(value string) error {
+	host, portValue, err := net.SplitHostPort(value)
+	if err != nil || strings.ContainsAny(host, " \t\r\n") {
+		return fmt.Errorf("%s must be in host:port form", httpAddressEnvironment)
+	}
+
+	port, err := strconv.Atoi(portValue)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("%s contains an invalid port", httpAddressEnvironment)
+	}
+
+	return nil
+}
