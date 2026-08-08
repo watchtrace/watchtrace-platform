@@ -20,8 +20,9 @@ docs/                Documentation index and future task-owned documentation
 
 The design specification, Phase 1 implementation plan, and risk register stay
 at the repository root because the implementation workflow uses their stable
-paths. Database migrations and queries will be added under `db/` by P1-005;
-later service, deployment, and test directories will be added only when their
+paths. Database migrations, SQLC queries, and SQLC configuration live under
+`db/`; generated database code lives under `internal/platform/database/sqlc`.
+Later service, deployment, and test directories will be added only when their
 owning task begins. See [`docs/README.md`](docs/README.md) for the documentation
 index.
 
@@ -47,6 +48,10 @@ cp .env.example .env
 chmod 600 deploy/local/postgres.env
 chmod 600 .env
 docker compose up --detach --wait postgres
+set -a
+. ./.env
+set +a
+go run ./cmd/migrate up
 go test ./...
 ```
 
@@ -60,6 +65,11 @@ Copy-Item deploy/local/postgres.env.example deploy/local/postgres.env
 Copy-Item .env.example .env
 # Replace both password placeholders with the same local-only password.
 docker compose up --detach --wait postgres
+Get-Content .env | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object {
+    $name, $value = $_ -split '=', 2
+    Set-Item -Path "Env:$name" -Value $value
+}
+go run ./cmd/migrate up
 go test ./...
 ```
 
@@ -141,9 +151,46 @@ On Windows PowerShell, run:
 pwsh -NoProfile -File ./tests/integration/postgres-compose.ps1
 ```
 
+## Database Migrations and SQLC
+
+Database migrations are embedded into the migration command, so these commands
+work from any directory after `WATCHTRACE_DATABASE_URL` is exported:
+
+```sh
+go run ./cmd/migrate up
+go run ./cmd/migrate version
+go run ./cmd/migrate down
+```
+
+`up` applies every pending migration. `down` rolls back exactly one migration
+to reduce the chance of an accidental full rollback. Migration errors and logs
+never print the configured database URL.
+
+SQL queries live in `db/queries`, migrations in `db/migrations`, and generated
+Go code in `internal/platform/database/sqlc`. Regenerate it with the pinned
+SQLC release:
+
+```sh
+go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
+```
+
+Run the clean-database migration and generated-query integration test on macOS
+or Linux with:
+
+```sh
+./tests/integration/postgres-database.sh
+```
+
+On Windows PowerShell, run:
+
+```powershell
+pwsh -NoProfile -File ./tests/integration/postgres-database.ps1
+```
+
 ## Verify
 
 ```sh
+go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
 go test ./...
 go vet ./...
 go build ./...

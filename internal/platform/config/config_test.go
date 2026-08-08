@@ -45,6 +45,20 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadDatabaseURLIgnoresUnrelatedApplicationSettings(t *testing.T) {
+	t.Setenv(databaseURLEnvironment, validDatabaseURL)
+	t.Setenv(httpAddressEnvironment, "not-a-listen-address")
+	t.Setenv(shutdownTimeoutEnvironment, "not-a-duration")
+
+	databaseURL, err := LoadDatabaseURL()
+	if err != nil {
+		t.Fatalf("LoadDatabaseURL: %v", err)
+	}
+	if databaseURL != validDatabaseURL {
+		t.Fatalf("database URL = %q, want supplied URL", databaseURL)
+	}
+}
+
 func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 	tests := []struct {
 		name        string

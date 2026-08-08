@@ -40,13 +40,15 @@ request:
 
 ```powershell
 go fmt ./...
+go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
 go test ./...
 go vet ./...
 go build ./...
 ```
 
-Database, container, and frontend checks will be added with the tasks that
-introduce those components.
+When a change affects migrations or generated queries, also run the isolated
+PostgreSQL integration test documented in `README.md`. Container and frontend
+checks will be added with the tasks that introduce those components.
 
 ## Pull Requests
 

@@ -180,7 +180,7 @@ Create a repeatable local development environment and a clean foundation for lat
   - Validate required values during startup.
   - Provide a safe `.env.example` containing no real secrets.
 
-- [ ] **P1-005 — Add migrations and SQLC**
+- [x] **P1-005 — Add migrations and SQLC**
   - Add repeatable database migration commands.
   - Configure SQLC and prove one generated query works against PostgreSQL.
   - Add migration tests against a real test database.

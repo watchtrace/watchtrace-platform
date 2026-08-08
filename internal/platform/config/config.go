@@ -32,13 +32,15 @@ func Load() (Config, error) {
 	return load(os.LookupEnv)
 }
 
+// LoadDatabaseURL reads and validates only the database setting needed by
+// database administration commands.
+func LoadDatabaseURL() (string, error) {
+	return loadDatabaseURL(os.LookupEnv)
+}
+
 func load(lookup func(string) (string, bool)) (Config, error) {
-	databaseURL, ok := lookup(databaseURLEnvironment)
-	databaseURL = strings.TrimSpace(databaseURL)
-	if !ok || databaseURL == "" {
-		return Config{}, fmt.Errorf("%s is required", databaseURLEnvironment)
-	}
-	if err := validateDatabaseURL(databaseURL); err != nil {
+	databaseURL, err := loadDatabaseURL(lookup)
+	if err != nil {
 		return Config{}, err
 	}
 
@@ -68,6 +70,19 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		HTTPAddress:     httpAddress,
 		ShutdownTimeout: shutdownTimeout,
 	}, nil
+}
+
+func loadDatabaseURL(lookup func(string) (string, bool)) (string, error) {
+	databaseURL, ok := lookup(databaseURLEnvironment)
+	databaseURL = strings.TrimSpace(databaseURL)
+	if !ok || databaseURL == "" {
+		return "", fmt.Errorf("%s is required", databaseURLEnvironment)
+	}
+	if err := validateDatabaseURL(databaseURL); err != nil {
+		return "", err
+	}
+
+	return databaseURL, nil
 }
 
 func validateDatabaseURL(value string) error {
