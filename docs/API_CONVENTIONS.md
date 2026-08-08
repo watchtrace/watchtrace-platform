@@ -38,9 +38,11 @@ The initial standard codes are:
 | 401 | `invalid_credentials` |
 | 401 | `invalid_session` |
 | 404 | `not_found` |
+| 404 | `environment_not_found` |
 | 405 | `method_not_allowed` |
 | 409 | `email_in_use` |
 | 409 | `organization_slug_in_use` |
+| 409 | `monitor_limit_reached` |
 | 415 | `unsupported_media_type` |
 | 422 | `validation_failed` |
 | 500 | `internal_error` |

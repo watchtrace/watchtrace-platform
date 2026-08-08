@@ -238,7 +238,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Let a new user create an organization, project, and production environment.
   - Ensure every child record belongs to the correct organization.
 
-- [ ] **P1-104 — Add the initial monitor schema and API**
+- [x] **P1-104 — Add the initial monitor schema and API**
   - Create and list a GET monitor with URL, interval, timeout, and expected status range.
   - Default to a five-minute interval and a five-second timeout.
   - Enforce organization and environment ownership.

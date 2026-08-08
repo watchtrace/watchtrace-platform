@@ -127,6 +127,11 @@ project, and production environment atomically with `POST
 /api/v1/organizations`; see
 [`docs/OWNERSHIP_API.md`](docs/OWNERSHIP_API.md).
 
+Authenticated monitor creation and listing are available under
+`/api/v1/environments/{environmentId}/monitors`. See
+[`docs/MONITORS.md`](docs/MONITORS.md) for defaults, limits, tenant rules, and
+the P1-105 destination-safety boundary.
+
 ## Local PostgreSQL
 
 The Compose service runs PostgreSQL 18.4 on `127.0.0.1:5432` and stores its

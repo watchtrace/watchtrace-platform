@@ -1,0 +1,158 @@
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/watchtrace/watchtrace-platform/internal/monitor"
+)
+
+// MonitorService is the initial monitor boundary used by the HTTP API.
+type MonitorService interface {
+	Create(context.Context, string, string, monitor.CreateInput) (monitor.Monitor, error)
+	List(context.Context, string, string) ([]monitor.Monitor, error)
+}
+
+type createMonitorRequest struct {
+	Name              string `json:"name" binding:"required,max=120"`
+	URL               string `json:"url" binding:"required,max=2048"`
+	IntervalSeconds   *int32 `json:"interval_seconds" binding:"omitempty,oneof=60 120 300 600 1800"`
+	TimeoutSeconds    *int32 `json:"timeout_seconds" binding:"omitempty,min=1,max=10"`
+	ExpectedStatusMin *int16 `json:"expected_status_min" binding:"omitempty,min=100,max=599"`
+	ExpectedStatusMax *int16 `json:"expected_status_max" binding:"omitempty,min=100,max=599"`
+}
+
+type monitorResponse struct {
+	ID                string    `json:"id"`
+	OrganizationID    string    `json:"organization_id"`
+	EnvironmentID     string    `json:"environment_id"`
+	Name              string    `json:"name"`
+	URL               string    `json:"url"`
+	Method            string    `json:"method"`
+	IntervalSeconds   int32     `json:"interval_seconds"`
+	TimeoutSeconds    int32     `json:"timeout_seconds"`
+	ExpectedStatusMin int16     `json:"expected_status_min"`
+	ExpectedStatusMax int16     `json:"expected_status_max"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type monitorListResponse struct {
+	Monitors []monitorResponse `json:"monitors"`
+}
+
+func registerMonitorRoutes(
+	router *gin.Engine,
+	authenticator SessionAuthenticator,
+	service MonitorService,
+) {
+	router.POST(
+		"/api/v1/environments/:environmentId/monitors",
+		requireAuthenticatedUser(authenticator),
+		createMonitor(service),
+	)
+	router.GET(
+		"/api/v1/environments/:environmentId/monitors",
+		requireAuthenticatedUser(authenticator),
+		listMonitors(service),
+	)
+}
+
+func createMonitor(service MonitorService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+			return
+		}
+
+		var request createMonitorRequest
+		if !DecodeJSON(c, &request) {
+			return
+		}
+
+		created, err := service.Create(c.Request.Context(), user.ID, c.Param("environmentId"), monitor.CreateInput{
+			Name:              request.Name,
+			TargetURL:         request.URL,
+			IntervalSeconds:   optionalInt32(request.IntervalSeconds),
+			TimeoutSeconds:    optionalInt32(request.TimeoutSeconds),
+			ExpectedStatusMin: optionalInt16(request.ExpectedStatusMin),
+			ExpectedStatusMax: optionalInt16(request.ExpectedStatusMax),
+		})
+		if err != nil {
+			respondMonitorError(c, err)
+			return
+		}
+
+		c.JSON(http.StatusCreated, monitorToResponse(created))
+	}
+}
+
+func optionalInt32(value *int32) int32 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func optionalInt16(value *int16) int16 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func listMonitors(service MonitorService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+			return
+		}
+
+		monitors, err := service.List(c.Request.Context(), user.ID, c.Param("environmentId"))
+		if err != nil {
+			respondMonitorError(c, err)
+			return
+		}
+
+		response := make([]monitorResponse, 0, len(monitors))
+		for _, item := range monitors {
+			response = append(response, monitorToResponse(item))
+		}
+		c.JSON(http.StatusOK, monitorListResponse{Monitors: response})
+	}
+}
+
+func monitorToResponse(item monitor.Monitor) monitorResponse {
+	return monitorResponse{
+		ID:                item.ID,
+		OrganizationID:    item.OrganizationID,
+		EnvironmentID:     item.EnvironmentID,
+		Name:              item.Name,
+		URL:               item.TargetURL,
+		Method:            item.Method,
+		IntervalSeconds:   item.IntervalSeconds,
+		TimeoutSeconds:    item.TimeoutSeconds,
+		ExpectedStatusMin: item.ExpectedStatusMin,
+		ExpectedStatusMax: item.ExpectedStatusMax,
+		CreatedAt:         item.CreatedAt,
+		UpdatedAt:         item.UpdatedAt,
+	}
+}
+
+func respondMonitorError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, monitor.ErrInvalidInput):
+		RespondError(c, http.StatusUnprocessableEntity, "validation_failed", "monitor configuration is invalid")
+	case errors.Is(err, monitor.ErrEnvironmentNotFound):
+		RespondError(c, http.StatusNotFound, "environment_not_found", "environment not found")
+	case errors.Is(err, monitor.ErrMonitorLimitReached):
+		RespondError(c, http.StatusConflict, "monitor_limit_reached", "organization monitor limit reached")
+	default:
+		RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+	}
+}

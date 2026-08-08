@@ -26,6 +26,7 @@ $previousPostgresPort = $env:WATCHTRACE_POSTGRES_PORT
 $previousDatabaseURL = $env:WATCHTRACE_DATABASE_URL
 $previousTestDatabaseURL = $env:WATCHTRACE_TEST_DATABASE_URL
 $previousExpectedAuthSchemaAbsent = $env:WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT
+$previousExpectedMonitorSchemaAbsent = $env:WATCHTRACE_EXPECT_MONITOR_SCHEMA_ABSENT
 
 function Invoke-Compose {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
@@ -73,7 +74,7 @@ try {
 
     Invoke-Go run ./cmd/migrate up
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 3 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 4 (clean)") {
         throw "Unexpected migration version after up: $version"
     }
 
@@ -81,12 +82,12 @@ try {
 
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 2 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 3 (clean)") {
         throw "Unexpected migration version after down: $version"
     }
-    $env:WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT = "1"
-    Invoke-Go test ./tests/integration -run '^TestAuthSchemaRollback$' -count=1
-    $env:WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT = $previousExpectedAuthSchemaAbsent
+    $env:WATCHTRACE_EXPECT_MONITOR_SCHEMA_ABSENT = "1"
+    Invoke-Go test ./tests/integration -run '^TestMonitorSchemaRollback$' -count=1
+    $env:WATCHTRACE_EXPECT_MONITOR_SCHEMA_ABSENT = $previousExpectedMonitorSchemaAbsent
 
     Invoke-Go run ./cmd/migrate up
     Invoke-Go test ./tests/integration -count=1
@@ -104,4 +105,5 @@ finally {
     $env:WATCHTRACE_DATABASE_URL = $previousDatabaseURL
     $env:WATCHTRACE_TEST_DATABASE_URL = $previousTestDatabaseURL
     $env:WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT = $previousExpectedAuthSchemaAbsent
+    $env:WATCHTRACE_EXPECT_MONITOR_SCHEMA_ABSENT = $previousExpectedMonitorSchemaAbsent
 }

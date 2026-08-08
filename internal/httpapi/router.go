@@ -15,6 +15,7 @@ type Options struct {
 	AuthService      AuthenticationService
 	Authenticator    SessionAuthenticator
 	OwnershipService OwnershipService
+	MonitorService   MonitorService
 }
 
 // NewRouter assembles the HTTP routes owned by the API command.
@@ -55,6 +56,9 @@ func NewRouter(options Options) *gin.Engine {
 	}
 	if options.Authenticator != nil && options.OwnershipService != nil {
 		registerOwnershipRoutes(router, options.Authenticator, options.OwnershipService)
+	}
+	if options.Authenticator != nil && options.MonitorService != nil {
+		registerMonitorRoutes(router, options.Authenticator, options.MonitorService)
 	}
 
 	router.NoRoute(func(c *gin.Context) {
