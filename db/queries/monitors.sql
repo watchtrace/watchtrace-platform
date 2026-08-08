@@ -78,3 +78,50 @@ FROM monitors
 WHERE organization_id = sqlc.arg(organization_id)::text::uuid
   AND environment_id = sqlc.arg(environment_id)::text::uuid
 ORDER BY created_at, id;
+
+-- name: GetEnvironmentMonitor :one
+SELECT
+    id::text AS id,
+    organization_id::text AS organization_id,
+    environment_id::text AS environment_id,
+    name,
+    target_url,
+    method,
+    interval_seconds,
+    timeout_seconds,
+    expected_status_min,
+    expected_status_max,
+    created_at,
+    updated_at
+FROM monitors
+WHERE organization_id = sqlc.arg(organization_id)::text::uuid
+  AND environment_id = sqlc.arg(environment_id)::text::uuid
+  AND id = sqlc.arg(monitor_id)::text::uuid;
+
+-- name: GetLatestScheduledMonitorResult :one
+SELECT succeeded
+FROM health_checks
+WHERE organization_id = sqlc.arg(organization_id)::text::uuid
+  AND environment_id = sqlc.arg(environment_id)::text::uuid
+  AND monitor_id = sqlc.arg(monitor_id)::text::uuid
+  AND job_type = 'scheduled'
+ORDER BY scheduled_at DESC, job_id
+LIMIT 1;
+
+-- name: ListRecentMonitorResults :many
+SELECT
+    job_id::text AS job_id,
+    job_type,
+    scheduled_at,
+    started_at,
+    completed_at,
+    succeeded,
+    status_code,
+    error_category,
+    total_duration_microseconds
+FROM health_checks
+WHERE organization_id = sqlc.arg(organization_id)::text::uuid
+  AND environment_id = sqlc.arg(environment_id)::text::uuid
+  AND monitor_id = sqlc.arg(monitor_id)::text::uuid
+ORDER BY scheduled_at DESC, job_id
+LIMIT 20;

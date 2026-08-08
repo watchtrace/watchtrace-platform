@@ -138,6 +138,91 @@ func (q *Queries) GetAccessibleEnvironmentOrganization(ctx context.Context, arg 
 	return organization_id, err
 }
 
+const getEnvironmentMonitor = `-- name: GetEnvironmentMonitor :one
+SELECT
+    id::text AS id,
+    organization_id::text AS organization_id,
+    environment_id::text AS environment_id,
+    name,
+    target_url,
+    method,
+    interval_seconds,
+    timeout_seconds,
+    expected_status_min,
+    expected_status_max,
+    created_at,
+    updated_at
+FROM monitors
+WHERE organization_id = $1::text::uuid
+  AND environment_id = $2::text::uuid
+  AND id = $3::text::uuid
+`
+
+type GetEnvironmentMonitorParams struct {
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+}
+
+type GetEnvironmentMonitorRow struct {
+	ID                string
+	OrganizationID    string
+	EnvironmentID     string
+	Name              string
+	TargetUrl         string
+	Method            string
+	IntervalSeconds   int32
+	TimeoutSeconds    int32
+	ExpectedStatusMin int16
+	ExpectedStatusMax int16
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+func (q *Queries) GetEnvironmentMonitor(ctx context.Context, arg GetEnvironmentMonitorParams) (GetEnvironmentMonitorRow, error) {
+	row := q.db.QueryRow(ctx, getEnvironmentMonitor, arg.OrganizationID, arg.EnvironmentID, arg.MonitorID)
+	var i GetEnvironmentMonitorRow
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.EnvironmentID,
+		&i.Name,
+		&i.TargetUrl,
+		&i.Method,
+		&i.IntervalSeconds,
+		&i.TimeoutSeconds,
+		&i.ExpectedStatusMin,
+		&i.ExpectedStatusMax,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getLatestScheduledMonitorResult = `-- name: GetLatestScheduledMonitorResult :one
+SELECT succeeded
+FROM health_checks
+WHERE organization_id = $1::text::uuid
+  AND environment_id = $2::text::uuid
+  AND monitor_id = $3::text::uuid
+  AND job_type = 'scheduled'
+ORDER BY scheduled_at DESC, job_id
+LIMIT 1
+`
+
+type GetLatestScheduledMonitorResultParams struct {
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+}
+
+func (q *Queries) GetLatestScheduledMonitorResult(ctx context.Context, arg GetLatestScheduledMonitorResultParams) (bool, error) {
+	row := q.db.QueryRow(ctx, getLatestScheduledMonitorResult, arg.OrganizationID, arg.EnvironmentID, arg.MonitorID)
+	var succeeded bool
+	err := row.Scan(&succeeded)
+	return succeeded, err
+}
+
 const listEnvironmentMonitors = `-- name: ListEnvironmentMonitors :many
 SELECT
     id::text AS id,
@@ -200,6 +285,73 @@ func (q *Queries) ListEnvironmentMonitors(ctx context.Context, arg ListEnvironme
 			&i.ExpectedStatusMax,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRecentMonitorResults = `-- name: ListRecentMonitorResults :many
+SELECT
+    job_id::text AS job_id,
+    job_type,
+    scheduled_at,
+    started_at,
+    completed_at,
+    succeeded,
+    status_code,
+    error_category,
+    total_duration_microseconds
+FROM health_checks
+WHERE organization_id = $1::text::uuid
+  AND environment_id = $2::text::uuid
+  AND monitor_id = $3::text::uuid
+ORDER BY scheduled_at DESC, job_id
+LIMIT 20
+`
+
+type ListRecentMonitorResultsParams struct {
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+}
+
+type ListRecentMonitorResultsRow struct {
+	JobID                     string
+	JobType                   string
+	ScheduledAt               pgtype.Timestamptz
+	StartedAt                 pgtype.Timestamptz
+	CompletedAt               pgtype.Timestamptz
+	Succeeded                 bool
+	StatusCode                pgtype.Int2
+	ErrorCategory             pgtype.Text
+	TotalDurationMicroseconds int64
+}
+
+func (q *Queries) ListRecentMonitorResults(ctx context.Context, arg ListRecentMonitorResultsParams) ([]ListRecentMonitorResultsRow, error) {
+	rows, err := q.db.Query(ctx, listRecentMonitorResults, arg.OrganizationID, arg.EnvironmentID, arg.MonitorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRecentMonitorResultsRow{}
+	for rows.Next() {
+		var i ListRecentMonitorResultsRow
+		if err := rows.Scan(
+			&i.JobID,
+			&i.JobType,
+			&i.ScheduledAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Succeeded,
+			&i.StatusCode,
+			&i.ErrorCategory,
+			&i.TotalDurationMicroseconds,
 		); err != nil {
 			return nil, err
 		}

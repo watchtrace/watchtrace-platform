@@ -39,6 +39,7 @@ The initial standard codes are:
 | 401 | `invalid_session` |
 | 404 | `not_found` |
 | 404 | `environment_not_found` |
+| 404 | `monitor_not_found` |
 | 405 | `method_not_allowed` |
 | 409 | `email_in_use` |
 | 409 | `organization_slug_in_use` |

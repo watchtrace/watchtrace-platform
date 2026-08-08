@@ -110,6 +110,82 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 
 	assertMonitorDatabaseDefaults(t, ctx, pool, createdDefault.Body.ID)
 
+	unknownDetail := performMonitorGet(
+		t,
+		router,
+		firstSignup.Body.Session.Token,
+		firstOwnership.Body.Environment.ID,
+		createdDefault.Body.ID,
+	)
+	if unknownDetail.Status != http.StatusOK || unknownDetail.Body.State != monitor.StateUnknown ||
+		len(unknownDetail.Body.RecentChecks) != 0 {
+		t.Fatalf("new monitor detail = status %d state %q checks %d: %s", unknownDetail.Status,
+			unknownDetail.Body.State, len(unknownDetail.Body.RecentChecks), unknownDetail.RawBody)
+	}
+	if !strings.Contains(unknownDetail.RawBody, `"recent_checks":[]`) {
+		t.Fatalf("new monitor recent checks must be a non-null array: %s", unknownDetail.RawBody)
+	}
+
+	baseCheckTime := time.Date(2026, 8, 8, 13, 0, 0, 0, time.UTC)
+	failedJobID := insertMonitorAPIResult(
+		t, ctx, pool, firstOwnership.Body.Organization.ID, firstOwnership.Body.Environment.ID,
+		createdDefault.Body.ID, "scheduled", baseCheckTime, false, int16(503), "unexpected_status",
+	)
+	failedDetail := performMonitorGet(
+		t, router, firstSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, createdDefault.Body.ID,
+	)
+	if failedDetail.Status != http.StatusOK || failedDetail.Body.State != monitor.StateDegraded ||
+		len(failedDetail.Body.RecentChecks) != 1 || failedDetail.Body.RecentChecks[0].JobID != failedJobID ||
+		failedDetail.Body.RecentChecks[0].Succeeded {
+		t.Fatalf("failed monitor detail is incorrect: %+v", failedDetail.Body)
+	}
+
+	manualJobIDs := make([]string, 0, 21)
+	for index := 1; index <= 21; index++ {
+		manualJobIDs = append(manualJobIDs, insertMonitorAPIResult(
+			t, ctx, pool, firstOwnership.Body.Organization.ID, firstOwnership.Body.Environment.ID,
+			createdDefault.Body.ID, "manual_test", baseCheckTime.Add(time.Duration(index)*time.Minute),
+			true, int16(204), nil,
+		))
+	}
+	boundedDetail := performMonitorGet(
+		t, router, firstSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, createdDefault.Body.ID,
+	)
+	if boundedDetail.Status != http.StatusOK || boundedDetail.Body.State != monitor.StateDegraded ||
+		len(boundedDetail.Body.RecentChecks) != 20 {
+		t.Fatalf("bounded monitor detail = status %d state %q checks %d", boundedDetail.Status,
+			boundedDetail.Body.State, len(boundedDetail.Body.RecentChecks))
+	}
+	if boundedDetail.Body.RecentChecks[0].JobID != manualJobIDs[20] ||
+		boundedDetail.Body.RecentChecks[19].JobID != manualJobIDs[1] {
+		t.Fatal("recent monitor results are not limited in stable newest-first order")
+	}
+
+	successJobID := insertMonitorAPIResult(
+		t, ctx, pool, firstOwnership.Body.Organization.ID, firstOwnership.Body.Environment.ID,
+		createdDefault.Body.ID, "scheduled", baseCheckTime.Add(22*time.Minute), true, int16(200), nil,
+	)
+	healthyDetail := performMonitorGet(
+		t, router, firstSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, createdDefault.Body.ID,
+	)
+	if healthyDetail.Status != http.StatusOK || healthyDetail.Body.State != monitor.StateHealthy ||
+		len(healthyDetail.Body.RecentChecks) != 20 || healthyDetail.Body.RecentChecks[0].JobID != successJobID {
+		t.Fatalf("healthy monitor detail is incorrect: %+v", healthyDetail.Body)
+	}
+	for _, result := range healthyDetail.Body.RecentChecks {
+		if result.JobID == failedJobID {
+			t.Fatal("bounded recent results included a row older than the newest 20")
+		}
+	}
+
+	foreignMonitor := performMonitorCreate(
+		t, router, secondSignup.Body.Session.Token, secondOwnership.Body.Environment.ID,
+		monitorCreateBody{Name: "Second tenant monitor", URL: "https://example.test/second"},
+	)
+	if foreignMonitor.Status != http.StatusCreated {
+		t.Fatalf("create second tenant monitor = %d: %s", foreignMonitor.Status, foreignMonitor.RawBody)
+	}
+
 	crossTenantList := performMonitorList(t, router, secondSignup.Body.Session.Token, firstOwnership.Body.Environment.ID)
 	if crossTenantList.Status != http.StatusNotFound || crossTenantList.ErrorCode != "environment_not_found" {
 		t.Fatalf("cross-tenant list = %d %q", crossTenantList.Status, crossTenantList.ErrorCode)
@@ -119,6 +195,39 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 	})
 	if crossTenantCreate.Status != http.StatusNotFound || crossTenantCreate.ErrorCode != "environment_not_found" {
 		t.Fatalf("cross-tenant create = %d %q", crossTenantCreate.Status, crossTenantCreate.ErrorCode)
+	}
+	crossTenantRead := performMonitorGet(
+		t, router, secondSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, createdDefault.Body.ID,
+	)
+	if crossTenantRead.Status != http.StatusNotFound || crossTenantRead.ErrorCode != "environment_not_found" {
+		t.Fatalf("cross-tenant read = %d %q", crossTenantRead.Status, crossTenantRead.ErrorCode)
+	}
+	foreignMonitorRead := performMonitorGet(
+		t, router, firstSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, foreignMonitor.Body.ID,
+	)
+	if foreignMonitorRead.Status != http.StatusNotFound || foreignMonitorRead.ErrorCode != "monitor_not_found" {
+		t.Fatalf("foreign monitor read = %d %q", foreignMonitorRead.Status, foreignMonitorRead.ErrorCode)
+	}
+	malformedMonitorRead := performMonitorGet(
+		t, router, firstSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, "not-a-monitor-id",
+	)
+	if malformedMonitorRead.Status != http.StatusNotFound || malformedMonitorRead.ErrorCode != "monitor_not_found" {
+		t.Fatalf("malformed monitor read = %d %q", malformedMonitorRead.Status, malformedMonitorRead.ErrorCode)
+	}
+
+	var stagingEnvironmentID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO environments (organization_id, project_id, name, environment_type)
+		VALUES ($1::text::uuid, $2::text::uuid, 'Staging', 'staging')
+		RETURNING id::text
+	`, firstOwnership.Body.Organization.ID, firstOwnership.Body.Project.ID).Scan(&stagingEnvironmentID); err != nil {
+		t.Fatalf("create same-organization environment: %v", err)
+	}
+	crossEnvironmentRead := performMonitorGet(
+		t, router, firstSignup.Body.Session.Token, stagingEnvironmentID, createdDefault.Body.ID,
+	)
+	if crossEnvironmentRead.Status != http.StatusNotFound || crossEnvironmentRead.ErrorCode != "monitor_not_found" {
+		t.Fatalf("cross-environment read = %d %q", crossEnvironmentRead.Status, crossEnvironmentRead.ErrorCode)
 	}
 
 	_, err = pool.Exec(ctx, `
@@ -131,6 +240,12 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 	viewerList := performMonitorList(t, router, secondSignup.Body.Session.Token, firstOwnership.Body.Environment.ID)
 	if viewerList.Status != http.StatusOK || len(viewerList.Monitors) != 2 {
 		t.Fatalf("viewer list = status %d count %d", viewerList.Status, len(viewerList.Monitors))
+	}
+	viewerDetail := performMonitorGet(
+		t, router, secondSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, createdDefault.Body.ID,
+	)
+	if viewerDetail.Status != http.StatusOK || viewerDetail.Body.State != monitor.StateHealthy {
+		t.Fatalf("viewer detail = status %d state %q", viewerDetail.Status, viewerDetail.Body.State)
 	}
 	viewerCreate := performMonitorCreate(t, router, secondSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, monitorCreateBody{
 		Name: "Viewer monitor", URL: "https://example.test/viewer",
@@ -244,12 +359,37 @@ type monitorBody struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
+type monitorCheckBody struct {
+	JobID                     string    `json:"job_id"`
+	JobType                   string    `json:"job_type"`
+	ScheduledAt               time.Time `json:"scheduled_at"`
+	StartedAt                 time.Time `json:"started_at"`
+	CompletedAt               time.Time `json:"completed_at"`
+	Succeeded                 bool      `json:"succeeded"`
+	StatusCode                *int16    `json:"status_code"`
+	ErrorCategory             *string   `json:"error_category"`
+	TotalDurationMicroseconds int64     `json:"total_duration_microseconds"`
+}
+
+type monitorDetailBody struct {
+	monitorBody
+	State        monitor.State      `json:"state"`
+	RecentChecks []monitorCheckBody `json:"recent_checks"`
+}
+
 type monitorAPIResult struct {
 	Status    int
 	RawBody   string
 	ErrorCode string
 	Body      monitorBody
 	Monitors  []monitorBody
+}
+
+type monitorGetAPIResult struct {
+	Status    int
+	RawBody   string
+	ErrorCode string
+	Body      monitorDetailBody
 }
 
 func performMonitorCreate(
@@ -283,6 +423,38 @@ func performMonitorList(t *testing.T, handler http.Handler, token, environmentID
 	)
 	request.Header.Set("Authorization", "Bearer "+token)
 	return executeMonitorRequest(t, handler, request)
+}
+
+func performMonitorGet(
+	t *testing.T,
+	handler http.Handler,
+	token string,
+	environmentID string,
+	monitorID string,
+) monitorGetAPIResult {
+	t.Helper()
+	request := httptest.NewRequest(
+		http.MethodGet,
+		fmt.Sprintf("/api/v1/environments/%s/monitors/%s", environmentID, monitorID),
+		nil,
+	)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	result := monitorGetAPIResult{Status: response.Code, RawBody: response.Body.String()}
+	if response.Code >= http.StatusBadRequest {
+		var errorBody httpapi.ErrorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &errorBody); err != nil {
+			t.Fatalf("decode monitor detail error: %v", err)
+		}
+		result.ErrorCode = errorBody.Error.Code
+		return result
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result.Body); err != nil {
+		t.Fatalf("decode monitor detail: %v", err)
+	}
+	return result
 }
 
 func executeMonitorRequest(t *testing.T, handler http.Handler, request *http.Request) monitorAPIResult {
@@ -346,4 +518,55 @@ func assertMonitorDatabaseDefaults(t *testing.T, ctx context.Context, pool *pgxp
 	if method != "GET" || interval != 300 || timeout != 5 || statusMin != 200 || statusMax != 299 {
 		t.Fatalf("database defaults = %s %d %d %d-%d", method, interval, timeout, statusMin, statusMax)
 	}
+}
+
+func insertMonitorAPIResult(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	organizationID string,
+	environmentID string,
+	monitorID string,
+	jobType string,
+	scheduledAt time.Time,
+	succeeded bool,
+	statusCode any,
+	errorCategory any,
+) string {
+	t.Helper()
+	var jobID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO health_checks (
+			job_id,
+			organization_id,
+			environment_id,
+			monitor_id,
+			job_type,
+			scheduled_at,
+			started_at,
+			completed_at,
+			succeeded,
+			status_code,
+			error_category,
+			total_duration_microseconds
+		)
+		VALUES (
+			gen_random_uuid(),
+			$1::text::uuid,
+			$2::text::uuid,
+			$3::text::uuid,
+			$4,
+			$5,
+			$5::timestamptz + INTERVAL '100 milliseconds',
+			$5::timestamptz + INTERVAL '600 milliseconds',
+			$6,
+			$7::smallint,
+			$8::text,
+			500000
+		)
+		RETURNING job_id::text
+	`, organizationID, environmentID, monitorID, jobType, scheduledAt, succeeded, statusCode, errorCategory).Scan(&jobID); err != nil {
+		t.Fatalf("insert monitor API result: %v", err)
+	}
+	return jobID
 }

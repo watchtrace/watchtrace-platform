@@ -1,5 +1,5 @@
-// Package monitor implements the initial tenant-scoped monitor configuration
-// API. It does not execute network requests.
+// Package monitor implements tenant-scoped monitor configuration and result
+// reads. It does not execute network requests.
 package monitor
 
 import (
@@ -36,6 +36,9 @@ var (
 	// ErrMonitorLimitReached indicates that the organization already has its
 	// documented maximum number of monitors.
 	ErrMonitorLimitReached = errors.New("organization monitor limit reached")
+	// ErrMonitorNotFound covers an unknown monitor and one outside the
+	// authorized organization and environment to avoid tenant enumeration.
+	ErrMonitorNotFound = errors.New("monitor not found")
 )
 
 var allowedIntervals = map[int32]struct{}{
@@ -76,7 +79,39 @@ type Monitor struct {
 	UpdatedAt         time.Time
 }
 
-// Service creates and lists tenant-scoped monitors.
+// State is the shared customer-facing monitor status vocabulary. P1-401 will
+// add the durable consecutive-failure state machine and the down transition.
+type State string
+
+const (
+	StateUnknown  State = "unknown"
+	StateHealthy  State = "healthy"
+	StateDegraded State = "degraded"
+	StateDown     State = "down"
+)
+
+// CheckResult is the bounded, body-free representation of one stored check.
+type CheckResult struct {
+	JobID                     string
+	JobType                   string
+	ScheduledAt               time.Time
+	StartedAt                 time.Time
+	CompletedAt               time.Time
+	Succeeded                 bool
+	StatusCode                *int16
+	ErrorCategory             *string
+	TotalDurationMicroseconds int64
+}
+
+// Detail combines monitor configuration with its current state and recent
+// stored results.
+type Detail struct {
+	Monitor       Monitor
+	State         State
+	RecentResults []CheckResult
+}
+
+// Service creates and reads tenant-scoped monitors.
 type Service struct {
 	db databaseConnection
 }
@@ -184,6 +219,79 @@ func (s *Service) List(ctx context.Context, userID, environmentID string) ([]Mon
 	return monitors, nil
 }
 
+// Get returns one monitor and at most 20 recent results. Authorization first
+// resolves the caller's organization from the environment; every subsequent
+// query remains qualified by organization, environment, and monitor.
+func (s *Service) Get(ctx context.Context, userID, environmentID, monitorID string) (Detail, error) {
+	if !uuidPattern.MatchString(userID) || !uuidPattern.MatchString(environmentID) {
+		return Detail{}, ErrEnvironmentNotFound
+	}
+	if !uuidPattern.MatchString(monitorID) {
+		return Detail{}, ErrMonitorNotFound
+	}
+
+	queries := database.New(s.db)
+	organizationID, err := queries.GetAccessibleEnvironmentOrganization(
+		ctx,
+		database.GetAccessibleEnvironmentOrganizationParams{
+			UserID:        userID,
+			EnvironmentID: environmentID,
+		},
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Detail{}, ErrEnvironmentNotFound
+	}
+	if err != nil {
+		return Detail{}, fmt.Errorf("authorize monitor read: %w", err)
+	}
+
+	storedMonitor, err := queries.GetEnvironmentMonitor(ctx, database.GetEnvironmentMonitorParams{
+		OrganizationID: organizationID,
+		EnvironmentID:  environmentID,
+		MonitorID:      monitorID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Detail{}, ErrMonitorNotFound
+	}
+	if err != nil {
+		return Detail{}, fmt.Errorf("get environment monitor: %w", err)
+	}
+
+	state := StateUnknown
+	latestSucceeded, err := queries.GetLatestScheduledMonitorResult(
+		ctx,
+		database.GetLatestScheduledMonitorResultParams{
+			OrganizationID: organizationID,
+			EnvironmentID:  environmentID,
+			MonitorID:      monitorID,
+		},
+	)
+	if err == nil {
+		state = stateFromLatestScheduledResult(latestSucceeded)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return Detail{}, fmt.Errorf("get latest scheduled monitor result: %w", err)
+	}
+
+	rows, err := queries.ListRecentMonitorResults(ctx, database.ListRecentMonitorResultsParams{
+		OrganizationID: organizationID,
+		EnvironmentID:  environmentID,
+		MonitorID:      monitorID,
+	})
+	if err != nil {
+		return Detail{}, fmt.Errorf("list recent monitor results: %w", err)
+	}
+	results := make([]CheckResult, 0, len(rows))
+	for _, row := range rows {
+		results = append(results, checkResultFromRow(row))
+	}
+
+	return Detail{
+		Monitor:       monitorFromGetRow(storedMonitor),
+		State:         state,
+		RecentResults: results,
+	}, nil
+}
+
 func normalizeCreateInput(userID, environmentID string, input CreateInput) (CreateInput, error) {
 	normalized := input
 	normalized.Name = strings.TrimSpace(input.Name)
@@ -251,5 +359,53 @@ func monitorFromListRow(row database.ListEnvironmentMonitorsRow) Monitor {
 		ExpectedStatusMax: row.ExpectedStatusMax,
 		CreatedAt:         row.CreatedAt.Time,
 		UpdatedAt:         row.UpdatedAt.Time,
+	}
+}
+
+func monitorFromGetRow(row database.GetEnvironmentMonitorRow) Monitor {
+	return Monitor{
+		ID:                row.ID,
+		OrganizationID:    row.OrganizationID,
+		EnvironmentID:     row.EnvironmentID,
+		Name:              row.Name,
+		TargetURL:         row.TargetUrl,
+		Method:            row.Method,
+		IntervalSeconds:   row.IntervalSeconds,
+		TimeoutSeconds:    row.TimeoutSeconds,
+		ExpectedStatusMin: row.ExpectedStatusMin,
+		ExpectedStatusMax: row.ExpectedStatusMax,
+		CreatedAt:         row.CreatedAt.Time,
+		UpdatedAt:         row.UpdatedAt.Time,
+	}
+}
+
+func stateFromLatestScheduledResult(succeeded bool) State {
+	if succeeded {
+		return StateHealthy
+	}
+	return StateDegraded
+}
+
+func checkResultFromRow(row database.ListRecentMonitorResultsRow) CheckResult {
+	var statusCode *int16
+	if row.StatusCode.Valid {
+		value := row.StatusCode.Int16
+		statusCode = &value
+	}
+	var errorCategory *string
+	if row.ErrorCategory.Valid {
+		value := row.ErrorCategory.String
+		errorCategory = &value
+	}
+	return CheckResult{
+		JobID:                     row.JobID,
+		JobType:                   row.JobType,
+		ScheduledAt:               row.ScheduledAt.Time,
+		StartedAt:                 row.StartedAt.Time,
+		CompletedAt:               row.CompletedAt.Time,
+		Succeeded:                 row.Succeeded,
+		StatusCode:                statusCode,
+		ErrorCategory:             errorCategory,
+		TotalDurationMicroseconds: row.TotalDurationMicroseconds,
 	}
 }

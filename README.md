@@ -127,10 +127,11 @@ project, and production environment atomically with `POST
 /api/v1/organizations`; see
 [`docs/OWNERSHIP_API.md`](docs/OWNERSHIP_API.md).
 
-Authenticated monitor creation and listing are available under
-`/api/v1/environments/{environmentId}/monitors`. See
-[`docs/MONITORS.md`](docs/MONITORS.md) for defaults, limits, tenant rules, and
-the destination-safety boundary applied before outbound connections.
+Authenticated monitor creation, listing, and bounded state/result reads are
+available under `/api/v1/environments/{environmentId}/monitors`. See
+[`docs/MONITORS.md`](docs/MONITORS.md) for defaults, limits, tenant rules,
+current-state semantics, and the destination-safety boundary applied before
+outbound connections.
 
 The initial scheduler stores due work durably in PostgreSQL and advances each
 monitor schedule in the same transaction. See

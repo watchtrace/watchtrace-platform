@@ -262,7 +262,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Mark the job completed in the same result transaction.
   - Do not save the response body.
 
-- [ ] **P1-108 — Add the first monitoring read API**
+- [x] **P1-108 — Add the first monitoring read API**
   - Return the monitor's current state and recent check results.
   - Scope every query to the authenticated organization and environment.
 

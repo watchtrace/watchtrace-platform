@@ -18,6 +18,7 @@ import (
 const (
 	monitorTestUserID        = "97867dd1-1283-4477-a9a5-289cac23151a"
 	monitorTestEnvironmentID = "3249c694-c0fc-4430-95d3-f12419307dd2"
+	monitorTestMonitorID     = "845d1e0d-933c-41a6-9af3-f479c757868b"
 )
 
 func TestCreateMonitorUsesAuthenticatedTenantAndReturnsConfiguration(t *testing.T) {
@@ -93,6 +94,75 @@ func TestListMonitorsReturnsNonNullArray(t *testing.T) {
 	}
 }
 
+func TestGetMonitorReturnsStateAndRecentChecks(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	checkedAt := time.Date(2026, 8, 8, 12, 1, 0, 0, time.UTC)
+	statusCode := int16(503)
+	errorCategory := "unexpected_status"
+	service := &fakeMonitorService{detail: monitor.Detail{
+		Monitor: monitor.Monitor{
+			ID:                monitorTestMonitorID,
+			OrganizationID:    "organization-id",
+			EnvironmentID:     monitorTestEnvironmentID,
+			Name:              "API",
+			TargetURL:         "https://example.test/health",
+			Method:            "GET",
+			IntervalSeconds:   300,
+			TimeoutSeconds:    5,
+			ExpectedStatusMin: 200,
+			ExpectedStatusMax: 299,
+			CreatedAt:         checkedAt.Add(-time.Hour),
+			UpdatedAt:         checkedAt.Add(-time.Hour),
+		},
+		State: monitor.StateDegraded,
+		RecentResults: []monitor.CheckResult{{
+			JobID:                     "job-id",
+			JobType:                   "scheduled",
+			ScheduledAt:               checkedAt.Add(-time.Second),
+			StartedAt:                 checkedAt.Add(-500 * time.Millisecond),
+			CompletedAt:               checkedAt,
+			Succeeded:                 false,
+			StatusCode:                &statusCode,
+			ErrorCategory:             &errorCategory,
+			TotalDurationMicroseconds: 500000,
+		}},
+	}}
+	router := NewRouter(Options{
+		Logger:         discardLogger(),
+		Authenticator:  &fakeSessionAuthenticator{user: auth.User{ID: monitorTestUserID}},
+		MonitorService: service,
+	})
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/environments/"+monitorTestEnvironmentID+"/monitors/"+monitorTestMonitorID,
+		nil,
+	)
+	request.Header.Set("Authorization", "Bearer token")
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if service.userID != monitorTestUserID || service.environmentID != monitorTestEnvironmentID ||
+		service.monitorID != monitorTestMonitorID {
+		t.Fatalf("service scope = user %q environment %q monitor %q", service.userID, service.environmentID, service.monitorID)
+	}
+	var body monitorDetailResponse
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode monitor detail: %v", err)
+	}
+	if body.ID != monitorTestMonitorID || body.State != monitor.StateDegraded || len(body.RecentChecks) != 1 {
+		t.Fatalf("unexpected monitor detail: %+v", body)
+	}
+	check := body.RecentChecks[0]
+	if check.Succeeded || check.StatusCode == nil || *check.StatusCode != 503 ||
+		check.ErrorCategory == nil || *check.ErrorCategory != errorCategory {
+		t.Fatalf("unexpected recent check: %+v", check)
+	}
+}
+
 func TestMonitorRoutesRequireSessionAndMapSafeErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -119,6 +189,7 @@ func TestMonitorRoutesRequireSessionAndMapSafeErrors(t *testing.T) {
 	}{
 		{name: "invalid input", err: monitor.ErrInvalidInput, wantStatus: http.StatusUnprocessableEntity, wantCode: "validation_failed"},
 		{name: "foreign environment", err: monitor.ErrEnvironmentNotFound, wantStatus: http.StatusNotFound, wantCode: "environment_not_found"},
+		{name: "foreign monitor", err: monitor.ErrMonitorNotFound, wantStatus: http.StatusNotFound, wantCode: "monitor_not_found"},
 		{name: "limit", err: monitor.ErrMonitorLimitReached, wantStatus: http.StatusConflict, wantCode: "monitor_limit_reached"},
 		{name: "internal", err: errors.New("secret database detail"), wantStatus: http.StatusInternalServerError, wantCode: "internal_error"},
 	} {
@@ -156,10 +227,12 @@ func TestMonitorRoutesRequireSessionAndMapSafeErrors(t *testing.T) {
 type fakeMonitorService struct {
 	created       monitor.Monitor
 	listed        []monitor.Monitor
+	detail        monitor.Detail
 	err           error
 	calls         int
 	userID        string
 	environmentID string
+	monitorID     string
 	input         monitor.CreateInput
 }
 
@@ -185,4 +258,17 @@ func (service *fakeMonitorService) List(
 	service.userID = userID
 	service.environmentID = environmentID
 	return service.listed, service.err
+}
+
+func (service *fakeMonitorService) Get(
+	_ context.Context,
+	userID string,
+	environmentID string,
+	monitorID string,
+) (monitor.Detail, error) {
+	service.calls++
+	service.userID = userID
+	service.environmentID = environmentID
+	service.monitorID = monitorID
+	return service.detail, service.err
 }

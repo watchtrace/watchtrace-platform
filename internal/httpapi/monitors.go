@@ -14,6 +14,7 @@ import (
 type MonitorService interface {
 	Create(context.Context, string, string, monitor.CreateInput) (monitor.Monitor, error)
 	List(context.Context, string, string) ([]monitor.Monitor, error)
+	Get(context.Context, string, string, string) (monitor.Detail, error)
 }
 
 type createMonitorRequest struct {
@@ -44,6 +45,24 @@ type monitorListResponse struct {
 	Monitors []monitorResponse `json:"monitors"`
 }
 
+type monitorDetailResponse struct {
+	monitorResponse
+	State        monitor.State          `json:"state"`
+	RecentChecks []monitorCheckResponse `json:"recent_checks"`
+}
+
+type monitorCheckResponse struct {
+	JobID                     string    `json:"job_id"`
+	JobType                   string    `json:"job_type"`
+	ScheduledAt               time.Time `json:"scheduled_at"`
+	StartedAt                 time.Time `json:"started_at"`
+	CompletedAt               time.Time `json:"completed_at"`
+	Succeeded                 bool      `json:"succeeded"`
+	StatusCode                *int16    `json:"status_code"`
+	ErrorCategory             *string   `json:"error_category"`
+	TotalDurationMicroseconds int64     `json:"total_duration_microseconds"`
+}
+
 func registerMonitorRoutes(
 	router *gin.Engine,
 	authenticator SessionAuthenticator,
@@ -58,6 +77,11 @@ func registerMonitorRoutes(
 		"/api/v1/environments/:environmentId/monitors",
 		requireAuthenticatedUser(authenticator),
 		listMonitors(service),
+	)
+	router.GET(
+		"/api/v1/environments/:environmentId/monitors/:monitorId",
+		requireAuthenticatedUser(authenticator),
+		getMonitor(service),
 	)
 }
 
@@ -127,6 +151,37 @@ func listMonitors(service MonitorService) gin.HandlerFunc {
 	}
 }
 
+func getMonitor(service MonitorService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+			return
+		}
+
+		detail, err := service.Get(
+			c.Request.Context(),
+			user.ID,
+			c.Param("environmentId"),
+			c.Param("monitorId"),
+		)
+		if err != nil {
+			respondMonitorError(c, err)
+			return
+		}
+
+		checks := make([]monitorCheckResponse, 0, len(detail.RecentResults))
+		for _, result := range detail.RecentResults {
+			checks = append(checks, monitorCheckToResponse(result))
+		}
+		c.JSON(http.StatusOK, monitorDetailResponse{
+			monitorResponse: monitorToResponse(detail.Monitor),
+			State:           detail.State,
+			RecentChecks:    checks,
+		})
+	}
+}
+
 func monitorToResponse(item monitor.Monitor) monitorResponse {
 	return monitorResponse{
 		ID:                item.ID,
@@ -144,12 +199,28 @@ func monitorToResponse(item monitor.Monitor) monitorResponse {
 	}
 }
 
+func monitorCheckToResponse(result monitor.CheckResult) monitorCheckResponse {
+	return monitorCheckResponse{
+		JobID:                     result.JobID,
+		JobType:                   result.JobType,
+		ScheduledAt:               result.ScheduledAt,
+		StartedAt:                 result.StartedAt,
+		CompletedAt:               result.CompletedAt,
+		Succeeded:                 result.Succeeded,
+		StatusCode:                result.StatusCode,
+		ErrorCategory:             result.ErrorCategory,
+		TotalDurationMicroseconds: result.TotalDurationMicroseconds,
+	}
+}
+
 func respondMonitorError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, monitor.ErrInvalidInput):
 		RespondError(c, http.StatusUnprocessableEntity, "validation_failed", "monitor configuration is invalid")
 	case errors.Is(err, monitor.ErrEnvironmentNotFound):
 		RespondError(c, http.StatusNotFound, "environment_not_found", "environment not found")
+	case errors.Is(err, monitor.ErrMonitorNotFound):
+		RespondError(c, http.StatusNotFound, "monitor_not_found", "monitor not found")
 	case errors.Is(err, monitor.ErrMonitorLimitReached):
 		RespondError(c, http.StatusConflict, "monitor_limit_reached", "organization monitor limit reached")
 	default:

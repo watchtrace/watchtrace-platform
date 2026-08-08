@@ -21,7 +21,8 @@ Current implementation documentation:
 - [`OWNERSHIP_API.md`](OWNERSHIP_API.md) defines the authenticated, atomic
   organization/project/production-environment creation contract.
 - [`MONITORS.md`](MONITORS.md) defines the initial tenant-scoped GET monitor
-  create/list API, defaults, bounds, and outbound destination-safety boundary.
+  create/list/detail API, current-state semantics, recent-result bounds, and
+  outbound destination-safety boundary.
 - [`SCHEDULER.md`](SCHEDULER.md) defines the initial durable PostgreSQL
   scheduler transaction and queue invariants.
 - [`CHECKER.md`](CHECKER.md) defines leased job claiming, guarded HTTP
