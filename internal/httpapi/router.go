@@ -12,6 +12,7 @@ import (
 type Options struct {
 	Logger         *slog.Logger
 	ReadinessCheck func(context.Context) error
+	AuthService    AuthenticationService
 }
 
 // NewRouter assembles the HTTP routes owned by the API command.
@@ -47,6 +48,9 @@ func NewRouter(options Options) *gin.Engine {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
+	if options.AuthService != nil {
+		registerAuthRoutes(router, options.AuthService)
+	}
 
 	router.NoRoute(func(c *gin.Context) {
 		RespondError(c, http.StatusNotFound, "not_found", "resource not found")

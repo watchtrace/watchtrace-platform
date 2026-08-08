@@ -12,6 +12,8 @@ the implementation workflow and task prompts can locate them consistently:
 
 Current implementation documentation:
 
+- [`AUTHENTICATION.md`](AUTHENTICATION.md) defines the minimal signup, login,
+  and short-lived local-development bearer session contract.
 - [`API_CONVENTIONS.md`](API_CONVENTIONS.md) defines request IDs, error
   envelopes, JSON validation, health endpoints, and safe request logging.
 - [`OWNERSHIP_SCHEMA.md`](OWNERSHIP_SCHEMA.md) documents the Phase 1 account

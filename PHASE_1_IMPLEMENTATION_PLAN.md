@@ -229,7 +229,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Use UUIDs or another documented non-sequential public identifier.
   - Store timestamps in UTC.
 
-- [ ] **P1-102 — Implement minimal signup and login**
+- [x] **P1-102 — Implement minimal signup and login**
   - Hash passwords with Argon2id or the approved bcrypt fallback.
   - Return a secure authenticated session suitable for local development.
   - Do not log passwords, tokens, or cookies.

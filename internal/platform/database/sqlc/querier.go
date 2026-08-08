@@ -11,7 +11,11 @@ import (
 )
 
 type Querier interface {
+	CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) error
+	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
 	GetDatabaseTime(ctx context.Context) (pgtype.Timestamptz, error)
+	GetUserByAuthSession(ctx context.Context, tokenDigest []byte) (GetUserByAuthSessionRow, error)
+	GetUserForLogin(ctx context.Context, email string) (GetUserForLoginRow, error)
 }
 
 var _ Querier = (*Queries)(nil)

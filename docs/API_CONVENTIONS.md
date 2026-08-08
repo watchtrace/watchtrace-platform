@@ -35,8 +35,10 @@ The initial standard codes are:
 | HTTP status | Code |
 |---:|---|
 | 400 | `invalid_request` |
+| 401 | `invalid_credentials` |
 | 404 | `not_found` |
 | 405 | `method_not_allowed` |
+| 409 | `email_in_use` |
 | 415 | `unsupported_media_type` |
 | 422 | `validation_failed` |
 | 500 | `internal_error` |
@@ -60,10 +62,9 @@ JSON endpoints use `Content-Type: application/json`. The shared decoder:
 | `GET /health/ready` | Registered readiness checks pass | 200 | 503 |
 
 Health responses set `Cache-Control: no-store`. A failed readiness check returns
-`{"status":"not_ready"}` without exposing its internal error. P1-513 will
-register database and essential-worker checks and complete shutdown-aware
-readiness; until then, the endpoint establishes the contract and reports the
-current API process as ready.
+`{"status":"not_ready"}` without exposing its internal error. The API command
+registers a PostgreSQL connectivity check. P1-513 will add essential-worker
+checks and complete shutdown-aware readiness.
 
 ## Safe request logging
 
@@ -72,3 +73,6 @@ status, duration, and component. They deliberately exclude raw URLs, query
 strings, request and response bodies, client IP addresses, authorization
 headers, cookies, and arbitrary headers. Panic logs include a stack trace but
 never include the recovered panic value.
+
+Authentication-specific request and response shapes are documented in
+[`AUTHENTICATION.md`](AUTHENTICATION.md).

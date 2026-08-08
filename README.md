@@ -118,6 +118,10 @@ error, health, and safe-logging conventions.
 Stop the process with `Ctrl+C`; the server stops accepting new connections and
 allows active requests up to 10 seconds to finish.
 
+Minimal signup and login are available under `/api/v1/auth`. See
+[`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for the request, response,
+and short-lived bearer-session contract.
+
 ## Local PostgreSQL
 
 The Compose service runs PostgreSQL 18.4 on `127.0.0.1:5432` and stores its
@@ -183,8 +187,8 @@ go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
 The current account and tenant tables and their isolation constraints are
 documented in [`docs/OWNERSHIP_SCHEMA.md`](docs/OWNERSHIP_SCHEMA.md).
 
-Run the clean-database migration and generated-query integration test on macOS
-or Linux with:
+Run the clean-database migration and PostgreSQL integration suite on macOS or
+Linux with:
 
 ```sh
 ./tests/integration/postgres-database.sh

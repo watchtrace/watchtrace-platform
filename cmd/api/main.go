@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/watchtrace/watchtrace-platform/internal/auth"
 	"github.com/watchtrace/watchtrace-platform/internal/httpapi"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/config"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/httpserver"
@@ -25,6 +27,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	databasePool, err := pgxpool.New(ctx, configuration.DatabaseURL)
+	if err != nil {
+		logger.Error("configure database connection")
+		os.Exit(1)
+	}
+	defer databasePool.Close()
+	authService := auth.NewService(databasePool)
+
 	listener, err := net.Listen("tcp", configuration.HTTPAddress)
 	if err != nil {
 		logger.Error("listen for API requests", "address", configuration.HTTPAddress, "error", err)
@@ -33,7 +43,11 @@ func main() {
 
 	logger.Info("API server listening", "address", listener.Addr())
 
-	server := httpserver.New(httpapi.NewRouter(httpapi.Options{Logger: logger}), configuration.ShutdownTimeout)
+	server := httpserver.New(httpapi.NewRouter(httpapi.Options{
+		Logger:         logger,
+		ReadinessCheck: databasePool.Ping,
+		AuthService:    authService,
+	}), configuration.ShutdownTimeout)
 	if err := server.Serve(ctx, listener); err != nil {
 		logger.Error("API server stopped", "error", err)
 		os.Exit(1)
