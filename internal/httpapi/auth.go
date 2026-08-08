@@ -16,6 +16,7 @@ type AuthenticationService interface {
 	Login(context.Context, string, string) (auth.Result, error)
 	Refresh(context.Context, string) (auth.Result, error)
 	Logout(context.Context, string, bool) error
+	VerifyEmail(context.Context, string) (auth.User, error)
 }
 
 const refreshTokenCookieName = "watchtrace_refresh"
@@ -27,6 +28,14 @@ type credentialsRequest struct {
 
 type logoutRequest struct {
 	AllSessions bool `json:"all_sessions"`
+}
+
+type verifyEmailRequest struct {
+	Token string `json:"token" binding:"required,max=128"`
+}
+
+type verifyEmailResponse struct {
+	User authUserResponse `json:"user"`
 }
 
 type authResponse struct {
@@ -51,6 +60,28 @@ func registerAuthRoutes(router *gin.Engine, service AuthenticationService, secur
 	router.POST("/api/v1/auth/login", authEndpoint(service.Login, http.StatusOK, secureCookies))
 	router.POST("/api/v1/auth/refresh", refreshAuth(service, secureCookies))
 	router.POST("/api/v1/auth/logout", logoutAuth(service, secureCookies))
+	router.POST("/api/v1/auth/verify-email", verifyEmailAuth(service))
+}
+
+func verifyEmailAuth(service AuthenticationService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		var request verifyEmailRequest
+		if !DecodeJSON(c, &request) {
+			return
+		}
+
+		verified, err := service.VerifyEmail(c.Request.Context(), request.Token)
+		if err != nil {
+			respondAuthError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, verifyEmailResponse{User: authUserResponse{
+			ID:            verified.ID,
+			Email:         verified.Email,
+			EmailVerified: verified.EmailVerified,
+		}})
+	}
 }
 
 func logoutAuth(service AuthenticationService, secureCookies bool) gin.HandlerFunc {
@@ -173,6 +204,8 @@ func respondAuthError(c *gin.Context, err error) {
 		RespondError(c, http.StatusUnauthorized, "invalid_credentials", "email or password is incorrect")
 	case errors.Is(err, auth.ErrInvalidRefreshToken):
 		RespondError(c, http.StatusUnauthorized, "invalid_refresh_token", "a valid refresh token is required")
+	case errors.Is(err, auth.ErrInvalidVerificationToken):
+		RespondError(c, http.StatusBadRequest, "invalid_verification_token", "a valid unused email verification token is required")
 	default:
 		RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 	}

@@ -3,6 +3,44 @@ INSERT INTO users (email, password_hash)
 VALUES ($1, $2)
 RETURNING id::text AS id, email, (email_verified_at IS NOT NULL)::boolean AS email_verified;
 
+-- name: CreateEmailVerificationToken :exec
+INSERT INTO user_action_tokens (user_id, purpose, token_digest, expires_at)
+VALUES (
+    sqlc.arg(user_id)::text::uuid,
+    'email_verification',
+    sqlc.arg(token_digest),
+    sqlc.arg(expires_at)
+);
+
+-- name: LockEmailVerificationToken :one
+SELECT
+    user_action_tokens.id::text AS id,
+    user_action_tokens.expires_at,
+    user_action_tokens.used_at
+FROM user_action_tokens
+WHERE user_action_tokens.purpose = 'email_verification'
+  AND user_action_tokens.token_digest = sqlc.arg(token_digest)
+FOR UPDATE;
+
+-- name: CompleteEmailVerification :one
+WITH consumed AS (
+    UPDATE user_action_tokens
+    SET used_at = CURRENT_TIMESTAMP
+    WHERE id = sqlc.arg(token_id)::text::uuid
+      AND purpose = 'email_verification'
+      AND used_at IS NULL
+    RETURNING user_id
+)
+UPDATE users
+SET email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP),
+    updated_at = CURRENT_TIMESTAMP
+FROM consumed
+WHERE users.id = consumed.user_id
+RETURNING
+    users.id::text AS id,
+    users.email,
+    (users.email_verified_at IS NOT NULL)::boolean AS email_verified;
+
 -- name: GetUserForLogin :one
 SELECT
     id::text AS id,

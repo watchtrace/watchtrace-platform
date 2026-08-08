@@ -28,6 +28,11 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if configuration.Production {
 		t.Fatal("default development environment enabled production cookies")
 	}
+	if configuration.VerificationSMTPAddress != defaultVerificationSMTP ||
+		configuration.VerificationFrom != defaultVerificationFrom ||
+		configuration.VerificationURL != defaultVerificationURL {
+		t.Fatalf("unexpected verification defaults: %+v", configuration)
+	}
 }
 
 func TestLoadReadsEnvironment(t *testing.T) {
@@ -35,6 +40,9 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	t.Setenv(httpAddressEnvironment, "[::1]:9090")
 	t.Setenv(shutdownTimeoutEnvironment, "25s")
 	t.Setenv(deploymentEnvironment, "production")
+	t.Setenv(verificationSMTPEnvironment, "127.0.0.1:2025")
+	t.Setenv(verificationFromEnvironment, "local@example.test")
+	t.Setenv(verificationURLEnvironment, "http://localhost:3001/verify")
 
 	configuration, err := Load()
 	if err != nil {
@@ -49,6 +57,11 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	}
 	if !configuration.Production {
 		t.Fatal("production environment did not enable production cookie security")
+	}
+	if configuration.VerificationSMTPAddress != "127.0.0.1:2025" ||
+		configuration.VerificationFrom != "local@example.test" ||
+		configuration.VerificationURL != "http://localhost:3001/verify" {
+		t.Fatalf("verification configuration was not loaded: %+v", configuration)
 	}
 }
 
@@ -151,6 +164,14 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 				deploymentEnvironment:  "staging",
 			},
 			wantMessage: "WATCHTRACE_ENVIRONMENT must be development or production",
+		},
+		{
+			name: "empty verification sender",
+			values: map[string]string{
+				databaseURLEnvironment:      validDatabaseURL,
+				verificationFromEnvironment: " ",
+			},
+			wantMessage: "email verification settings must not be empty",
 		},
 	}
 

@@ -20,6 +20,7 @@ const (
 	maximumPasswordBytes = 1024
 	accessTokenLifetime  = 15 * time.Minute
 	refreshTokenLifetime = 30 * 24 * time.Hour
+	verificationLifetime = 24 * time.Hour
 	cleanupAccessBatch   = 500
 	cleanupFamilyBatch   = 100
 )
@@ -43,6 +44,9 @@ var (
 	// ErrInvalidRefreshToken deliberately covers malformed, unknown, expired,
 	// revoked, and reused refresh tokens.
 	ErrInvalidRefreshToken = errors.New("invalid refresh token")
+	// ErrInvalidVerificationToken deliberately covers malformed, unknown,
+	// expired, and already used email-verification tokens.
+	ErrInvalidVerificationToken = errors.New("invalid email verification token")
 )
 
 type databaseConnection interface {
@@ -75,15 +79,16 @@ type Result struct {
 
 // Service implements signup, login, rotation, and access-token lookup.
 type Service struct {
-	db databaseConnection
+	db                 databaseConnection
+	verificationSender VerificationSender
 }
 
 // NewService constructs an authentication service backed by PostgreSQL.
-func NewService(db databaseConnection) *Service {
+func NewService(db databaseConnection, sender VerificationSender) *Service {
 	// Warm the fixed dummy hash once so unknown-account login follows the same
 	// single Argon2id verification path as a wrong password for a known user.
 	_ = dummyPasswordHash()
-	return &Service{db: db}
+	return &Service{db: db, verificationSender: sender}
 }
 
 // Signup creates one user and one access/refresh token family atomically.
@@ -126,6 +131,23 @@ func (s *Service) Signup(ctx context.Context, email, password string) (Result, e
 	if err := persistNewTokenFamily(ctx, queries, created.ID, tokens); err != nil {
 		return Result{}, fmt.Errorf("create signup session: %w", err)
 	}
+	verificationToken, verificationDigest, verificationExpiresAt, err := issueVerificationToken()
+	if err != nil {
+		return Result{}, err
+	}
+	if err := queries.CreateEmailVerificationToken(ctx, database.CreateEmailVerificationTokenParams{
+		UserID:      created.ID,
+		TokenDigest: verificationDigest,
+		ExpiresAt:   timestamp(verificationExpiresAt),
+	}); err != nil {
+		return Result{}, fmt.Errorf("create email verification token: %w", err)
+	}
+	if s.verificationSender == nil {
+		return Result{}, errors.New("email verification sender is unavailable")
+	}
+	if err := s.verificationSender.SendVerification(ctx, created.Email, verificationToken); err != nil {
+		return Result{}, fmt.Errorf("deliver email verification: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, fmt.Errorf("commit signup transaction: %w", err)
 	}
@@ -138,6 +160,55 @@ func (s *Service) Signup(ctx context.Context, email, password string) (Result, e
 		},
 		Session: sessionFromTokenPair(tokens),
 	}, nil
+}
+
+// VerifyEmail consumes one valid unexpired verification token and marks the
+// associated user verified in the same transaction.
+func (s *Service) VerifyEmail(ctx context.Context, token string) (User, error) {
+	if !validVerificationToken(token) {
+		return User{}, ErrInvalidVerificationToken
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return User{}, fmt.Errorf("begin email verification transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	queries := database.New(tx)
+	stored, err := queries.LockEmailVerificationToken(ctx, tokenDigest(token))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrInvalidVerificationToken
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("lock email verification token: %w", err)
+	}
+	if stored.UsedAt.Valid || !stored.ExpiresAt.Valid ||
+		!stored.ExpiresAt.Time.After(time.Now().UTC()) {
+		return User{}, ErrInvalidVerificationToken
+	}
+
+	verified, err := queries.CompleteEmailVerification(ctx, stored.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrInvalidVerificationToken
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("complete email verification: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return User{}, fmt.Errorf("commit email verification: %w", err)
+	}
+	return User{ID: verified.ID, Email: verified.Email, EmailVerified: verified.EmailVerified}, nil
+}
+
+func issueVerificationToken() (string, []byte, time.Time, error) {
+	token, digest, err := newVerificationToken()
+	if err != nil {
+		return "", nil, time.Time{}, err
+	}
+	expiresAt := time.Now().UTC().Truncate(time.Microsecond).Add(verificationLifetime)
+	return token, digest, expiresAt, nil
 }
 
 // Login verifies credentials with a constant-work password check and issues a

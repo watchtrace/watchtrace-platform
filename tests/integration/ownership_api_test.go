@@ -41,7 +41,7 @@ func TestDefaultOwnershipAPIWithPostgreSQL(t *testing.T) {
 		deleteOwnershipTestData(t, cleanupCtx, pool, emails, slugs)
 	})
 
-	authService := auth.NewService(pool)
+	authService := auth.NewService(pool, &recordingVerificationSender{})
 	ownershipService := ownership.NewService(pool)
 	var logs bytes.Buffer
 	router := httpapi.NewRouter(httpapi.Options{
@@ -336,6 +336,12 @@ func deleteOwnershipTestData(
 		if _, err := pool.Exec(ctx, statement, slugs); err != nil {
 			t.Fatalf("delete ownership test data: %v", err)
 		}
+	}
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM user_action_tokens
+		WHERE user_id IN (SELECT id FROM users WHERE email = ANY($1::text[]))
+	`, emails); err != nil {
+		t.Fatalf("delete ownership test user action tokens: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 		DELETE FROM refresh_tokens

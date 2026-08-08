@@ -35,6 +35,7 @@ The initial standard codes are:
 | HTTP status | Code |
 |---:|---|
 | 400 | `invalid_request` |
+| 400 | `invalid_verification_token` |
 | 401 | `invalid_credentials` |
 | 401 | `invalid_refresh_token` |
 | 401 | `invalid_session` |

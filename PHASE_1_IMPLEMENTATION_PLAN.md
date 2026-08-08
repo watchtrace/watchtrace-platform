@@ -301,7 +301,7 @@ Complete the identity and ownership features required for a safe multi-user beta
   - Support current-session and all-session logout.
   - Clean up expired and revoked session records.
 
-- [ ] **P1-203 — Implement email verification**
+- [x] **P1-203 — Implement email verification**
   - Store only a digest of the verification token.
   - Expire tokens and prevent reuse.
   - Provide a safe local email-development path.

@@ -223,6 +223,56 @@ func TestLogoutEndpointRetainsCookieWhenRevocationFails(t *testing.T) {
 	}
 }
 
+func TestVerifyEmailEndpointReturnsOnlySafeUserState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const verificationToken = "wt_verify_safe-test-token"
+	service := &fakeAuthenticationService{verifiedUser: auth.User{
+		ID:            "verified-user-id",
+		Email:         "verified@example.test",
+		EmailVerified: true,
+	}}
+	router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/verify-email",
+		strings.NewReader(`{"token":"`+verificationToken+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || service.verificationToken != verificationToken {
+		t.Fatalf("verification response = %d token=%q", response.Code, service.verificationToken)
+	}
+	var body verifyEmailResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode verification response: %v", err)
+	}
+	if !body.User.EmailVerified || body.User.Email != service.verifiedUser.Email {
+		t.Fatalf("unexpected verification body: %+v", body)
+	}
+	if strings.Contains(response.Body.String(), verificationToken) {
+		t.Fatal("verification response exposed the token")
+	}
+}
+
+func TestVerifyEmailEndpointMapsInvalidTokenSafely(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeAuthenticationService{err: auth.ErrInvalidVerificationToken}
+	router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/verify-email",
+		strings.NewReader(`{"token":"wt_verify_invalid-test-token"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("verification status = %d", response.Code)
+	}
+	if body := decodeErrorResponse(t, response); body.Error.Code != "invalid_verification_token" {
+		t.Fatalf("verification error code = %q", body.Error.Code)
+	}
+}
+
 func TestAuthEndpointsMapErrorsWithoutLeakingDetails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -289,12 +339,14 @@ func TestAuthEndpointValidatesCredentialsBeforeService(t *testing.T) {
 }
 
 type fakeAuthenticationService struct {
-	result       auth.Result
-	err          error
-	calls        int
-	refreshToken string
-	logoutToken  string
-	logoutAll    bool
+	result            auth.Result
+	err               error
+	calls             int
+	refreshToken      string
+	logoutToken       string
+	logoutAll         bool
+	verifiedUser      auth.User
+	verificationToken string
 }
 
 func (service *fakeAuthenticationService) Signup(context.Context, string, string) (auth.Result, error) {
@@ -318,4 +370,10 @@ func (service *fakeAuthenticationService) Logout(_ context.Context, refreshToken
 	service.logoutToken = refreshToken
 	service.logoutAll = allSessions
 	return service.err
+}
+
+func (service *fakeAuthenticationService) VerifyEmail(_ context.Context, token string) (auth.User, error) {
+	service.calls++
+	service.verificationToken = token
+	return service.verifiedUser, service.err
 }

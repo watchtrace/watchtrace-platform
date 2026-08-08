@@ -11,6 +11,39 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const completeEmailVerification = `-- name: CompleteEmailVerification :one
+WITH consumed AS (
+    UPDATE user_action_tokens
+    SET used_at = CURRENT_TIMESTAMP
+    WHERE id = $1::text::uuid
+      AND purpose = 'email_verification'
+      AND used_at IS NULL
+    RETURNING user_id
+)
+UPDATE users
+SET email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP),
+    updated_at = CURRENT_TIMESTAMP
+FROM consumed
+WHERE users.id = consumed.user_id
+RETURNING
+    users.id::text AS id,
+    users.email,
+    (users.email_verified_at IS NOT NULL)::boolean AS email_verified
+`
+
+type CompleteEmailVerificationRow struct {
+	ID            string
+	Email         string
+	EmailVerified bool
+}
+
+func (q *Queries) CompleteEmailVerification(ctx context.Context, tokenID string) (CompleteEmailVerificationRow, error) {
+	row := q.db.QueryRow(ctx, completeEmailVerification, tokenID)
+	var i CompleteEmailVerificationRow
+	err := row.Scan(&i.ID, &i.Email, &i.EmailVerified)
+	return i, err
+}
+
 const createAuthSession = `-- name: CreateAuthSession :exec
 INSERT INTO auth_sessions (user_id, family_id, token_digest, expires_at)
 VALUES (
@@ -35,6 +68,27 @@ func (q *Queries) CreateAuthSession(ctx context.Context, arg CreateAuthSessionPa
 		arg.TokenDigest,
 		arg.ExpiresAt,
 	)
+	return err
+}
+
+const createEmailVerificationToken = `-- name: CreateEmailVerificationToken :exec
+INSERT INTO user_action_tokens (user_id, purpose, token_digest, expires_at)
+VALUES (
+    $1::text::uuid,
+    'email_verification',
+    $2,
+    $3
+)
+`
+
+type CreateEmailVerificationTokenParams struct {
+	UserID      string
+	TokenDigest []byte
+	ExpiresAt   pgtype.Timestamptz
+}
+
+func (q *Queries) CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) error {
+	_, err := q.db.Exec(ctx, createEmailVerificationToken, arg.UserID, arg.TokenDigest, arg.ExpiresAt)
 	return err
 }
 
@@ -216,6 +270,30 @@ func (q *Queries) GetUserForLogin(ctx context.Context, email string) (GetUserFor
 		&i.PasswordHash,
 		&i.EmailVerified,
 	)
+	return i, err
+}
+
+const lockEmailVerificationToken = `-- name: LockEmailVerificationToken :one
+SELECT
+    user_action_tokens.id::text AS id,
+    user_action_tokens.expires_at,
+    user_action_tokens.used_at
+FROM user_action_tokens
+WHERE user_action_tokens.purpose = 'email_verification'
+  AND user_action_tokens.token_digest = $1
+FOR UPDATE
+`
+
+type LockEmailVerificationTokenRow struct {
+	ID        string
+	ExpiresAt pgtype.Timestamptz
+	UsedAt    pgtype.Timestamptz
+}
+
+func (q *Queries) LockEmailVerificationToken(ctx context.Context, tokenDigest []byte) (LockEmailVerificationTokenRow, error) {
+	row := q.db.QueryRow(ctx, lockEmailVerificationToken, tokenDigest)
+	var i LockEmailVerificationTokenRow
+	err := row.Scan(&i.ID, &i.ExpiresAt, &i.UsedAt)
 	return i, err
 }
 

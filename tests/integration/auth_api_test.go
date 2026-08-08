@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -44,7 +45,7 @@ func TestSignupAndLoginAPIWithPostgreSQL(t *testing.T) {
 		deleteAuthTestUser(t, cleanupCtx, pool, email)
 	})
 
-	service := auth.NewService(pool)
+	service := auth.NewService(pool, &recordingVerificationSender{})
 	var logs bytes.Buffer
 	router := httpapi.NewRouter(httpapi.Options{
 		Logger:        slog.New(slog.NewJSONHandler(&logs, nil)),
@@ -249,7 +250,7 @@ func TestLogoutRevocationAndSessionCleanupWithPostgreSQL(t *testing.T) {
 		deleteAuthTestUser(t, cleanupCtx, pool, email)
 	})
 
-	service := auth.NewService(pool)
+	service := auth.NewService(pool, &recordingVerificationSender{})
 	var logs bytes.Buffer
 	router := httpapi.NewRouter(httpapi.Options{
 		Logger:        slog.New(slog.NewJSONHandler(&logs, nil)),
@@ -359,6 +360,126 @@ func TestLogoutRevocationAndSessionCleanupWithPostgreSQL(t *testing.T) {
 	}
 }
 
+func TestEmailVerificationWithPostgreSQL(t *testing.T) {
+	databaseURL := os.Getenv("WATCHTRACE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("WATCHTRACE_TEST_DATABASE_URL is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL connection pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	emails := []string{"verify-valid@example.test", "verify-expired@example.test", "verify-delivery-failure@example.test"}
+	for _, email := range emails {
+		deleteAuthTestUser(t, ctx, pool, email)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		for _, email := range emails {
+			deleteAuthTestUser(t, cleanupCtx, pool, email)
+		}
+	})
+
+	delivery := &recordingVerificationSender{}
+	service := auth.NewService(pool, delivery)
+	var logs bytes.Buffer
+	router := httpapi.NewRouter(httpapi.Options{
+		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
+		AuthService: service,
+	})
+
+	validSignup := performAuthRequest(t, router, "/api/v1/auth/signup", emails[0], "P1-203-valid-password!")
+	if validSignup.Status != http.StatusCreated || len(delivery.tokens) != 1 {
+		t.Fatalf("verification signup = %d deliveries=%d", validSignup.Status, len(delivery.tokens))
+	}
+	validToken := delivery.tokens[0]
+	if strings.Contains(validSignup.RawBody, validToken) || strings.Contains(logs.String(), validToken) {
+		t.Fatal("signup response or logs exposed the verification token")
+	}
+
+	var storedDigest []byte
+	var storedExpiry time.Time
+	var usedAt *time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT token_digest, expires_at, used_at
+		FROM user_action_tokens
+		WHERE user_id = $1::text::uuid AND purpose = 'email_verification'
+	`, validSignup.Body.User.ID).Scan(&storedDigest, &storedExpiry, &usedAt); err != nil {
+		t.Fatalf("inspect verification token: %v", err)
+	}
+	if !bytes.Equal(storedDigest, tokenSHA256(validToken)) ||
+		bytes.Contains(storedDigest, []byte(validToken)) ||
+		storedExpiry.Before(time.Now().Add(23*time.Hour)) || usedAt != nil {
+		t.Fatalf("unsafe stored verification token: expiry=%s used=%v", storedExpiry, usedAt)
+	}
+
+	verified := performVerificationRequest(t, router, validToken)
+	if verified.Status != http.StatusOK || !verified.Body.User.EmailVerified ||
+		verified.Body.User.Email != emails[0] {
+		t.Fatalf("verification response = %d %s", verified.Status, verified.RawBody)
+	}
+	if strings.Contains(verified.RawBody, validToken) || strings.Contains(logs.String(), validToken) {
+		t.Fatal("verification response or logs exposed the token")
+	}
+	reused := performVerificationRequest(t, router, validToken)
+	assertAuthAPIError(t, reused, http.StatusBadRequest, "invalid_verification_token")
+
+	expiredSignup := performAuthRequest(t, router, "/api/v1/auth/signup", emails[1], "P1-203-expired-password!")
+	if expiredSignup.Status != http.StatusCreated || len(delivery.tokens) != 2 {
+		t.Fatalf("expired-token signup = %d deliveries=%d", expiredSignup.Status, len(delivery.tokens))
+	}
+	expiredToken := delivery.tokens[1]
+	if _, err := pool.Exec(ctx, `
+		UPDATE user_action_tokens
+		SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 days',
+		    expires_at = CURRENT_TIMESTAMP - INTERVAL '1 day'
+		WHERE token_digest = $1
+	`, tokenSHA256(expiredToken)); err != nil {
+		t.Fatalf("expire verification token: %v", err)
+	}
+	expired := performVerificationRequest(t, router, expiredToken)
+	assertAuthAPIError(t, expired, http.StatusBadRequest, "invalid_verification_token")
+
+	failingService := auth.NewService(pool, &recordingVerificationSender{err: errors.New("local SMTP unavailable")})
+	failingRouter := httpapi.NewRouter(httpapi.Options{Logger: discardIntegrationLogger(), AuthService: failingService})
+	failedSignup := performAuthRequest(t, failingRouter, "/api/v1/auth/signup", emails[2], "P1-203-failure-password!")
+	assertAuthAPIError(t, failedSignup, http.StatusInternalServerError, "internal_error")
+	var strandedRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE email = $1`, emails[2]).Scan(&strandedRows); err != nil {
+		t.Fatalf("inspect failed verification delivery: %v", err)
+	}
+	if strandedRows != 0 {
+		t.Fatal("failed verification delivery committed a stranded account")
+	}
+}
+
+func TestEmailVerificationSchemaRollback(t *testing.T) {
+	if os.Getenv("WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT") != "1" {
+		t.Skip("WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT is not set")
+	}
+
+	ctx, tx := beginOwnershipSchemaTest(t)
+	var relationName *string
+	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.user_action_tokens')::text`).Scan(&relationName); err != nil {
+		t.Fatalf("inspect rolled-back user_action_tokens table: %v", err)
+	}
+	if relationName != nil {
+		t.Fatal("user_action_tokens still exists after email-verification rollback")
+	}
+	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.refresh_tokens')::text`).Scan(&relationName); err != nil {
+		t.Fatalf("inspect preserved refresh_tokens table: %v", err)
+	}
+	if relationName == nil {
+		t.Fatal("preceding refresh_tokens table is absent after email-verification rollback")
+	}
+}
+
 func TestAuthSchemaRollback(t *testing.T) {
 	if os.Getenv("WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT") != "1" {
 		t.Skip("WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT is not set")
@@ -401,6 +522,18 @@ type authAPIResult struct {
 			ExpiresAt time.Time `json:"expires_at"`
 		} `json:"session"`
 	}
+}
+
+type recordingVerificationSender struct {
+	recipients []string
+	tokens     []string
+	err        error
+}
+
+func (sender *recordingVerificationSender) SendVerification(_ context.Context, recipient, token string) error {
+	sender.recipients = append(sender.recipients, recipient)
+	sender.tokens = append(sender.tokens, token)
+	return sender.err
 }
 
 func performAuthRequest(t *testing.T, handler http.Handler, path, email, password string) authAPIResult {
@@ -497,6 +630,36 @@ func performRefreshRequest(t *testing.T, handler http.Handler, refreshToken stri
 	return result
 }
 
+func performVerificationRequest(t *testing.T, handler http.Handler, token string) authAPIResult {
+	t.Helper()
+	requestBody, err := json.Marshal(map[string]string{"token": token})
+	if err != nil {
+		t.Fatalf("encode email verification request: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/verify-email", bytes.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	result := authAPIResult{Status: response.Code, RawBody: response.Body.String()}
+	if response.Code >= http.StatusBadRequest {
+		var errorBody httpapi.ErrorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &errorBody); err != nil {
+			t.Fatalf("decode email verification error: %v", err)
+		}
+		result.ErrorCode = errorBody.Error.Code
+		result.ErrorMessage = errorBody.Error.Message
+		return result
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result.Body); err != nil {
+		t.Fatalf("decode email verification response: %v", err)
+	}
+	return result
+}
+
+func discardIntegrationLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func performLogoutRequest(t *testing.T, handler http.Handler, refreshToken string, allSessions bool) authAPIResult {
 	t.Helper()
 	requestBody, err := json.Marshal(map[string]bool{"all_sessions": allSessions})
@@ -557,6 +720,12 @@ func requireRefreshCookie(t *testing.T, result authAPIResult, secure bool) strin
 
 func deleteAuthTestUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool, email string) {
 	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM user_action_tokens
+		WHERE user_id IN (SELECT id FROM users WHERE email = $1)
+	`, email); err != nil {
+		t.Fatalf("delete test user action tokens: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `
 		DELETE FROM refresh_tokens
 		WHERE user_id IN (SELECT id FROM users WHERE email = $1)

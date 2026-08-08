@@ -14,8 +14,10 @@ type Querier interface {
 	AdvanceMonitorSchedule(ctx context.Context, arg AdvanceMonitorScheduleParams) (int64, error)
 	ClaimPendingCheckJob(ctx context.Context, arg ClaimPendingCheckJobParams) (ClaimPendingCheckJobRow, error)
 	CompleteCheckJob(ctx context.Context, arg CompleteCheckJobParams) (int64, error)
+	CompleteEmailVerification(ctx context.Context, tokenID string) (CompleteEmailVerificationRow, error)
 	CountOrganizationMonitors(ctx context.Context, organizationID string) (int64, error)
 	CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) error
+	CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) error
 	CreateMonitor(ctx context.Context, arg CreateMonitorParams) (CreateMonitorRow, error)
 	CreateOrganization(ctx context.Context, arg CreateOrganizationParams) (CreateOrganizationRow, error)
 	CreateOwnerMembership(ctx context.Context, arg CreateOwnerMembershipParams) error
@@ -39,6 +41,7 @@ type Querier interface {
 	ListRecentMonitorResults(ctx context.Context, arg ListRecentMonitorResultsParams) ([]ListRecentMonitorResultsRow, error)
 	LockCheckJobForCompletion(ctx context.Context, jobID string) (LockCheckJobForCompletionRow, error)
 	LockDueMonitors(ctx context.Context, batchSize int32) ([]LockDueMonitorsRow, error)
+	LockEmailVerificationToken(ctx context.Context, tokenDigest []byte) (LockEmailVerificationTokenRow, error)
 	LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (string, error)
 	LockRefreshTokenForRotation(ctx context.Context, tokenDigest []byte) (LockRefreshTokenForRotationRow, error)
 	MarkRefreshTokenRotated(ctx context.Context, arg MarkRefreshTokenRotatedParams) (int64, error)

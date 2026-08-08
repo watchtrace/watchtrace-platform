@@ -59,6 +59,26 @@ refresh family for the user. Successful logout returns HTTP 204 and clears the
 refresh cookie. Missing, malformed, unknown, expired, and already revoked
 cookies are idempotent successes and do not reveal session validity.
 
+### `POST /api/v1/auth/verify-email`
+
+Signup creates a random 256-bit verification token with a 24-hour lifetime and
+delivers it by email. The raw token is never returned by the API, written to
+logs, or stored in PostgreSQL; only its SHA-256 digest is stored.
+
+The verification endpoint accepts only `application/json`:
+
+```json
+{
+  "token": "wt_verify_<opaque-value>"
+}
+```
+
+A valid token atomically sets the user's verification time and marks the token
+used. Success returns HTTP 200 with the safe `user` object and
+`email_verified: true`. Missing, malformed, unknown, expired, and already used
+tokens all return the same HTTP 400 `invalid_verification_token` response.
+Tokens cannot be reused.
+
 ## Tokens and cookies
 
 Successful signup, login, and refresh responses include a short-lived access
@@ -105,8 +125,13 @@ In addition to the shared API errors:
 | 401 | `invalid_credentials` | Email or password did not authenticate. |
 | 401 | `invalid_refresh_token` | The refresh session could not be rotated. |
 | 401 | `invalid_session` | A protected route received no valid bearer session. |
+| 400 | `invalid_verification_token` | The email-verification token is invalid, expired, or used. |
 | 409 | `email_in_use` | The normalized signup email already exists. |
 | 422 | `validation_failed` | Email or password failed validation. |
 
-Email verification and password reset remain assigned to their later Phase 1
-tasks.
+For local development, Docker Compose runs Mailpit with SMTP on
+`127.0.0.1:1025` and its mailbox UI on `http://127.0.0.1:8025`. The built-in
+adapter refuses non-loopback SMTP servers and non-loopback verification URLs,
+preventing this plaintext development path from being mistaken for production
+delivery. OCI/provider email delivery remains assigned to P1-406. Password
+reset remains assigned to P1-204.

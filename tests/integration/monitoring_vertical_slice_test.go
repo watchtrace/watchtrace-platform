@@ -48,7 +48,7 @@ func TestBackendMonitoringVerticalSliceWithPostgreSQL(t *testing.T) {
 	))
 	defer closeTarget()
 
-	authService := auth.NewService(pool)
+	authService := auth.NewService(pool, &recordingVerificationSender{})
 	ownershipService := ownership.NewService(pool)
 	monitorService := monitor.NewService(pool)
 	var logs bytes.Buffer

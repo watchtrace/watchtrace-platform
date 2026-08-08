@@ -43,7 +43,7 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 		deleteOwnershipTestData(t, cleanupCtx, pool, emails, slugs)
 	})
 
-	authService := auth.NewService(pool)
+	authService := auth.NewService(pool, &recordingVerificationSender{})
 	ownershipService := ownership.NewService(pool)
 	monitorService := monitor.NewService(pool)
 	var logs bytes.Buffer

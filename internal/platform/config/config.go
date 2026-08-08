@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -12,22 +13,31 @@ import (
 )
 
 const (
-	databaseURLEnvironment     = "WATCHTRACE_DATABASE_URL"
-	httpAddressEnvironment     = "WATCHTRACE_HTTP_ADDRESS"
-	shutdownTimeoutEnvironment = "WATCHTRACE_SHUTDOWN_TIMEOUT"
-	deploymentEnvironment      = "WATCHTRACE_ENVIRONMENT"
+	databaseURLEnvironment      = "WATCHTRACE_DATABASE_URL"
+	httpAddressEnvironment      = "WATCHTRACE_HTTP_ADDRESS"
+	shutdownTimeoutEnvironment  = "WATCHTRACE_SHUTDOWN_TIMEOUT"
+	deploymentEnvironment       = "WATCHTRACE_ENVIRONMENT"
+	verificationSMTPEnvironment = "WATCHTRACE_VERIFICATION_SMTP_ADDRESS"
+	verificationFromEnvironment = "WATCHTRACE_VERIFICATION_FROM"
+	verificationURLEnvironment  = "WATCHTRACE_VERIFICATION_URL"
 
-	defaultHTTPAddress     = "127.0.0.1:8080"
-	defaultShutdownTimeout = 10 * time.Second
-	defaultEnvironment     = "development"
+	defaultHTTPAddress      = "127.0.0.1:8080"
+	defaultShutdownTimeout  = 10 * time.Second
+	defaultEnvironment      = "development"
+	defaultVerificationSMTP = "127.0.0.1:1025"
+	defaultVerificationFrom = "watchtrace@localhost"
+	defaultVerificationURL  = "http://127.0.0.1:3000/verify-email"
 )
 
 // Config contains the validated settings needed to start the API.
 type Config struct {
-	DatabaseURL     string
-	HTTPAddress     string
-	ShutdownTimeout time.Duration
-	Production      bool
+	DatabaseURL             string
+	HTTPAddress             string
+	ShutdownTimeout         time.Duration
+	Production              bool
+	VerificationSMTPAddress string
+	VerificationFrom        string
+	VerificationURL         string
 }
 
 // Load reads configuration from the process environment and validates it.
@@ -76,12 +86,29 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, fmt.Errorf("%s must be development or production", deploymentEnvironment)
 	}
 
+	verificationSMTP := stringSetting(lookup, verificationSMTPEnvironment, defaultVerificationSMTP)
+	verificationFrom := stringSetting(lookup, verificationFromEnvironment, defaultVerificationFrom)
+	verificationURL := stringSetting(lookup, verificationURLEnvironment, defaultVerificationURL)
+	if verificationSMTP == "" || verificationFrom == "" || verificationURL == "" {
+		return Config{}, errors.New("email verification settings must not be empty")
+	}
+
 	return Config{
-		DatabaseURL:     databaseURL,
-		HTTPAddress:     httpAddress,
-		ShutdownTimeout: shutdownTimeout,
-		Production:      environment == "production",
+		DatabaseURL:             databaseURL,
+		HTTPAddress:             httpAddress,
+		ShutdownTimeout:         shutdownTimeout,
+		Production:              environment == "production",
+		VerificationSMTPAddress: verificationSMTP,
+		VerificationFrom:        verificationFrom,
+		VerificationURL:         verificationURL,
 	}, nil
+}
+
+func stringSetting(lookup func(string) (string, bool), name, fallback string) string {
+	if value, exists := lookup(name); exists {
+		return strings.TrimSpace(value)
+	}
+	return fallback
 }
 
 func loadDatabaseURL(lookup func(string) (string, bool)) (string, error) {

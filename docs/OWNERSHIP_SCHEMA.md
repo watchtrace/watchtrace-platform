@@ -11,7 +11,11 @@ schema for account identity and tenant ownership:
 - `projects` belongs directly to an organization.
 - `environments` carries its organization ID and references a project through
   the composite `(organization_id, project_id)` key. PostgreSQL therefore
-  rejects a project from another organization even if both identifiers exist.
+rejects a project from another organization even if both identifiers exist.
+
+Migration `000008_email_verification` adds `user_action_tokens` for one-time,
+expiring account actions. P1-203 uses the `email_verification` purpose and
+stores only a SHA-256 token digest, never the raw email token.
 
 Public identifiers are database-generated UUIDv4 values. All time columns use
 PostgreSQL `timestamptz`, which represents instants independently of the client

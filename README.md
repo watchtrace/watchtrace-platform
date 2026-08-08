@@ -47,7 +47,7 @@ cp .env.example .env
 # Replace both password placeholders with the same local-only password.
 chmod 600 deploy/local/postgres.env
 chmod 600 .env
-docker compose up --detach --wait postgres
+docker compose up --detach --wait postgres mailpit
 set -a
 . ./.env
 set +a
@@ -64,7 +64,7 @@ go mod download
 Copy-Item deploy/local/postgres.env.example deploy/local/postgres.env
 Copy-Item .env.example .env
 # Replace both password placeholders with the same local-only password.
-docker compose up --detach --wait postgres
+docker compose up --detach --wait postgres mailpit
 Get-Content .env | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object {
     $name, $value = $_ -split '=', 2
     Set-Item -Path "Env:$name" -Value $value
@@ -118,10 +118,11 @@ error, health, and safe-logging conventions.
 Stop the process with `Ctrl+C`; the server stops accepting new connections and
 allows active requests up to 10 seconds to finish.
 
-Signup, login, rotating refresh sessions, and current/all-session logout are available under
-`/api/v1/auth`. See [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for the
-short-lived bearer access-token, browser cookie, and replay-revocation
-contract.
+Signup, email verification, login, rotating refresh sessions, and
+current/all-session logout are available under `/api/v1/auth`. Local
+verification messages are captured at `http://127.0.0.1:8025`. See
+[`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for the token, delivery,
+browser-cookie, and revocation contracts.
 
 An authenticated user can create the initial organization, owner membership,
 project, and production environment atomically with `POST
@@ -146,7 +147,7 @@ per stable job ID without response bodies. See
 
 ## Local PostgreSQL
 
-The Compose service runs PostgreSQL 18.4 on `127.0.0.1:5432` and stores its
+The PostgreSQL Compose service runs PostgreSQL 18.4 on `127.0.0.1:5432` and stores its
 data in the named `postgres_data` development volume. Local bootstrap values
 live in the ignored `deploy/local/postgres.env` file. They are development-only
 credentials and must never be reused for production.
@@ -154,7 +155,7 @@ credentials and must never be reused for production.
 Start PostgreSQL and wait for its health check:
 
 ```sh
-docker compose up --detach --wait postgres
+docker compose up --detach --wait postgres mailpit
 docker compose ps postgres
 ```
 
