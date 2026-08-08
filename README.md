@@ -221,6 +221,13 @@ On Windows PowerShell, run:
 pwsh -NoProfile -File ./tests/integration/postgres-database.ps1
 ```
 
+That suite includes the first complete backend monitoring slice: it creates an
+account, ownership hierarchy, and safe monitor through the HTTP API; schedules
+and executes one durable check against a controlled target; and polls the
+authenticated monitor API until the stored result is visible. The test also
+confirms that the controlled response body, target URL, and bearer token do not
+appear in the API response or request logs.
+
 ## Backend Container Image
 
 The production-style image uses a pinned Go builder and a minimal `scratch`

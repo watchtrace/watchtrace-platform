@@ -266,7 +266,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Return the monitor's current state and recent check results.
   - Scope every query to the authenticated organization and environment.
 
-- [ ] **P1-109 — Add a backend vertical-slice integration test**
+- [x] **P1-109 — Add a backend vertical-slice integration test**
   - Create an account and ownership records.
   - Create a monitor through the API pointing to a controlled test server.
   - Wait for one scheduled result and verify it through the authorized API.
