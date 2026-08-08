@@ -72,20 +72,23 @@ try {
 
     Invoke-Go run ./cmd/migrate up
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 1 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 2 (clean)") {
         throw "Unexpected migration version after up: $version"
     }
 
-    Invoke-Go test ./tests/integration -run '^TestGeneratedDatabaseQuery$' -count=1
+    Invoke-Go test ./tests/integration -count=1
 
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 0 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 1 (clean)") {
         throw "Unexpected migration version after down: $version"
     }
+    $env:WATCHTRACE_EXPECT_OWNERSHIP_SCHEMA_ABSENT = "1"
+    Invoke-Go test ./tests/integration -run '^TestOwnershipSchemaRollback$' -count=1
+    $env:WATCHTRACE_EXPECT_OWNERSHIP_SCHEMA_ABSENT = $null
 
     Invoke-Go run ./cmd/migrate up
-    Invoke-Go test ./tests/integration -run '^TestGeneratedDatabaseQuery$' -count=1
+    Invoke-Go test ./tests/integration -count=1
 }
 finally {
     & docker compose `

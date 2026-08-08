@@ -14,6 +14,8 @@ Current implementation documentation:
 
 - [`API_CONVENTIONS.md`](API_CONVENTIONS.md) defines request IDs, error
   envelopes, JSON validation, health endpoints, and safe request logging.
+- [`OWNERSHIP_SCHEMA.md`](OWNERSHIP_SCHEMA.md) documents the Phase 1 account
+  and tenant-ownership tables and their database-enforced isolation rules.
 
 Use this directory for documentation introduced by later tasks, including
 architecture decision records, operations runbooks, API guides, and deployment

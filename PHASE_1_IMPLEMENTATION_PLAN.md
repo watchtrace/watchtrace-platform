@@ -200,11 +200,11 @@ Create a repeatable local development environment and a clean foundation for lat
 
 ### Milestone 0 gate
 
-- [ ] A new developer can start PostgreSQL and the application from the README.
-- [ ] The backend builds and its tests pass locally and in CI.
-- [ ] A migration can be applied to a clean database.
-- [ ] The Linux ARM64 backend image builds successfully.
-- [ ] No real secret is committed to the backend repository.
+- [x] A new developer can start PostgreSQL and the application from the README.
+- [x] The backend builds and its tests pass locally and in CI.
+- [x] A migration can be applied to a clean database.
+- [x] The Linux ARM64 backend image builds successfully.
+- [x] No real secret is committed to the backend repository.
 
 ---
 
@@ -224,7 +224,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
 
 ### Checklist
 
-- [ ] **P1-101 — Add the minimum account and ownership schema**
+- [x] **P1-101 — Add the minimum account and ownership schema**
   - Add users, organizations, memberships, projects, and environments.
   - Use UUIDs or another documented non-sequential public identifier.
   - Store timestamps in UTC.

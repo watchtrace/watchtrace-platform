@@ -180,6 +180,9 @@ SQLC release:
 go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
 ```
 
+The current account and tenant tables and their isolation constraints are
+documented in [`docs/OWNERSHIP_SCHEMA.md`](docs/OWNERSHIP_SCHEMA.md).
+
 Run the clean-database migration and generated-query integration test on macOS
 or Linux with:
 

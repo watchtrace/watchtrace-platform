@@ -52,21 +52,24 @@ cd "$repository_root"
 
 env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate up
 version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)
-if [ "$version" != "version 1 (clean)" ]; then
+if [ "$version" != "version 2 (clean)" ]; then
     echo "Migration version after up was '$version'." >&2
     exit 1
 fi
 
 env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
-    go test ./tests/integration -run '^TestGeneratedDatabaseQuery$' -count=1
+    go test ./tests/integration -count=1
 
 env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate down
 version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)
-if [ "$version" != "version 0 (clean)" ]; then
+if [ "$version" != "version 1 (clean)" ]; then
     echo "Migration version after down was '$version'." >&2
     exit 1
 fi
+env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
+    WATCHTRACE_EXPECT_OWNERSHIP_SCHEMA_ABSENT=1 \
+    go test ./tests/integration -run '^TestOwnershipSchemaRollback$' -count=1
 
 env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate up
 env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
-    go test ./tests/integration -run '^TestGeneratedDatabaseQuery$' -count=1
+    go test ./tests/integration -count=1
