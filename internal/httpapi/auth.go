@@ -15,6 +15,7 @@ type AuthenticationService interface {
 	Signup(context.Context, string, string) (auth.Result, error)
 	Login(context.Context, string, string) (auth.Result, error)
 	Refresh(context.Context, string) (auth.Result, error)
+	Logout(context.Context, string, bool) error
 }
 
 const refreshTokenCookieName = "watchtrace_refresh"
@@ -22,6 +23,10 @@ const refreshTokenCookieName = "watchtrace_refresh"
 type credentialsRequest struct {
 	Email    string `json:"email" binding:"required,email,max=254"`
 	Password string `json:"password" binding:"required,min=12,max=1024"`
+}
+
+type logoutRequest struct {
+	AllSessions bool `json:"all_sessions"`
 }
 
 type authResponse struct {
@@ -45,6 +50,26 @@ func registerAuthRoutes(router *gin.Engine, service AuthenticationService, secur
 	router.POST("/api/v1/auth/signup", authEndpoint(service.Signup, http.StatusCreated, secureCookies))
 	router.POST("/api/v1/auth/login", authEndpoint(service.Login, http.StatusOK, secureCookies))
 	router.POST("/api/v1/auth/refresh", refreshAuth(service, secureCookies))
+	router.POST("/api/v1/auth/logout", logoutAuth(service, secureCookies))
+}
+
+func logoutAuth(service AuthenticationService, secureCookies bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		var request logoutRequest
+		if !DecodeJSON(c, &request) {
+			return
+		}
+
+		refreshToken, _ := c.Cookie(refreshTokenCookieName)
+		if err := service.Logout(c.Request.Context(), refreshToken, request.AllSessions); err != nil {
+			respondAuthError(c, err)
+			return
+		}
+
+		clearRefreshTokenCookie(c, secureCookies)
+		c.Status(http.StatusNoContent)
+	}
 }
 
 func authEndpoint(

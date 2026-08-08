@@ -42,6 +42,23 @@ replacement in the same family. Reusing an already rotated token revokes every
 access and refresh token in that family. A later login creates an independent
 family.
 
+### `POST /api/v1/auth/logout`
+
+Logout accepts only `application/json`:
+
+```json
+{
+  "all_sessions": false
+}
+```
+
+With `all_sessions` omitted or `false`, WatchTrace revokes the access and
+refresh tokens in the family identified by the browser refresh cookie. With
+`all_sessions` set to `true`, an active refresh token revokes every access and
+refresh family for the user. Successful logout returns HTTP 204 and clears the
+refresh cookie. Missing, malformed, unknown, expired, and already revoked
+cookies are idempotent successes and do not reveal session validity.
+
 ## Tokens and cookies
 
 Successful signup, login, and refresh responses include a short-lived access
@@ -73,6 +90,12 @@ a 30-day expiry delivered only through `Set-Cookie`. The cookie is `HttpOnly`,
 required `Secure` attribute; the default development mode permits local HTTP.
 Authentication responses set `Cache-Control: no-store`.
 
+The API removes expired and revoked access-token rows in bounded hourly
+batches. It retains revoked refresh-token families until every token in the
+family has expired, then removes the family in a bounded batch. This retention
+is deliberate: deleting an unexpired rotated token would prevent replay
+detection.
+
 ## Errors
 
 In addition to the shared API errors:
@@ -85,6 +108,5 @@ In addition to the shared API errors:
 | 409 | `email_in_use` | The normalized signup email already exists. |
 | 422 | `validation_failed` | Email or password failed validation. |
 
-Logout, explicit current/all-session revocation, and expired-session cleanup
-are assigned to P1-202. Email verification and password reset remain assigned
-to their later Phase 1 tasks.
+Email verification and password reset remain assigned to their later Phase 1
+tasks.

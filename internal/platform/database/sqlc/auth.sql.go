@@ -121,6 +121,50 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateU
 	return i, err
 }
 
+const deleteExpiredOrRevokedAccessTokens = `-- name: DeleteExpiredOrRevokedAccessTokens :execrows
+WITH candidates AS (
+    SELECT id
+    FROM auth_sessions
+    WHERE expires_at <= CURRENT_TIMESTAMP
+       OR revoked_at IS NOT NULL
+    ORDER BY COALESCE(revoked_at, expires_at), id
+    LIMIT $1
+)
+DELETE FROM auth_sessions
+USING candidates
+WHERE auth_sessions.id = candidates.id
+`
+
+func (q *Queries) DeleteExpiredOrRevokedAccessTokens(ctx context.Context, batchSize int32) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredOrRevokedAccessTokens, batchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteExpiredRefreshTokenFamilies = `-- name: DeleteExpiredRefreshTokenFamilies :execrows
+WITH candidates AS (
+    SELECT family_id
+    FROM refresh_tokens
+    GROUP BY family_id
+    HAVING max(expires_at) <= CURRENT_TIMESTAMP
+    ORDER BY max(expires_at), family_id
+    LIMIT $1
+)
+DELETE FROM refresh_tokens
+USING candidates
+WHERE refresh_tokens.family_id = candidates.family_id
+`
+
+func (q *Queries) DeleteExpiredRefreshTokenFamilies(ctx context.Context, batchSize int32) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredRefreshTokenFamilies, batchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getUserByAuthSession = `-- name: GetUserByAuthSession :one
 SELECT
     users.id::text AS id,
@@ -255,6 +299,21 @@ func (q *Queries) RevokeAccessTokenFamily(ctx context.Context, familyID string) 
 	return result.RowsAffected(), nil
 }
 
+const revokeAccessTokensForUser = `-- name: RevokeAccessTokensForUser :execrows
+UPDATE auth_sessions
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE user_id = $1::text::uuid
+  AND revoked_at IS NULL
+`
+
+func (q *Queries) RevokeAccessTokensForUser(ctx context.Context, userID string) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeAccessTokensForUser, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const revokeRefreshTokenFamily = `-- name: RevokeRefreshTokenFamily :execrows
 UPDATE refresh_tokens
 SET revoked_at = CURRENT_TIMESTAMP
@@ -264,6 +323,21 @@ WHERE family_id = $1::text::uuid
 
 func (q *Queries) RevokeRefreshTokenFamily(ctx context.Context, familyID string) (int64, error) {
 	result, err := q.db.Exec(ctx, revokeRefreshTokenFamily, familyID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeRefreshTokensForUser = `-- name: RevokeRefreshTokensForUser :execrows
+UPDATE refresh_tokens
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE user_id = $1::text::uuid
+  AND revoked_at IS NULL
+`
+
+func (q *Queries) RevokeRefreshTokensForUser(ctx context.Context, userID string) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeRefreshTokensForUser, userID)
 	if err != nil {
 		return 0, err
 	}

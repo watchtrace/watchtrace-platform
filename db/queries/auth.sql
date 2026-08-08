@@ -76,6 +76,44 @@ SET revoked_at = CURRENT_TIMESTAMP
 WHERE family_id = sqlc.arg(family_id)::text::uuid
   AND revoked_at IS NULL;
 
+-- name: RevokeRefreshTokensForUser :execrows
+UPDATE refresh_tokens
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE user_id = sqlc.arg(user_id)::text::uuid
+  AND revoked_at IS NULL;
+
+-- name: RevokeAccessTokensForUser :execrows
+UPDATE auth_sessions
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE user_id = sqlc.arg(user_id)::text::uuid
+  AND revoked_at IS NULL;
+
+-- name: DeleteExpiredOrRevokedAccessTokens :execrows
+WITH candidates AS (
+    SELECT id
+    FROM auth_sessions
+    WHERE expires_at <= CURRENT_TIMESTAMP
+       OR revoked_at IS NOT NULL
+    ORDER BY COALESCE(revoked_at, expires_at), id
+    LIMIT sqlc.arg(batch_size)
+)
+DELETE FROM auth_sessions
+USING candidates
+WHERE auth_sessions.id = candidates.id;
+
+-- name: DeleteExpiredRefreshTokenFamilies :execrows
+WITH candidates AS (
+    SELECT family_id
+    FROM refresh_tokens
+    GROUP BY family_id
+    HAVING max(expires_at) <= CURRENT_TIMESTAMP
+    ORDER BY max(expires_at), family_id
+    LIMIT sqlc.arg(batch_size)
+)
+DELETE FROM refresh_tokens
+USING candidates
+WHERE refresh_tokens.family_id = candidates.family_id;
+
 -- name: GetUserByAuthSession :one
 SELECT
     users.id::text AS id,

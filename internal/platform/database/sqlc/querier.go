@@ -25,6 +25,8 @@ type Querier interface {
 	CreateRotatedRefreshToken(ctx context.Context, arg CreateRotatedRefreshTokenParams) (string, error)
 	CreateScheduledCheckJob(ctx context.Context, arg CreateScheduledCheckJobParams) (int64, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
+	DeleteExpiredOrRevokedAccessTokens(ctx context.Context, batchSize int32) (int64, error)
+	DeleteExpiredRefreshTokenFamilies(ctx context.Context, batchSize int32) (int64, error)
 	GetAccessibleEnvironmentOrganization(ctx context.Context, arg GetAccessibleEnvironmentOrganizationParams) (string, error)
 	GetDatabaseTime(ctx context.Context) (pgtype.Timestamptz, error)
 	GetEnvironmentMonitor(ctx context.Context, arg GetEnvironmentMonitorParams) (GetEnvironmentMonitorRow, error)
@@ -41,7 +43,9 @@ type Querier interface {
 	LockRefreshTokenForRotation(ctx context.Context, tokenDigest []byte) (LockRefreshTokenForRotationRow, error)
 	MarkRefreshTokenRotated(ctx context.Context, arg MarkRefreshTokenRotatedParams) (int64, error)
 	RevokeAccessTokenFamily(ctx context.Context, familyID string) (int64, error)
+	RevokeAccessTokensForUser(ctx context.Context, userID string) (int64, error)
 	RevokeRefreshTokenFamily(ctx context.Context, familyID string) (int64, error)
+	RevokeRefreshTokensForUser(ctx context.Context, userID string) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

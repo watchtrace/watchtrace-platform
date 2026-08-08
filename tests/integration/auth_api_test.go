@@ -224,6 +224,141 @@ func TestSignupAndLoginAPIWithPostgreSQL(t *testing.T) {
 	}
 }
 
+func TestLogoutRevocationAndSessionCleanupWithPostgreSQL(t *testing.T) {
+	databaseURL := os.Getenv("WATCHTRACE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("WATCHTRACE_TEST_DATABASE_URL is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL connection pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	const (
+		email    = "logout-integration@example.test"
+		password = "P1-202-test-password!"
+	)
+	deleteAuthTestUser(t, ctx, pool, email)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		deleteAuthTestUser(t, cleanupCtx, pool, email)
+	})
+
+	service := auth.NewService(pool)
+	var logs bytes.Buffer
+	router := httpapi.NewRouter(httpapi.Options{
+		Logger:        slog.New(slog.NewJSONHandler(&logs, nil)),
+		AuthService:   service,
+		SecureCookies: true,
+	})
+
+	signup := performAuthRequest(t, router, "/api/v1/auth/signup", email, password)
+	if signup.Status != http.StatusCreated {
+		t.Fatalf("signup status = %d: %s", signup.Status, signup.RawBody)
+	}
+	signupRefresh := requireRefreshCookie(t, signup, true)
+	login := performAuthRequest(t, router, "/api/v1/auth/login", email, password)
+	if login.Status != http.StatusOK {
+		t.Fatalf("login status = %d: %s", login.Status, login.RawBody)
+	}
+	loginRefresh := requireRefreshCookie(t, login, true)
+	rotatedLogin := performRefreshRequest(t, router, loginRefresh)
+	if rotatedLogin.Status != http.StatusOK {
+		t.Fatalf("rotate login refresh status = %d: %s", rotatedLogin.Status, rotatedLogin.RawBody)
+	}
+	currentLoginRefresh := requireRefreshCookie(t, rotatedLogin, true)
+
+	var signupFamilyID string
+	var loginFamilyID string
+	if err := pool.QueryRow(ctx, `SELECT family_id::text FROM refresh_tokens WHERE token_digest = $1`,
+		tokenSHA256(signupRefresh)).Scan(&signupFamilyID); err != nil {
+		t.Fatalf("load signup family: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT family_id::text FROM refresh_tokens WHERE token_digest = $1`,
+		tokenSHA256(loginRefresh)).Scan(&loginFamilyID); err != nil {
+		t.Fatalf("load login family: %v", err)
+	}
+
+	currentLogout := performLogoutRequest(t, router, currentLoginRefresh, false)
+	assertLogoutSuccess(t, currentLogout, true)
+	if _, err := service.Authenticate(ctx, rotatedLogin.Body.Session.Token); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("current logout left its access token active: %v", err)
+	}
+	if _, err := service.Authenticate(ctx, signup.Body.Session.Token); err != nil {
+		t.Fatalf("current logout revoked another family: %v", err)
+	}
+	assertAuthAPIError(t, performRefreshRequest(t, router, currentLoginRefresh),
+		http.StatusUnauthorized, "invalid_refresh_token")
+
+	allLogout := performLogoutRequest(t, router, signupRefresh, true)
+	assertLogoutSuccess(t, allLogout, true)
+	if _, err := service.Authenticate(ctx, signup.Body.Session.Token); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("all-session logout left an access token active: %v", err)
+	}
+	assertAuthAPIError(t, performRefreshRequest(t, router, signupRefresh),
+		http.StatusUnauthorized, "invalid_refresh_token")
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE refresh_tokens
+		SET created_at = CURRENT_TIMESTAMP - INTERVAL '40 days',
+		    expires_at = CURRENT_TIMESTAMP - INTERVAL '1 day'
+		WHERE family_id = $1::text::uuid
+	`, loginFamilyID); err != nil {
+		t.Fatalf("expire logged-out refresh family: %v", err)
+	}
+	deleted, err := service.CleanupSessions(ctx)
+	if err != nil {
+		t.Fatalf("clean sessions: %v", err)
+	}
+	if deleted < 5 {
+		t.Fatalf("cleanup deleted %d rows, want at least 5", deleted)
+	}
+
+	var loginRefreshRows int
+	var retainedRevokedRefreshRows int
+	var accessRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE family_id = $1::text::uuid`,
+		loginFamilyID).Scan(&loginRefreshRows); err != nil {
+		t.Fatalf("count expired refresh family: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM refresh_tokens
+		WHERE family_id = $1::text::uuid
+		  AND revoked_at IS NOT NULL
+		  AND expires_at > CURRENT_TIMESTAMP
+	`, signupFamilyID).Scan(&retainedRevokedRefreshRows); err != nil {
+		t.Fatalf("count retained revoked refresh rows: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM auth_sessions WHERE user_id = $1::text::uuid`,
+		signup.Body.User.ID).Scan(&accessRows); err != nil {
+		t.Fatalf("count cleaned access rows: %v", err)
+	}
+	if loginRefreshRows != 0 || retainedRevokedRefreshRows != 1 || accessRows != 0 {
+		t.Fatalf("cleanup state expired=%d retained=%d access=%d",
+			loginRefreshRows, retainedRevokedRefreshRows, accessRows)
+	}
+
+	for _, secret := range []string{
+		password,
+		signup.Body.Session.Token,
+		signupRefresh,
+		login.Body.Session.Token,
+		loginRefresh,
+		rotatedLogin.Body.Session.Token,
+		currentLoginRefresh,
+	} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatal("logout logs contain credentials or session tokens")
+		}
+	}
+}
+
 func TestAuthSchemaRollback(t *testing.T) {
 	if os.Getenv("WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT") != "1" {
 		t.Skip("WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT is not set")
@@ -360,6 +495,42 @@ func performRefreshRequest(t *testing.T, handler http.Handler, refreshToken stri
 		t.Fatalf("decode refresh response: %v", err)
 	}
 	return result
+}
+
+func performLogoutRequest(t *testing.T, handler http.Handler, refreshToken string, allSessions bool) authAPIResult {
+	t.Helper()
+	requestBody, err := json.Marshal(map[string]bool{"all_sessions": allSessions})
+	if err != nil {
+		t.Fatalf("encode logout request: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", bytes.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	if refreshToken != "" {
+		request.AddCookie(&http.Cookie{Name: "watchtrace_refresh", Value: refreshToken})
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return authAPIResult{
+		Status:  response.Code,
+		RawBody: response.Body.String(),
+		Cookies: response.Result().Cookies(),
+	}
+}
+
+func assertLogoutSuccess(t *testing.T, result authAPIResult, secure bool) {
+	t.Helper()
+	if result.Status != http.StatusNoContent || result.RawBody != "" {
+		t.Fatalf("logout response = %d %q", result.Status, result.RawBody)
+	}
+	if len(result.Cookies) != 1 || result.Cookies[0].MaxAge != -1 ||
+		!result.Cookies[0].HttpOnly || result.Cookies[0].Secure != secure {
+		t.Fatalf("logout cookie was not cleared safely: %+v", result.Cookies)
+	}
+}
+
+func tokenSHA256(token string) []byte {
+	digest := sha256.Sum256([]byte(token))
+	return digest[:]
 }
 
 func assertAuthAPIError(t *testing.T, result authAPIResult, status int, code string) {

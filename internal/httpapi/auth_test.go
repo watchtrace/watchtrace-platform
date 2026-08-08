@@ -153,6 +153,76 @@ func TestRefreshEndpointRejectsMissingCookieAndClearsIt(t *testing.T) {
 	}
 }
 
+func TestLogoutEndpointRevokesRequestedScopeAndClearsCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const refreshToken = "wt_refresh_logout-test-token"
+
+	for _, test := range []struct {
+		name        string
+		body        string
+		allSessions bool
+	}{
+		{name: "current session", body: `{"all_sessions":false}`},
+		{name: "all sessions", body: `{"all_sessions":true}`, allSessions: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeAuthenticationService{}
+			router := NewRouter(Options{Logger: discardLogger(), AuthService: service, SecureCookies: true})
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.AddCookie(&http.Cookie{Name: refreshTokenCookieName, Value: refreshToken})
+			response := httptest.NewRecorder()
+
+			router.ServeHTTP(response, request)
+
+			if response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+				t.Fatalf("logout response = %d %q", response.Code, response.Body.String())
+			}
+			if service.logoutToken != refreshToken || service.logoutAll != test.allSessions {
+				t.Fatalf("logout service input = %q/%t", service.logoutToken, service.logoutAll)
+			}
+			cookies := response.Result().Cookies()
+			if len(cookies) != 1 || cookies[0].MaxAge != -1 || !cookies[0].HttpOnly || !cookies[0].Secure {
+				t.Fatalf("logout did not safely clear refresh cookie: %+v", cookies)
+			}
+		})
+	}
+}
+
+func TestLogoutEndpointIsIdempotentWithoutCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeAuthenticationService{}
+	router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent || service.logoutToken != "" || service.logoutAll {
+		t.Fatalf("idempotent logout response = %d input=%q/%t", response.Code, service.logoutToken, service.logoutAll)
+	}
+}
+
+func TestLogoutEndpointRetainsCookieWhenRevocationFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeAuthenticationService{err: errors.New("database detail must not escape")}
+	router := NewRouter(Options{Logger: discardLogger(), AuthService: service, SecureCookies: true})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: refreshTokenCookieName, Value: "wt_refresh_retry-test-token"})
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("failed logout response = %d cookies=%+v", response.Code, response.Result().Cookies())
+	}
+	if strings.Contains(response.Body.String(), "database detail") {
+		t.Fatal("logout response exposed an internal error")
+	}
+}
+
 func TestAuthEndpointsMapErrorsWithoutLeakingDetails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -223,6 +293,8 @@ type fakeAuthenticationService struct {
 	err          error
 	calls        int
 	refreshToken string
+	logoutToken  string
+	logoutAll    bool
 }
 
 func (service *fakeAuthenticationService) Signup(context.Context, string, string) (auth.Result, error) {
@@ -239,4 +311,11 @@ func (service *fakeAuthenticationService) Refresh(_ context.Context, refreshToke
 	service.calls++
 	service.refreshToken = refreshToken
 	return service.result, service.err
+}
+
+func (service *fakeAuthenticationService) Logout(_ context.Context, refreshToken string, allSessions bool) error {
+	service.calls++
+	service.logoutToken = refreshToken
+	service.logoutAll = allSessions
+	return service.err
 }

@@ -297,7 +297,7 @@ Complete the identity and ownership features required for a safe multi-user beta
   - Put browser refresh tokens in Secure, HttpOnly cookies in production.
   - Revoke the token family when a rotated token is reused.
 
-- [ ] **P1-202 — Implement logout and session revocation**
+- [x] **P1-202 — Implement logout and session revocation**
   - Support current-session and all-session logout.
   - Clean up expired and revoked session records.
 

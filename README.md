@@ -118,7 +118,7 @@ error, health, and safe-logging conventions.
 Stop the process with `Ctrl+C`; the server stops accepting new connections and
 allows active requests up to 10 seconds to finish.
 
-Signup, login, and rotating refresh sessions are available under
+Signup, login, rotating refresh sessions, and current/all-session logout are available under
 `/api/v1/auth`. See [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for the
 short-lived bearer access-token, browser cookie, and replay-revocation
 contract.

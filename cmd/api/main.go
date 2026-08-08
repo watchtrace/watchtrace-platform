@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
@@ -36,6 +37,7 @@ func main() {
 	}
 	defer databasePool.Close()
 	authService := auth.NewService(databasePool)
+	go runSessionCleanup(ctx, authService, logger)
 	ownershipService := ownership.NewService(databasePool)
 	monitorService := monitor.NewService(databasePool)
 
@@ -59,5 +61,25 @@ func main() {
 	if err := server.Serve(ctx, listener); err != nil {
 		logger.Error("API server stopped", "error", err)
 		os.Exit(1)
+	}
+}
+
+func runSessionCleanup(ctx context.Context, service *auth.Service, logger *slog.Logger) {
+	cleanup := func() {
+		if _, err := service.CleanupSessions(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("session cleanup failed")
+		}
+	}
+	cleanup()
+
+	ticker := time.NewTicker(auth.DefaultCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cleanup()
+		}
 	}
 }
