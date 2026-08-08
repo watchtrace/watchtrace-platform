@@ -189,7 +189,7 @@ Create a repeatable local development environment and a clean foundation for lat
   - Add request IDs, structured error responses, JSON validation, panic recovery, and safe logging.
   - Add readiness and liveness endpoint conventions.
 
-- [ ] **P1-007 — Add backend continuous integration**
+- [x] **P1-007 — Add backend continuous integration**
   - Build and test the Go application.
   - Run database-backed tests with PostgreSQL.
 

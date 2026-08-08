@@ -38,17 +38,23 @@ monitoring.
 Format changed Go files and run the repository checks before opening a pull
 request:
 
-```powershell
-go fmt ./...
+```sh
+go mod download
+go mod verify
+test -z "$(gofmt -l .)"
+go mod tidy -diff
 go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
-go test ./...
+git diff --exit-code -- db internal/platform/database/sqlc
 go vet ./...
+go test -race ./...
 go build ./...
+./tests/integration/postgres-database.sh
 ```
 
-When a change affects migrations or generated queries, also run the isolated
-PostgreSQL integration test documented in `README.md`. Container and frontend
-checks will be added with the tasks that introduce those components.
+These are the same checks enforced by the backend CI workflow. The final
+command requires Docker with Compose and runs the migrations and generated
+query against an isolated PostgreSQL container. Frontend checks will be added
+in the separate frontend repository when its implementation begins.
 
 ## Pull Requests
 

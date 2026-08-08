@@ -196,11 +196,23 @@ pwsh -NoProfile -File ./tests/integration/postgres-database.ps1
 ## Verify
 
 ```sh
+go mod download
+go mod verify
+test -z "$(gofmt -l .)"
+go mod tidy -diff
 go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
-go test ./...
+git diff --exit-code -- db internal/platform/database/sqlc
 go vet ./...
+go test -race ./...
 go build ./...
+./tests/integration/postgres-database.sh
 ```
+
+The `Backend CI` GitHub Actions workflow runs these checks for every push and
+pull request, and can also be started manually. It selects the toolchain from
+`go.mod`, verifies committed SQLC output, and runs the migration and generated
+query tests against an isolated PostgreSQL container. The workflow has
+read-only repository permissions and does not use production credentials.
 
 ## Contributing and License
 
