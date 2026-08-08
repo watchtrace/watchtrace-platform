@@ -11,6 +11,7 @@ import (
 )
 
 type Querier interface {
+	AdvanceMonitorSchedule(ctx context.Context, arg AdvanceMonitorScheduleParams) (int64, error)
 	CountOrganizationMonitors(ctx context.Context, organizationID string) (int64, error)
 	CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) error
 	CreateMonitor(ctx context.Context, arg CreateMonitorParams) (CreateMonitorRow, error)
@@ -18,12 +19,14 @@ type Querier interface {
 	CreateOwnerMembership(ctx context.Context, arg CreateOwnerMembershipParams) error
 	CreateProductionEnvironment(ctx context.Context, arg CreateProductionEnvironmentParams) (CreateProductionEnvironmentRow, error)
 	CreateProject(ctx context.Context, arg CreateProjectParams) (CreateProjectRow, error)
+	CreateScheduledCheckJob(ctx context.Context, arg CreateScheduledCheckJobParams) (int64, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
 	GetAccessibleEnvironmentOrganization(ctx context.Context, arg GetAccessibleEnvironmentOrganizationParams) (string, error)
 	GetDatabaseTime(ctx context.Context) (pgtype.Timestamptz, error)
 	GetUserByAuthSession(ctx context.Context, tokenDigest []byte) (GetUserByAuthSessionRow, error)
 	GetUserForLogin(ctx context.Context, email string) (GetUserForLoginRow, error)
 	ListEnvironmentMonitors(ctx context.Context, arg ListEnvironmentMonitorsParams) ([]ListEnvironmentMonitorsRow, error)
+	LockDueMonitors(ctx context.Context, batchSize int32) ([]LockDueMonitorsRow, error)
 	LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (string, error)
 }
 

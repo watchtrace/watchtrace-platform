@@ -132,6 +132,11 @@ Authenticated monitor creation and listing are available under
 [`docs/MONITORS.md`](docs/MONITORS.md) for defaults, limits, tenant rules, and
 the destination-safety boundary applied before outbound connections.
 
+The initial scheduler stores due work durably in PostgreSQL and advances each
+monitor schedule in the same transaction. See
+[`docs/SCHEDULER.md`](docs/SCHEDULER.md) for its batching, idempotency, tenant,
+and timestamp guarantees.
+
 ## Local PostgreSQL
 
 The Compose service runs PostgreSQL 18.4 on `127.0.0.1:5432` and stores its

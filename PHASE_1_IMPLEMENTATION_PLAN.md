@@ -248,7 +248,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Reject private, loopback, link-local, multicast, and cloud metadata destinations for IPv4 and IPv6.
   - Add tests using controlled local DNS and target servers.
 
-- [ ] **P1-106 — Implement the first durable scheduler path**
+- [x] **P1-106 — Implement the first durable scheduler path**
   - Add the initial `check_jobs` table and indexes.
   - Load due monitors from PostgreSQL in a small batch.
   - Insert one durable job and advance the monitor schedule in the same transaction.

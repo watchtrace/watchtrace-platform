@@ -22,6 +22,8 @@ Current implementation documentation:
   organization/project/production-environment creation contract.
 - [`MONITORS.md`](MONITORS.md) defines the initial tenant-scoped GET monitor
   create/list API, defaults, bounds, and outbound destination-safety boundary.
+- [`SCHEDULER.md`](SCHEDULER.md) defines the initial durable PostgreSQL
+  scheduler transaction and queue invariants.
 
 Use this directory for documentation introduced by later tasks, including
 architecture decision records, operations runbooks, API guides, and deployment
