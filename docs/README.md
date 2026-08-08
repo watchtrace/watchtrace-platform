@@ -10,6 +10,11 @@ the implementation workflow and task prompts can locate them consistently:
 - [`RISKS_AND_CAVEATS.md`](../RISKS_AND_CAVEATS.md) records risks and required
   controls.
 
+Current implementation documentation:
+
+- [`API_CONVENTIONS.md`](API_CONVENTIONS.md) defines request IDs, error
+  envelopes, JSON validation, health endpoints, and safe request logging.
+
 Use this directory for documentation introduced by later tasks, including
 architecture decision records, operations runbooks, API guides, and deployment
 procedures. Add those directories only when their owning task creates content;

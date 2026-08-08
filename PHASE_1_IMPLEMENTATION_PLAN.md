@@ -185,7 +185,7 @@ Create a repeatable local development environment and a clean foundation for lat
   - Configure SQLC and prove one generated query works against PostgreSQL.
   - Add migration tests against a real test database.
 
-- [ ] **P1-006 — Add standard API behavior**
+- [x] **P1-006 — Add standard API behavior**
   - Add request IDs, structured error responses, JSON validation, panic recovery, and safe logging.
   - Add readiness and liveness endpoint conventions.
 

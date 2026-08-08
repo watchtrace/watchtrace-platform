@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -14,9 +14,11 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
 	configuration, err := config.Load()
 	if err != nil {
-		log.Printf("load configuration: %v", err)
+		logger.Error("load configuration", "error", err)
 		os.Exit(1)
 	}
 
@@ -25,15 +27,15 @@ func main() {
 
 	listener, err := net.Listen("tcp", configuration.HTTPAddress)
 	if err != nil {
-		log.Printf("listen on %s: %v", configuration.HTTPAddress, err)
+		logger.Error("listen for API requests", "address", configuration.HTTPAddress, "error", err)
 		os.Exit(1)
 	}
 
-	log.Printf("API server listening on %s", listener.Addr())
+	logger.Info("API server listening", "address", listener.Addr())
 
-	server := httpserver.New(httpapi.NewRouter(), configuration.ShutdownTimeout)
+	server := httpserver.New(httpapi.NewRouter(httpapi.Options{Logger: logger}), configuration.ShutdownTimeout)
 	if err := server.Serve(ctx, listener); err != nil {
-		log.Printf("API server stopped with an error: %v", err)
+		logger.Error("API server stopped", "error", err)
 		os.Exit(1)
 	}
 }

@@ -109,6 +109,12 @@ Or, in Windows PowerShell:
 Invoke-RestMethod http://localhost:8080/health
 ```
 
+Liveness is also available at `/health/live`; readiness is available at
+`/health/ready`. Every response includes `X-Request-ID`, and API failures use a
+consistent JSON error envelope. See
+[`docs/API_CONVENTIONS.md`](docs/API_CONVENTIONS.md) for request ID, validation,
+error, health, and safe-logging conventions.
+
 Stop the process with `Ctrl+C`; the server stops accepting new connections and
 allows active requests up to 10 seconds to finish.
 
