@@ -12,6 +12,8 @@ import (
 
 type Querier interface {
 	AdvanceMonitorSchedule(ctx context.Context, arg AdvanceMonitorScheduleParams) (int64, error)
+	ClaimPendingCheckJob(ctx context.Context, arg ClaimPendingCheckJobParams) (ClaimPendingCheckJobRow, error)
+	CompleteCheckJob(ctx context.Context, arg CompleteCheckJobParams) (int64, error)
 	CountOrganizationMonitors(ctx context.Context, organizationID string) (int64, error)
 	CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) error
 	CreateMonitor(ctx context.Context, arg CreateMonitorParams) (CreateMonitorRow, error)
@@ -25,7 +27,10 @@ type Querier interface {
 	GetDatabaseTime(ctx context.Context) (pgtype.Timestamptz, error)
 	GetUserByAuthSession(ctx context.Context, tokenDigest []byte) (GetUserByAuthSessionRow, error)
 	GetUserForLogin(ctx context.Context, email string) (GetUserForLoginRow, error)
+	HealthCheckExists(ctx context.Context, jobID string) (bool, error)
+	InsertHealthCheck(ctx context.Context, arg InsertHealthCheckParams) (int64, error)
 	ListEnvironmentMonitors(ctx context.Context, arg ListEnvironmentMonitorsParams) ([]ListEnvironmentMonitorsRow, error)
+	LockCheckJobForCompletion(ctx context.Context, jobID string) (LockCheckJobForCompletionRow, error)
 	LockDueMonitors(ctx context.Context, batchSize int32) ([]LockDueMonitorsRow, error)
 	LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (string, error)
 }

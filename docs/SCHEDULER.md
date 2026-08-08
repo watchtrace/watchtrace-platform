@@ -1,7 +1,7 @@
 # Initial Durable Scheduler
 
-P1-106 adds the first PostgreSQL-backed scheduler path. It does not claim or
-execute jobs; worker leasing and HTTP result storage begin in P1-107.
+P1-106 added the first PostgreSQL-backed scheduler path. P1-107 now claims and
+executes its pending rows as described in [`CHECKER.md`](CHECKER.md).
 
 ## Database source of truth
 
@@ -33,7 +33,7 @@ remains the only queue source of truth; no process-local channel owns work.
 - A failure while advancing a schedule rolls back the job insertion as part of
   the same transaction.
 
-The initial table recognizes the Phase 1 job types and states, but P1-106 only
-creates scheduled pending jobs. Attempts, priorities, leases, stale-monitor
-versions, hard global queue limits, cleanup, and operational metrics are added
-by their later durable-engine tasks.
+The scheduler still creates scheduled pending jobs only. P1-107 adds initial
+attempt and lease fields; priorities, stale-monitor versions, lease recovery,
+hard global queue limits, cleanup, and operational metrics remain assigned to
+later durable-engine tasks.

@@ -324,6 +324,7 @@ func deleteOwnershipTestData(
 	t.Helper()
 
 	statements := []string{
+		`DELETE FROM health_checks WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM check_jobs WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM monitors WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM environments WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,

@@ -24,6 +24,8 @@ Current implementation documentation:
   create/list API, defaults, bounds, and outbound destination-safety boundary.
 - [`SCHEDULER.md`](SCHEDULER.md) defines the initial durable PostgreSQL
   scheduler transaction and queue invariants.
+- [`CHECKER.md`](CHECKER.md) defines leased job claiming, guarded HTTP
+  execution, idempotent result storage, and the response-body boundary.
 
 Use this directory for documentation introduced by later tasks, including
 architecture decision records, operations runbooks, API guides, and deployment

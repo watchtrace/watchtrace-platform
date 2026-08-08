@@ -255,7 +255,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Prevent duplicate jobs with a unique monitor-and-scheduled-time key.
   - Record scheduled time separately from start and completion time.
 
-- [ ] **P1-107 — Execute and store an HTTP check**
+- [x] **P1-107 — Execute and store an HTTP check**
   - Claim a pending job with a worker ID and lease using `FOR UPDATE SKIP LOCKED`.
   - Apply the monitor timeout and expected status range.
   - Idempotently store at most one final success or failure, status code, error category, and total duration per job ID.

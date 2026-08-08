@@ -137,6 +137,11 @@ monitor schedule in the same transaction. See
 [`docs/SCHEDULER.md`](docs/SCHEDULER.md) for its batching, idempotency, tenant,
 and timestamp guarantees.
 
+The initial HTTP worker claims pending jobs with a PostgreSQL lease, executes
+them through the guarded destination client, and atomically stores one result
+per stable job ID without response bodies. See
+[`docs/CHECKER.md`](docs/CHECKER.md).
+
 ## Local PostgreSQL
 
 The Compose service runs PostgreSQL 18.4 on `127.0.0.1:5432` and stores its
