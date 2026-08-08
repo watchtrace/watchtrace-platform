@@ -49,12 +49,15 @@ go vet ./...
 go test -race ./...
 go build ./...
 ./tests/integration/postgres-database.sh
+./tests/integration/backend-image.sh
 ```
 
-These are the same checks enforced by the backend CI workflow. The final
-command requires Docker with Compose and runs the migrations and generated
-query against an isolated PostgreSQL container. Frontend checks will be added
-in the separate frontend repository when its implementation begins.
+These are the same checks enforced by the backend CI workflow. The final two
+commands require Docker: one runs migrations and a generated query against an
+isolated PostgreSQL container, and the other verifies the non-root backend
+image, liveness endpoint, and graceful shutdown. CI also builds the image for
+Linux ARM64. Frontend checks will be added in the separate frontend repository
+when its implementation begins.
 
 ## Pull Requests
 

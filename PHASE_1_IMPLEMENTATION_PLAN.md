@@ -193,7 +193,7 @@ Create a repeatable local development environment and a clean foundation for lat
   - Build and test the Go application.
   - Run database-backed tests with PostgreSQL.
 
-- [ ] **P1-008 — Create the backend container image**
+- [x] **P1-008 — Create the backend container image**
   - Add a production-style multi-stage build for the Go application.
   - Build for both local development and Linux ARM64.
   - Run containers as a non-root user where practical.

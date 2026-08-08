@@ -193,6 +193,43 @@ On Windows PowerShell, run:
 pwsh -NoProfile -File ./tests/integration/postgres-database.ps1
 ```
 
+## Backend Container Image
+
+The production-style image uses a pinned Go builder and a minimal `scratch`
+runtime containing only the statically linked API and migration binaries plus
+the public CA certificate bundle. It runs as numeric user and group
+`65532:65532`; source files and tests are not included in the runtime image.
+
+Build and run the image for the local Docker platform:
+
+```sh
+docker build --tag watchtrace-platform:local .
+docker run --rm \
+  --publish 127.0.0.1:8080:8080 \
+  --env-file .env \
+  --env WATCHTRACE_HTTP_ADDRESS=0.0.0.0:8080 \
+  watchtrace-platform:local
+```
+
+The image defaults to `/watchtrace-api`. Deployment automation may override
+the command with `/watchtrace-migrate up` while supplying its database URL at
+runtime; credentials are never built into the image.
+
+Build the Oracle-compatible Linux ARM64 image without publishing it:
+
+```sh
+docker buildx build \
+  --platform linux/arm64 \
+  --output type=oci,dest=/tmp/watchtrace-platform-linux-arm64.tar \
+  .
+```
+
+Run the local image security, liveness, and graceful-shutdown smoke test with:
+
+```sh
+./tests/integration/backend-image.sh
+```
+
 ## Verify
 
 ```sh
@@ -206,13 +243,15 @@ go vet ./...
 go test -race ./...
 go build ./...
 ./tests/integration/postgres-database.sh
+./tests/integration/backend-image.sh
 ```
 
 The `Backend CI` GitHub Actions workflow runs these checks for every push and
 pull request, and can also be started manually. It selects the toolchain from
 `go.mod`, verifies committed SQLC output, and runs the migration and generated
 query tests against an isolated PostgreSQL container. The workflow has
-read-only repository permissions and does not use production credentials.
+read-only repository permissions, builds the backend for the native Linux and
+Linux ARM64 platforms, and does not use production credentials.
 
 ## Contributing and License
 

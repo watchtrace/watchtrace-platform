@@ -1,0 +1,12 @@
+# Send only files required to compile the backend commands. This prevents
+# local environment files, repository history, logs, and test artifacts from
+# entering the Docker build context or build cache.
+*
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!db/
+!db/**
+!internal/
+!internal/**
