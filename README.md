@@ -130,7 +130,7 @@ project, and production environment atomically with `POST
 Authenticated monitor creation and listing are available under
 `/api/v1/environments/{environmentId}/monitors`. See
 [`docs/MONITORS.md`](docs/MONITORS.md) for defaults, limits, tenant rules, and
-the P1-105 destination-safety boundary.
+the destination-safety boundary applied before outbound connections.
 
 ## Local PostgreSQL
 

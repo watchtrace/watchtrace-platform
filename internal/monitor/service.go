@@ -6,12 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/watchtrace/watchtrace-platform/internal/destination"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
@@ -204,7 +204,7 @@ func normalizeCreateInput(userID, environmentID string, input CreateInput) (Crea
 	if !uuidPattern.MatchString(userID) || !uuidPattern.MatchString(environmentID) ||
 		normalized.Name == "" || len(normalized.Name) > maximumMonitorNameBytes ||
 		len(normalized.TargetURL) > maximumTargetURLBytes ||
-		!validStoredTargetURL(normalized.TargetURL) {
+		destination.ValidateURL(normalized.TargetURL) != nil {
 		return CreateInput{}, ErrInvalidInput
 	}
 	if _, ok := allowedIntervals[normalized.IntervalSeconds]; !ok {
@@ -218,15 +218,6 @@ func normalizeCreateInput(userID, environmentID string, input CreateInput) (Crea
 	}
 
 	return normalized, nil
-}
-
-func validStoredTargetURL(value string) bool {
-	if value == "" {
-		return false
-	}
-	parsed, err := url.Parse(value)
-	return err == nil && parsed.IsAbs() && parsed.Host != "" && parsed.Opaque == "" &&
-		parsed.User == nil && parsed.Fragment == ""
 }
 
 func monitorFromCreateRow(row database.CreateMonitorRow) Monitor {

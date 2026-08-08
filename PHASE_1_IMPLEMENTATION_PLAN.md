@@ -243,7 +243,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Default to a five-minute interval and a five-second timeout.
   - Enforce organization and environment ownership.
 
-- [ ] **P1-105 — Add destination safety before making requests**
+- [x] **P1-105 — Add destination safety before making requests**
   - Allow only HTTP and HTTPS on ports 80 and 443.
   - Reject private, loopback, link-local, multicast, and cloud metadata destinations for IPv4 and IPv6.
   - Add tests using controlled local DNS and target servers.

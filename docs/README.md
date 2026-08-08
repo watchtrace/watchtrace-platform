@@ -21,7 +21,7 @@ Current implementation documentation:
 - [`OWNERSHIP_API.md`](OWNERSHIP_API.md) defines the authenticated, atomic
   organization/project/production-environment creation contract.
 - [`MONITORS.md`](MONITORS.md) defines the initial tenant-scoped GET monitor
-  create/list API, defaults, bounds, and pre-execution safety boundary.
+  create/list API, defaults, bounds, and outbound destination-safety boundary.
 
 Use this directory for documentation introduced by later tasks, including
 architecture decision records, operations runbooks, API guides, and deployment

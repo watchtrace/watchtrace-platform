@@ -43,9 +43,23 @@ Only `name` and `url` are required. Defaults and accepted values are:
 | Expected status | 200–299 | Ordered range within 100–599 |
 
 Names are trimmed and limited to 120 bytes. URLs are trimmed, limited to 2,048
-bytes, must be absolute and contain a host, and cannot include user information
-or a fragment. P1-105 will add the strict HTTP/HTTPS, port, IP, DNS, redirect,
-and metadata-target safety policy before any request execution begins.
+bytes, must be absolute HTTP or HTTPS URLs, and cannot include user information
+or a fragment. Only ports 80 and 443 are accepted. Literal private, loopback,
+link-local, multicast, metadata, and other special-use IPv4 and IPv6 targets
+are rejected during creation; obvious localhost names are rejected as well.
+
+Hostname resolution is intentionally repeated at request time rather than
+trusted from monitor creation. The destination guard validates every resolved
+IPv4 and IPv6 address immediately before dialing and pins the connection to a
+validated IP, so the HTTP transport cannot perform a second unvalidated DNS
+lookup. Any unsafe answer rejects the whole resolution result. Environment
+HTTP proxy settings are ignored because a proxy would move the actual network
+boundary away from the guarded dialer.
+
+Redirect following is disabled at this stage. P1-303 will add the complete
+bounded redirect policy, including per-hop destination checks and secret
+stripping when the host changes. P1-107 will use the guarded client when check
+execution begins; P1-105 itself does not execute or store a check result.
 
 A successful creation returns HTTP 201 with the stored configuration:
 

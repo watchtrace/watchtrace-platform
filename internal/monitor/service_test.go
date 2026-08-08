@@ -28,7 +28,7 @@ func TestNormalizeCreateInputAcceptsDocumentedBounds(t *testing.T) {
 	for _, interval := range []int32{60, 120, 300, 600, 1800} {
 		input := CreateInput{
 			Name:              "API",
-			TargetURL:         "custom-scheme://example.test/health",
+			TargetURL:         "https://example.test/health",
 			IntervalSeconds:   interval,
 			TimeoutSeconds:    10,
 			ExpectedStatusMin: 201,
@@ -52,6 +52,10 @@ func TestNormalizeCreateInputRejectsInvalidValues(t *testing.T) {
 		{name: "missing environment", user: testUserID, input: valid},
 		{name: "missing name", user: testUserID, env: testEnvironmentID, input: CreateInput{TargetURL: valid.TargetURL}},
 		{name: "relative URL", user: testUserID, env: testEnvironmentID, input: CreateInput{Name: "API", TargetURL: "/health"}},
+		{name: "unsupported scheme", user: testUserID, env: testEnvironmentID, input: CreateInput{Name: "API", TargetURL: "ftp://example.test/health"}},
+		{name: "unsupported port", user: testUserID, env: testEnvironmentID, input: CreateInput{Name: "API", TargetURL: "https://example.test:8443/health"}},
+		{name: "loopback IPv4", user: testUserID, env: testEnvironmentID, input: CreateInput{Name: "API", TargetURL: "http://127.0.0.1/health"}},
+		{name: "private IPv6", user: testUserID, env: testEnvironmentID, input: CreateInput{Name: "API", TargetURL: "https://[fd00::1]/health"}},
 		{name: "URL credentials", user: testUserID, env: testEnvironmentID, input: CreateInput{Name: "API", TargetURL: "https://user:password@example.test"}},
 		{name: "URL fragment", user: testUserID, env: testEnvironmentID, input: CreateInput{Name: "API", TargetURL: "https://example.test/#secret"}},
 		{name: "unsupported interval", user: testUserID, env: testEnvironmentID, input: CreateInput{Name: "API", TargetURL: valid.TargetURL, IntervalSeconds: 61}},

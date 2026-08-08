@@ -150,11 +150,25 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 	`, firstOwnership.Body.Organization.ID, firstOwnership.Body.Environment.ID)
 	assertPostgreSQLErrorCode(t, err, "23514")
 
-	invalid := performMonitorCreate(t, router, firstSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, monitorCreateBody{
-		Name: "Invalid", URL: "https://example.test/invalid", IntervalSeconds: 61,
-	})
-	if invalid.Status != http.StatusUnprocessableEntity || invalid.ErrorCode != "validation_failed" {
-		t.Fatalf("invalid monitor = %d %q", invalid.Status, invalid.ErrorCode)
+	invalidMonitors := []monitorCreateBody{
+		{Name: "Invalid interval", URL: "https://example.test/invalid", IntervalSeconds: 61},
+		{Name: "Invalid scheme", URL: "ftp://example.test/health"},
+		{Name: "Invalid port", URL: "https://example.test:8443/health"},
+		{Name: "IPv4 loopback", URL: "http://127.0.0.1/health"},
+		{Name: "IPv4 metadata", URL: "http://169.254.169.254/latest/meta-data"},
+		{Name: "IPv6 private", URL: "https://[fd00::1]/health"},
+	}
+	for _, input := range invalidMonitors {
+		invalid := performMonitorCreate(
+			t,
+			router,
+			firstSignup.Body.Session.Token,
+			firstOwnership.Body.Environment.ID,
+			input,
+		)
+		if invalid.Status != http.StatusUnprocessableEntity || invalid.ErrorCode != "validation_failed" {
+			t.Fatalf("invalid monitor %q = %d %q", input.Name, invalid.Status, invalid.ErrorCode)
+		}
 	}
 
 	_, err = pool.Exec(ctx, `
