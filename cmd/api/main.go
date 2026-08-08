@@ -54,6 +54,7 @@ func main() {
 		Authenticator:    authService,
 		OwnershipService: ownershipService,
 		MonitorService:   monitorService,
+		SecureCookies:    configuration.Production,
 	}), configuration.ShutdownTimeout)
 	if err := server.Serve(ctx, listener); err != nil {
 		logger.Error("API server stopped", "error", err)

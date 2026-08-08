@@ -13,8 +13,68 @@ FROM users
 WHERE lower(btrim(email)) = $1;
 
 -- name: CreateAuthSession :exec
-INSERT INTO auth_sessions (user_id, token_digest, expires_at)
-VALUES (sqlc.arg(user_id)::text::uuid, sqlc.arg(token_digest), sqlc.arg(expires_at));
+INSERT INTO auth_sessions (user_id, family_id, token_digest, expires_at)
+VALUES (
+    sqlc.arg(user_id)::text::uuid,
+    sqlc.arg(family_id)::text::uuid,
+    sqlc.arg(token_digest),
+    sqlc.arg(expires_at)
+);
+
+-- name: CreateRefreshTokenFamily :one
+INSERT INTO refresh_tokens (user_id, family_id, token_digest, expires_at)
+VALUES (
+    sqlc.arg(user_id)::text::uuid,
+    gen_random_uuid(),
+    sqlc.arg(token_digest),
+    sqlc.arg(expires_at)
+)
+RETURNING id::text AS id, family_id::text AS family_id;
+
+-- name: CreateRotatedRefreshToken :one
+INSERT INTO refresh_tokens (user_id, family_id, token_digest, expires_at)
+VALUES (
+    sqlc.arg(user_id)::text::uuid,
+    sqlc.arg(family_id)::text::uuid,
+    sqlc.arg(token_digest),
+    sqlc.arg(expires_at)
+)
+RETURNING id::text AS id;
+
+-- name: LockRefreshTokenForRotation :one
+SELECT
+    refresh_tokens.id::text AS id,
+    refresh_tokens.user_id::text AS user_id,
+    refresh_tokens.family_id::text AS family_id,
+    refresh_tokens.expires_at,
+    refresh_tokens.rotated_at,
+    refresh_tokens.revoked_at,
+    users.email,
+    (users.email_verified_at IS NOT NULL)::boolean AS email_verified
+FROM refresh_tokens
+JOIN users ON users.id = refresh_tokens.user_id
+WHERE refresh_tokens.token_digest = sqlc.arg(token_digest)
+FOR UPDATE OF refresh_tokens;
+
+-- name: MarkRefreshTokenRotated :execrows
+UPDATE refresh_tokens
+SET rotated_at = CURRENT_TIMESTAMP,
+    replaced_by_id = sqlc.arg(replaced_by_id)::text::uuid
+WHERE id = sqlc.arg(id)::text::uuid
+  AND rotated_at IS NULL
+  AND revoked_at IS NULL;
+
+-- name: RevokeRefreshTokenFamily :execrows
+UPDATE refresh_tokens
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE family_id = sqlc.arg(family_id)::text::uuid
+  AND revoked_at IS NULL;
+
+-- name: RevokeAccessTokenFamily :execrows
+UPDATE auth_sessions
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE family_id = sqlc.arg(family_id)::text::uuid
+  AND revoked_at IS NULL;
 
 -- name: GetUserByAuthSession :one
 SELECT
@@ -24,4 +84,5 @@ SELECT
 FROM auth_sessions
 JOIN users ON users.id = auth_sessions.user_id
 WHERE auth_sessions.token_digest = $1
-  AND auth_sessions.expires_at > CURRENT_TIMESTAMP;
+  AND auth_sessions.expires_at > CURRENT_TIMESTAMP
+  AND auth_sessions.revoked_at IS NULL;

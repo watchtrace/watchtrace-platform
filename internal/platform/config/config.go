@@ -15,9 +15,11 @@ const (
 	databaseURLEnvironment     = "WATCHTRACE_DATABASE_URL"
 	httpAddressEnvironment     = "WATCHTRACE_HTTP_ADDRESS"
 	shutdownTimeoutEnvironment = "WATCHTRACE_SHUTDOWN_TIMEOUT"
+	deploymentEnvironment      = "WATCHTRACE_ENVIRONMENT"
 
 	defaultHTTPAddress     = "127.0.0.1:8080"
 	defaultShutdownTimeout = 10 * time.Second
+	defaultEnvironment     = "development"
 )
 
 // Config contains the validated settings needed to start the API.
@@ -25,6 +27,7 @@ type Config struct {
 	DatabaseURL     string
 	HTTPAddress     string
 	ShutdownTimeout time.Duration
+	Production      bool
 }
 
 // Load reads configuration from the process environment and validates it.
@@ -65,10 +68,19 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		shutdownTimeout = parsed
 	}
 
+	environment := defaultEnvironment
+	if value, exists := lookup(deploymentEnvironment); exists {
+		environment = strings.ToLower(strings.TrimSpace(value))
+	}
+	if environment != "development" && environment != "production" {
+		return Config{}, fmt.Errorf("%s must be development or production", deploymentEnvironment)
+	}
+
 	return Config{
 		DatabaseURL:     databaseURL,
 		HTTPAddress:     httpAddress,
 		ShutdownTimeout: shutdownTimeout,
+		Production:      environment == "production",
 	}, nil
 }
 

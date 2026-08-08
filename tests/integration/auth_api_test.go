@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -46,8 +47,9 @@ func TestSignupAndLoginAPIWithPostgreSQL(t *testing.T) {
 	service := auth.NewService(pool)
 	var logs bytes.Buffer
 	router := httpapi.NewRouter(httpapi.Options{
-		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
-		AuthService: service,
+		Logger:        slog.New(slog.NewJSONHandler(&logs, nil)),
+		AuthService:   service,
+		SecureCookies: true,
 	})
 
 	signup := performAuthRequest(t, router, "/api/v1/auth/signup", email, password)
@@ -63,31 +65,64 @@ func TestSignupAndLoginAPIWithPostgreSQL(t *testing.T) {
 	if signup.Body.Session.ExpiresAt.Before(time.Now().Add(14 * time.Minute)) {
 		t.Fatalf("signup session expires too soon: %s", signup.Body.Session.ExpiresAt)
 	}
+	signupRefreshToken := requireRefreshCookie(t, signup, true)
+	if strings.Contains(signup.RawBody, signupRefreshToken) {
+		t.Fatal("signup JSON exposed its refresh token")
+	}
 
 	var passwordHash string
-	var tokenDigest []byte
-	var storedExpiry time.Time
+	var accessDigest []byte
+	var refreshDigest []byte
+	var storedAccessExpiry time.Time
+	var storedRefreshExpiry time.Time
+	var accessFamilyID string
+	var refreshFamilyID string
 	err = pool.QueryRow(ctx, `
-		SELECT users.password_hash, auth_sessions.token_digest, auth_sessions.expires_at
+		SELECT
+			users.password_hash,
+			auth_sessions.token_digest,
+			auth_sessions.expires_at,
+			auth_sessions.family_id::text,
+			refresh_tokens.token_digest,
+			refresh_tokens.expires_at,
+			refresh_tokens.family_id::text
 		FROM users
 		JOIN auth_sessions ON auth_sessions.user_id = users.id
+		JOIN refresh_tokens ON refresh_tokens.user_id = users.id
 		WHERE users.email = $1
-	`, email).Scan(&passwordHash, &tokenDigest, &storedExpiry)
+	`, email).Scan(
+		&passwordHash,
+		&accessDigest,
+		&storedAccessExpiry,
+		&accessFamilyID,
+		&refreshDigest,
+		&storedRefreshExpiry,
+		&refreshFamilyID,
+	)
 	if err != nil {
 		t.Fatalf("inspect stored credentials: %v", err)
 	}
 	if passwordHash == password || !strings.HasPrefix(passwordHash, "$argon2id$") {
 		t.Fatal("database does not contain an Argon2id password hash")
 	}
-	expectedDigest := sha256.Sum256([]byte(signup.Body.Session.Token))
-	if !bytes.Equal(tokenDigest, expectedDigest[:]) {
-		t.Fatal("database session digest does not match the returned token")
+	expectedAccessDigest := sha256.Sum256([]byte(signup.Body.Session.Token))
+	if !bytes.Equal(accessDigest, expectedAccessDigest[:]) {
+		t.Fatal("database access digest does not match the returned token")
 	}
-	if bytes.Contains(tokenDigest, []byte(signup.Body.Session.Token)) {
-		t.Fatal("database contains the raw session token")
+	expectedRefreshDigest := sha256.Sum256([]byte(signupRefreshToken))
+	if !bytes.Equal(refreshDigest, expectedRefreshDigest[:]) {
+		t.Fatal("database refresh digest does not match the cookie token")
 	}
-	if !storedExpiry.Equal(signup.Body.Session.ExpiresAt) {
-		t.Fatalf("stored expiry %s differs from API expiry %s", storedExpiry, signup.Body.Session.ExpiresAt)
+	if bytes.Contains(accessDigest, []byte(signup.Body.Session.Token)) ||
+		bytes.Contains(refreshDigest, []byte(signupRefreshToken)) {
+		t.Fatal("database contains a raw access or refresh token")
+	}
+	if !storedAccessExpiry.Equal(signup.Body.Session.ExpiresAt) {
+		t.Fatalf("stored expiry %s differs from API expiry %s", storedAccessExpiry, signup.Body.Session.ExpiresAt)
+	}
+	if storedRefreshExpiry.Before(time.Now().Add(29*24*time.Hour)) || accessFamilyID != refreshFamilyID {
+		t.Fatalf("unexpected refresh expiry or token family: %s %q/%q",
+			storedRefreshExpiry, accessFamilyID, refreshFamilyID)
 	}
 
 	authenticatedUser, err := service.Authenticate(ctx, signup.Body.Session.Token)
@@ -98,12 +133,55 @@ func TestSignupAndLoginAPIWithPostgreSQL(t *testing.T) {
 		t.Fatalf("authenticated user ID = %q, want %q", authenticatedUser.ID, signup.Body.User.ID)
 	}
 
+	refreshed := performRefreshRequest(t, router, signupRefreshToken)
+	if refreshed.Status != http.StatusOK || refreshed.Body.User.ID != signup.Body.User.ID ||
+		refreshed.Body.Session.Token == signup.Body.Session.Token {
+		t.Fatalf("refresh response is incorrect: status=%d body=%s", refreshed.Status, refreshed.RawBody)
+	}
+	rotatedRefreshToken := requireRefreshCookie(t, refreshed, true)
+	if rotatedRefreshToken == signupRefreshToken || strings.Contains(refreshed.RawBody, rotatedRefreshToken) {
+		t.Fatal("refresh token was not rotated exclusively through the cookie")
+	}
+	if _, err := service.Authenticate(ctx, refreshed.Body.Session.Token); err != nil {
+		t.Fatalf("authenticate refreshed access token: %v", err)
+	}
+
+	reused := performRefreshRequest(t, router, signupRefreshToken)
+	assertAuthAPIError(t, reused, http.StatusUnauthorized, "invalid_refresh_token")
+	if len(reused.Cookies) != 1 || reused.Cookies[0].MaxAge != -1 {
+		t.Fatalf("reused refresh cookie was not cleared: %+v", reused.Cookies)
+	}
+	if _, err := service.Authenticate(ctx, refreshed.Body.Session.Token); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("reused refresh token left family access valid: %v", err)
+	}
+	revokedReplacement := performRefreshRequest(t, router, rotatedRefreshToken)
+	assertAuthAPIError(t, revokedReplacement, http.StatusUnauthorized, "invalid_refresh_token")
+
+	var activeRefreshTokens int
+	var activeAccessTokens int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE revoked_at IS NULL),
+			(SELECT count(*) FROM auth_sessions WHERE family_id = $1::text::uuid AND revoked_at IS NULL)
+		FROM refresh_tokens
+		WHERE family_id = $1::text::uuid
+	`, refreshFamilyID).Scan(&activeRefreshTokens, &activeAccessTokens); err != nil {
+		t.Fatalf("inspect revoked token family: %v", err)
+	}
+	if activeRefreshTokens != 0 || activeAccessTokens != 0 {
+		t.Fatalf("reused family retains refresh/access tokens: %d/%d", activeRefreshTokens, activeAccessTokens)
+	}
+
 	login := performAuthRequest(t, router, "/api/v1/auth/login", strings.ToUpper(email), password)
 	if login.Status != http.StatusOK {
 		t.Fatalf("login status = %d, want %d: %s", login.Status, http.StatusOK, login.RawBody)
 	}
 	if login.Body.Session.Token == signup.Body.Session.Token {
 		t.Fatal("login reused the signup session token")
+	}
+	loginRefreshToken := requireRefreshCookie(t, login, true)
+	if loginRefreshToken == signupRefreshToken || loginRefreshToken == rotatedRefreshToken {
+		t.Fatal("login reused a previous refresh token")
 	}
 
 	duplicate := performAuthRequest(t, router, "/api/v1/auth/signup", email, password)
@@ -117,20 +195,29 @@ func TestSignupAndLoginAPIWithPostgreSQL(t *testing.T) {
 		t.Fatal("login error message reveals whether the account exists")
 	}
 
+	loginAccessDigest := sha256.Sum256([]byte(login.Body.Session.Token))
 	_, err = pool.Exec(ctx, `
 		UPDATE auth_sessions
 		SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 hours',
 		    expires_at = CURRENT_TIMESTAMP - INTERVAL '1 hour'
 		WHERE token_digest = $1
-	`, expectedDigest[:])
+	`, loginAccessDigest[:])
 	if err != nil {
 		t.Fatalf("expire signup session: %v", err)
 	}
-	if _, err := service.Authenticate(ctx, signup.Body.Session.Token); err != auth.ErrInvalidSession {
+	if _, err := service.Authenticate(ctx, login.Body.Session.Token); err != auth.ErrInvalidSession {
 		t.Fatalf("authenticate expired session: %v, want ErrInvalidSession", err)
 	}
 
-	for _, secret := range []string{password, signup.Body.Session.Token, login.Body.Session.Token} {
+	for _, secret := range []string{
+		password,
+		signup.Body.Session.Token,
+		signupRefreshToken,
+		refreshed.Body.Session.Token,
+		rotatedRefreshToken,
+		login.Body.Session.Token,
+		loginRefreshToken,
+	} {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatal("authentication logs contain a password or session token")
 		}
@@ -166,6 +253,7 @@ type authAPIResult struct {
 	RawBody      string
 	ErrorCode    string
 	ErrorMessage string
+	Cookies      []*http.Cookie
 	Body         struct {
 		User struct {
 			ID            string `json:"id"`
@@ -192,7 +280,11 @@ func performAuthRequest(t *testing.T, handler http.Handler, path, email, passwor
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
-	result := authAPIResult{Status: response.Code, RawBody: response.Body.String()}
+	result := authAPIResult{
+		Status:  response.Code,
+		RawBody: response.Body.String(),
+		Cookies: response.Result().Cookies(),
+	}
 	if response.Code >= http.StatusBadRequest {
 		var errorBody httpapi.ErrorResponse
 		if err := json.Unmarshal(response.Body.Bytes(), &errorBody); err != nil {
@@ -208,6 +300,68 @@ func performAuthRequest(t *testing.T, handler http.Handler, path, email, passwor
 	return result
 }
 
+func TestProductionAuthSchemaRollback(t *testing.T) {
+	if os.Getenv("WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT") != "1" {
+		t.Skip("WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT is not set")
+	}
+
+	ctx, tx := beginOwnershipSchemaTest(t)
+	var relationName *string
+	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.refresh_tokens')::text`).Scan(&relationName); err != nil {
+		t.Fatalf("inspect rolled-back refresh_tokens table: %v", err)
+	}
+	if relationName != nil {
+		t.Fatal("refresh_tokens still exists after production-auth rollback")
+	}
+	var productionColumns int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'auth_sessions'
+		  AND column_name IN ('family_id', 'revoked_at')
+	`).Scan(&productionColumns); err != nil {
+		t.Fatalf("inspect rolled-back auth session columns: %v", err)
+	}
+	if productionColumns != 0 {
+		t.Fatalf("auth_sessions retains %d production columns", productionColumns)
+	}
+	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.auth_sessions')::text`).Scan(&relationName); err != nil {
+		t.Fatalf("inspect preserved auth_sessions table: %v", err)
+	}
+	if relationName == nil {
+		t.Fatal("preceding auth_sessions table is absent after production-auth rollback")
+	}
+}
+
+func performRefreshRequest(t *testing.T, handler http.Handler, refreshToken string) authAPIResult {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", nil)
+	if refreshToken != "" {
+		request.AddCookie(&http.Cookie{Name: "watchtrace_refresh", Value: refreshToken})
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	result := authAPIResult{
+		Status:  response.Code,
+		RawBody: response.Body.String(),
+		Cookies: response.Result().Cookies(),
+	}
+	if response.Code >= http.StatusBadRequest {
+		var errorBody httpapi.ErrorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &errorBody); err != nil {
+			t.Fatalf("decode refresh error: %v", err)
+		}
+		result.ErrorCode = errorBody.Error.Code
+		result.ErrorMessage = errorBody.Error.Message
+		return result
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result.Body); err != nil {
+		t.Fatalf("decode refresh response: %v", err)
+	}
+	return result
+}
+
 func assertAuthAPIError(t *testing.T, result authAPIResult, status int, code string) {
 	t.Helper()
 	if result.Status != status || result.ErrorCode != code {
@@ -215,8 +369,29 @@ func assertAuthAPIError(t *testing.T, result authAPIResult, status int, code str
 	}
 }
 
+func requireRefreshCookie(t *testing.T, result authAPIResult, secure bool) string {
+	t.Helper()
+	if len(result.Cookies) != 1 {
+		t.Fatalf("refresh cookies = %d, want 1", len(result.Cookies))
+	}
+	cookie := result.Cookies[0]
+	if cookie.Name != "watchtrace_refresh" || cookie.Value == "" ||
+		cookie.Path != "/api/v1/auth" || !cookie.HttpOnly || cookie.Secure != secure ||
+		cookie.SameSite != http.SameSiteStrictMode || cookie.MaxAge < 1 ||
+		cookie.Expires.Before(time.Now().Add(29*24*time.Hour)) {
+		t.Fatalf("unsafe refresh cookie: %+v", cookie)
+	}
+	return cookie.Value
+}
+
 func deleteAuthTestUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool, email string) {
 	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM refresh_tokens
+		WHERE user_id IN (SELECT id FROM users WHERE email = $1)
+	`, email); err != nil {
+		t.Fatalf("delete test refresh tokens: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `
 		DELETE FROM auth_sessions
 		WHERE user_id IN (SELECT id FROM users WHERE email = $1)

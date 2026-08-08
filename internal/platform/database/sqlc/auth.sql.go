@@ -12,19 +12,89 @@ import (
 )
 
 const createAuthSession = `-- name: CreateAuthSession :exec
-INSERT INTO auth_sessions (user_id, token_digest, expires_at)
-VALUES ($1::text::uuid, $2, $3)
+INSERT INTO auth_sessions (user_id, family_id, token_digest, expires_at)
+VALUES (
+    $1::text::uuid,
+    $2::text::uuid,
+    $3,
+    $4
+)
 `
 
 type CreateAuthSessionParams struct {
 	UserID      string
+	FamilyID    string
 	TokenDigest []byte
 	ExpiresAt   pgtype.Timestamptz
 }
 
 func (q *Queries) CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) error {
-	_, err := q.db.Exec(ctx, createAuthSession, arg.UserID, arg.TokenDigest, arg.ExpiresAt)
+	_, err := q.db.Exec(ctx, createAuthSession,
+		arg.UserID,
+		arg.FamilyID,
+		arg.TokenDigest,
+		arg.ExpiresAt,
+	)
 	return err
+}
+
+const createRefreshTokenFamily = `-- name: CreateRefreshTokenFamily :one
+INSERT INTO refresh_tokens (user_id, family_id, token_digest, expires_at)
+VALUES (
+    $1::text::uuid,
+    gen_random_uuid(),
+    $2,
+    $3
+)
+RETURNING id::text AS id, family_id::text AS family_id
+`
+
+type CreateRefreshTokenFamilyParams struct {
+	UserID      string
+	TokenDigest []byte
+	ExpiresAt   pgtype.Timestamptz
+}
+
+type CreateRefreshTokenFamilyRow struct {
+	ID       string
+	FamilyID string
+}
+
+func (q *Queries) CreateRefreshTokenFamily(ctx context.Context, arg CreateRefreshTokenFamilyParams) (CreateRefreshTokenFamilyRow, error) {
+	row := q.db.QueryRow(ctx, createRefreshTokenFamily, arg.UserID, arg.TokenDigest, arg.ExpiresAt)
+	var i CreateRefreshTokenFamilyRow
+	err := row.Scan(&i.ID, &i.FamilyID)
+	return i, err
+}
+
+const createRotatedRefreshToken = `-- name: CreateRotatedRefreshToken :one
+INSERT INTO refresh_tokens (user_id, family_id, token_digest, expires_at)
+VALUES (
+    $1::text::uuid,
+    $2::text::uuid,
+    $3,
+    $4
+)
+RETURNING id::text AS id
+`
+
+type CreateRotatedRefreshTokenParams struct {
+	UserID      string
+	FamilyID    string
+	TokenDigest []byte
+	ExpiresAt   pgtype.Timestamptz
+}
+
+func (q *Queries) CreateRotatedRefreshToken(ctx context.Context, arg CreateRotatedRefreshTokenParams) (string, error) {
+	row := q.db.QueryRow(ctx, createRotatedRefreshToken,
+		arg.UserID,
+		arg.FamilyID,
+		arg.TokenDigest,
+		arg.ExpiresAt,
+	)
+	var id string
+	err := row.Scan(&id)
+	return id, err
 }
 
 const createUser = `-- name: CreateUser :one
@@ -60,6 +130,7 @@ FROM auth_sessions
 JOIN users ON users.id = auth_sessions.user_id
 WHERE auth_sessions.token_digest = $1
   AND auth_sessions.expires_at > CURRENT_TIMESTAMP
+  AND auth_sessions.revoked_at IS NULL
 `
 
 type GetUserByAuthSessionRow struct {
@@ -102,4 +173,99 @@ func (q *Queries) GetUserForLogin(ctx context.Context, email string) (GetUserFor
 		&i.EmailVerified,
 	)
 	return i, err
+}
+
+const lockRefreshTokenForRotation = `-- name: LockRefreshTokenForRotation :one
+SELECT
+    refresh_tokens.id::text AS id,
+    refresh_tokens.user_id::text AS user_id,
+    refresh_tokens.family_id::text AS family_id,
+    refresh_tokens.expires_at,
+    refresh_tokens.rotated_at,
+    refresh_tokens.revoked_at,
+    users.email,
+    (users.email_verified_at IS NOT NULL)::boolean AS email_verified
+FROM refresh_tokens
+JOIN users ON users.id = refresh_tokens.user_id
+WHERE refresh_tokens.token_digest = $1
+FOR UPDATE OF refresh_tokens
+`
+
+type LockRefreshTokenForRotationRow struct {
+	ID            string
+	UserID        string
+	FamilyID      string
+	ExpiresAt     pgtype.Timestamptz
+	RotatedAt     pgtype.Timestamptz
+	RevokedAt     pgtype.Timestamptz
+	Email         string
+	EmailVerified bool
+}
+
+func (q *Queries) LockRefreshTokenForRotation(ctx context.Context, tokenDigest []byte) (LockRefreshTokenForRotationRow, error) {
+	row := q.db.QueryRow(ctx, lockRefreshTokenForRotation, tokenDigest)
+	var i LockRefreshTokenForRotationRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.FamilyID,
+		&i.ExpiresAt,
+		&i.RotatedAt,
+		&i.RevokedAt,
+		&i.Email,
+		&i.EmailVerified,
+	)
+	return i, err
+}
+
+const markRefreshTokenRotated = `-- name: MarkRefreshTokenRotated :execrows
+UPDATE refresh_tokens
+SET rotated_at = CURRENT_TIMESTAMP,
+    replaced_by_id = $1::text::uuid
+WHERE id = $2::text::uuid
+  AND rotated_at IS NULL
+  AND revoked_at IS NULL
+`
+
+type MarkRefreshTokenRotatedParams struct {
+	ReplacedByID string
+	ID           string
+}
+
+func (q *Queries) MarkRefreshTokenRotated(ctx context.Context, arg MarkRefreshTokenRotatedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markRefreshTokenRotated, arg.ReplacedByID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeAccessTokenFamily = `-- name: RevokeAccessTokenFamily :execrows
+UPDATE auth_sessions
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE family_id = $1::text::uuid
+  AND revoked_at IS NULL
+`
+
+func (q *Queries) RevokeAccessTokenFamily(ctx context.Context, familyID string) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeAccessTokenFamily, familyID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeRefreshTokenFamily = `-- name: RevokeRefreshTokenFamily :execrows
+UPDATE refresh_tokens
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE family_id = $1::text::uuid
+  AND revoked_at IS NULL
+`
+
+func (q *Queries) RevokeRefreshTokenFamily(ctx context.Context, familyID string) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeRefreshTokenFamily, familyID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

@@ -18,8 +18,9 @@ import (
 func TestAuthEndpointsReturnSafeSessionResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const (
-		password = "a-local-test-password"
-		token    = "wt_local_safe-test-token"
+		password     = "a-local-test-password"
+		accessToken  = "wt_access_safe-test-token"
+		refreshToken = "wt_refresh_safe-test-token"
 	)
 	var logs bytes.Buffer
 	service := &fakeAuthenticationService{
@@ -29,12 +30,14 @@ func TestAuthEndpointsReturnSafeSessionResponse(t *testing.T) {
 				Email: "user@example.test",
 			},
 			Session: auth.Session{
-				Token:     token,
-				ExpiresAt: time.Date(2026, 8, 8, 12, 15, 0, 0, time.UTC),
+				Token:                 accessToken,
+				ExpiresAt:             time.Date(2026, 8, 8, 12, 15, 0, 0, time.UTC),
+				RefreshToken:          refreshToken,
+				RefreshTokenExpiresAt: time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC),
 			},
 		},
 	}
-	router := NewRouter(Options{Logger: testLogger(&logs), AuthService: service})
+	router := NewRouter(Options{Logger: testLogger(&logs), AuthService: service, SecureCookies: true})
 
 	for _, test := range []struct {
 		name       string
@@ -66,17 +69,87 @@ func TestAuthEndpointsReturnSafeSessionResponse(t *testing.T) {
 			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if body.User.Email != "user@example.test" || body.Session.Token != token {
+			if body.User.Email != "user@example.test" || body.Session.Token != accessToken {
 				t.Fatalf("unexpected authentication response: %+v", body)
 			}
 			if body.Session.TokenType != "Bearer" {
 				t.Fatalf("token type = %q, want Bearer", body.Session.TokenType)
 			}
+			cookies := response.Result().Cookies()
+			if len(cookies) != 1 {
+				t.Fatalf("refresh cookies = %d, want 1", len(cookies))
+			}
+			cookie := cookies[0]
+			if cookie.Name != refreshTokenCookieName || cookie.Value != refreshToken ||
+				!cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteStrictMode ||
+				cookie.Path != "/api/v1/auth" {
+				t.Fatalf("unsafe production refresh cookie: %+v", cookie)
+			}
+			if strings.Contains(response.Body.String(), refreshToken) {
+				t.Fatal("authentication JSON exposed the refresh token")
+			}
 		})
 	}
 
-	if strings.Contains(logs.String(), password) || strings.Contains(logs.String(), token) {
+	if strings.Contains(logs.String(), password) || strings.Contains(logs.String(), accessToken) ||
+		strings.Contains(logs.String(), refreshToken) {
 		t.Fatal("request logs contain a password or session token")
+	}
+}
+
+func TestRefreshEndpointUsesCookieAndRotatesIt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const (
+		oldRefreshToken = "wt_refresh_old-test-token"
+		newRefreshToken = "wt_refresh_new-test-token"
+	)
+	service := &fakeAuthenticationService{result: auth.Result{
+		User: auth.User{ID: "user-id", Email: "user@example.test"},
+		Session: auth.Session{
+			Token:                 "wt_access_new-test-token",
+			ExpiresAt:             time.Now().UTC().Add(15 * time.Minute),
+			RefreshToken:          newRefreshToken,
+			RefreshTokenExpiresAt: time.Now().UTC().Add(30 * 24 * time.Hour),
+		},
+	}}
+	router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", nil)
+	request.AddCookie(&http.Cookie{Name: refreshTokenCookieName, Value: oldRefreshToken})
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || service.refreshToken != oldRefreshToken {
+		t.Fatalf("refresh response = %d, service token = %q", response.Code, service.refreshToken)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Value != newRefreshToken || !cookies[0].HttpOnly || cookies[0].Secure {
+		t.Fatalf("unexpected development refresh cookie: %+v", cookies)
+	}
+	if strings.Contains(response.Body.String(), newRefreshToken) {
+		t.Fatal("refresh JSON exposed the rotated refresh token")
+	}
+}
+
+func TestRefreshEndpointRejectsMissingCookieAndClearsIt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &fakeAuthenticationService{}
+	router := NewRouter(Options{Logger: discardLogger(), AuthService: service, SecureCookies: true})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", nil)
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized || service.calls != 0 {
+		t.Fatalf("missing refresh cookie response = %d, service calls = %d", response.Code, service.calls)
+	}
+	body := decodeErrorResponse(t, response)
+	if body.Error.Code != "invalid_refresh_token" {
+		t.Fatalf("refresh error code = %q", body.Error.Code)
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].MaxAge != -1 || !cookies[0].HttpOnly || !cookies[0].Secure {
+		t.Fatalf("missing refresh cookie was not cleared safely: %+v", cookies)
 	}
 }
 
@@ -146,9 +219,10 @@ func TestAuthEndpointValidatesCredentialsBeforeService(t *testing.T) {
 }
 
 type fakeAuthenticationService struct {
-	result auth.Result
-	err    error
-	calls  int
+	result       auth.Result
+	err          error
+	calls        int
+	refreshToken string
 }
 
 func (service *fakeAuthenticationService) Signup(context.Context, string, string) (auth.Result, error) {
@@ -158,5 +232,11 @@ func (service *fakeAuthenticationService) Signup(context.Context, string, string
 
 func (service *fakeAuthenticationService) Login(context.Context, string, string) (auth.Result, error) {
 	service.calls++
+	return service.result, service.err
+}
+
+func (service *fakeAuthenticationService) Refresh(_ context.Context, refreshToken string) (auth.Result, error) {
+	service.calls++
+	service.refreshToken = refreshToken
 	return service.result, service.err
 }

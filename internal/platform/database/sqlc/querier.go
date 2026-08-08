@@ -21,6 +21,8 @@ type Querier interface {
 	CreateOwnerMembership(ctx context.Context, arg CreateOwnerMembershipParams) error
 	CreateProductionEnvironment(ctx context.Context, arg CreateProductionEnvironmentParams) (CreateProductionEnvironmentRow, error)
 	CreateProject(ctx context.Context, arg CreateProjectParams) (CreateProjectRow, error)
+	CreateRefreshTokenFamily(ctx context.Context, arg CreateRefreshTokenFamilyParams) (CreateRefreshTokenFamilyRow, error)
+	CreateRotatedRefreshToken(ctx context.Context, arg CreateRotatedRefreshTokenParams) (string, error)
 	CreateScheduledCheckJob(ctx context.Context, arg CreateScheduledCheckJobParams) (int64, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
 	GetAccessibleEnvironmentOrganization(ctx context.Context, arg GetAccessibleEnvironmentOrganizationParams) (string, error)
@@ -36,6 +38,10 @@ type Querier interface {
 	LockCheckJobForCompletion(ctx context.Context, jobID string) (LockCheckJobForCompletionRow, error)
 	LockDueMonitors(ctx context.Context, batchSize int32) ([]LockDueMonitorsRow, error)
 	LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (string, error)
+	LockRefreshTokenForRotation(ctx context.Context, tokenDigest []byte) (LockRefreshTokenForRotationRow, error)
+	MarkRefreshTokenRotated(ctx context.Context, arg MarkRefreshTokenRotatedParams) (int64, error)
+	RevokeAccessTokenFamily(ctx context.Context, familyID string) (int64, error)
+	RevokeRefreshTokenFamily(ctx context.Context, familyID string) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

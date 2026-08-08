@@ -25,12 +25,16 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if configuration.ShutdownTimeout != defaultShutdownTimeout {
 		t.Fatalf("ShutdownTimeout = %s, want %s", configuration.ShutdownTimeout, defaultShutdownTimeout)
 	}
+	if configuration.Production {
+		t.Fatal("default development environment enabled production cookies")
+	}
 }
 
 func TestLoadReadsEnvironment(t *testing.T) {
 	t.Setenv(databaseURLEnvironment, validDatabaseURL)
 	t.Setenv(httpAddressEnvironment, "[::1]:9090")
 	t.Setenv(shutdownTimeoutEnvironment, "25s")
+	t.Setenv(deploymentEnvironment, "production")
 
 	configuration, err := Load()
 	if err != nil {
@@ -42,6 +46,9 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	}
 	if configuration.ShutdownTimeout != 25*time.Second {
 		t.Fatalf("ShutdownTimeout = %s, want 25s", configuration.ShutdownTimeout)
+	}
+	if !configuration.Production {
+		t.Fatal("production environment did not enable production cookie security")
 	}
 }
 
@@ -136,6 +143,14 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 				shutdownTimeoutEnvironment: "0s",
 			},
 			wantMessage: "WATCHTRACE_SHUTDOWN_TIMEOUT must be a positive duration",
+		},
+		{
+			name: "invalid deployment environment",
+			values: map[string]string{
+				databaseURLEnvironment: validDatabaseURL,
+				deploymentEnvironment:  "staging",
+			},
+			wantMessage: "WATCHTRACE_ENVIRONMENT must be development or production",
 		},
 	}
 

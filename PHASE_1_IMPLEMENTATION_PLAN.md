@@ -291,7 +291,7 @@ Complete the identity and ownership features required for a safe multi-user beta
 
 ### Checklist
 
-- [ ] **P1-201 — Implement production access and refresh sessions**
+- [x] **P1-201 — Implement production access and refresh sessions**
   - Use short-lived access tokens.
   - Use random, rotated refresh tokens stored only as digests.
   - Put browser refresh tokens in Secure, HttpOnly cookies in production.

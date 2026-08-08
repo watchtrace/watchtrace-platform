@@ -36,6 +36,7 @@ The initial standard codes are:
 |---:|---|
 | 400 | `invalid_request` |
 | 401 | `invalid_credentials` |
+| 401 | `invalid_refresh_token` |
 | 401 | `invalid_session` |
 | 404 | `not_found` |
 | 404 | `environment_not_found` |

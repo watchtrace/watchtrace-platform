@@ -1,9 +1,8 @@
-// Package auth implements the minimal Phase 1 account and session flow.
+// Package auth implements Phase 1 accounts and rotating access/refresh sessions.
 package auth
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/mail"
@@ -19,7 +18,8 @@ import (
 const (
 	minimumPasswordBytes = 12
 	maximumPasswordBytes = 1024
-	sessionLifetime      = 15 * time.Minute
+	accessTokenLifetime  = 15 * time.Minute
+	refreshTokenLifetime = 30 * 24 * time.Hour
 )
 
 var (
@@ -34,6 +34,9 @@ var (
 	// ErrInvalidSession indicates that a bearer token is malformed, unknown, or
 	// expired.
 	ErrInvalidSession = errors.New("invalid session")
+	// ErrInvalidRefreshToken deliberately covers malformed, unknown, expired,
+	// revoked, and reused refresh tokens.
+	ErrInvalidRefreshToken = errors.New("invalid refresh token")
 )
 
 type databaseConnection interface {
@@ -48,11 +51,14 @@ type User struct {
 	EmailVerified bool
 }
 
-// Session is the raw token returned once to the caller and its expiry time.
-// Only a digest of Token is persisted.
+// Session contains the short-lived access token returned in JSON and the
+// rotating refresh token consumed by the HTTP cookie boundary. Only digests
+// of either raw token are persisted.
 type Session struct {
-	Token     string
-	ExpiresAt time.Time
+	Token                 string
+	ExpiresAt             time.Time
+	RefreshToken          string
+	RefreshTokenExpiresAt time.Time
 }
 
 // Result combines the authenticated user with a newly issued session.
@@ -61,7 +67,7 @@ type Result struct {
 	Session Session
 }
 
-// Service implements signup, login, and lookup of the minimal bearer session.
+// Service implements signup, login, rotation, and access-token lookup.
 type Service struct {
 	db databaseConnection
 }
@@ -74,8 +80,7 @@ func NewService(db databaseConnection) *Service {
 	return &Service{db: db}
 }
 
-// Signup creates one user and one session atomically. Ownership records are
-// intentionally not created until P1-103.
+// Signup creates one user and one access/refresh token family atomically.
 func (s *Service) Signup(ctx context.Context, email, password string) (Result, error) {
 	normalizedEmail, err := validateCredentials(email, password)
 	if err != nil {
@@ -86,7 +91,7 @@ func (s *Service) Signup(ctx context.Context, email, password string) (Result, e
 	if err != nil {
 		return Result{}, fmt.Errorf("hash password: %w", err)
 	}
-	token, digest, expiresAt, err := issueSession()
+	tokens, err := issueTokenPair()
 	if err != nil {
 		return Result{}, err
 	}
@@ -112,11 +117,7 @@ func (s *Service) Signup(ctx context.Context, email, password string) (Result, e
 		return Result{}, fmt.Errorf("create user: %w", err)
 	}
 
-	if err := queries.CreateAuthSession(ctx, database.CreateAuthSessionParams{
-		UserID:      created.ID,
-		TokenDigest: digest,
-		ExpiresAt:   pgtype.Timestamptz{Time: expiresAt, Valid: true},
-	}); err != nil {
+	if err := persistNewTokenFamily(ctx, queries, created.ID, tokens); err != nil {
 		return Result{}, fmt.Errorf("create signup session: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -129,12 +130,12 @@ func (s *Service) Signup(ctx context.Context, email, password string) (Result, e
 			Email:         created.Email,
 			EmailVerified: created.EmailVerified,
 		},
-		Session: Session{Token: token, ExpiresAt: expiresAt},
+		Session: sessionFromTokenPair(tokens),
 	}, nil
 }
 
 // Login verifies credentials with a constant-work password check and issues a
-// new short-lived session without changing ownership data.
+// new access/refresh token family without changing ownership data.
 func (s *Service) Login(ctx context.Context, email, password string) (Result, error) {
 	normalizedEmail, err := validateCredentials(email, password)
 	if err != nil {
@@ -154,15 +155,8 @@ func (s *Service) Login(ctx context.Context, email, password string) (Result, er
 		return Result{}, ErrInvalidCredentials
 	}
 
-	token, digest, expiresAt, err := issueSession()
+	session, err := s.createTokenFamily(ctx, stored.ID)
 	if err != nil {
-		return Result{}, err
-	}
-	if err := queries.CreateAuthSession(ctx, database.CreateAuthSessionParams{
-		UserID:      stored.ID,
-		TokenDigest: digest,
-		ExpiresAt:   pgtype.Timestamptz{Time: expiresAt, Valid: true},
-	}); err != nil {
 		return Result{}, fmt.Errorf("create login session: %w", err)
 	}
 
@@ -172,18 +166,18 @@ func (s *Service) Login(ctx context.Context, email, password string) (Result, er
 			Email:         stored.Email,
 			EmailVerified: stored.EmailVerified,
 		},
-		Session: Session{Token: token, ExpiresAt: expiresAt},
+		Session: session,
 	}, nil
 }
 
 // Authenticate resolves a valid unexpired session without exposing its stored
 // digest. Protected ownership and later tenant APIs use this boundary.
 func (s *Service) Authenticate(ctx context.Context, token string) (User, error) {
-	if !validSessionToken(token) {
+	if !validAccessToken(token) {
 		return User{}, ErrInvalidSession
 	}
 
-	stored, err := database.New(s.db).GetUserByAuthSession(ctx, sessionTokenDigest(token))
+	stored, err := database.New(s.db).GetUserByAuthSession(ctx, tokenDigest(token))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrInvalidSession
 	}
@@ -198,12 +192,193 @@ func (s *Service) Authenticate(ctx context.Context, token string) (User, error) 
 	}, nil
 }
 
-func issueSession() (string, []byte, time.Time, error) {
-	token, digest, err := newSessionToken()
-	if err != nil {
-		return "", nil, time.Time{}, err
+// Refresh rotates one active refresh token and issues a new access token. A
+// replay of an already-rotated token revokes all access and refresh tokens in
+// its family before returning the same public error as any invalid token.
+func (s *Service) Refresh(ctx context.Context, refreshToken string) (Result, error) {
+	if !validRefreshToken(refreshToken) {
+		return Result{}, ErrInvalidRefreshToken
 	}
-	return token, digest, time.Now().UTC().Add(sessionLifetime), nil
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("begin refresh transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	queries := database.New(tx)
+	stored, err := queries.LockRefreshTokenForRotation(ctx, tokenDigest(refreshToken))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Result{}, ErrInvalidRefreshToken
+	}
+	if err != nil {
+		return Result{}, fmt.Errorf("lock refresh token: %w", err)
+	}
+	if stored.RotatedAt.Valid {
+		if err := revokeTokenFamily(ctx, queries, stored.FamilyID); err != nil {
+			return Result{}, fmt.Errorf("revoke reused refresh token family: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return Result{}, fmt.Errorf("commit reused refresh token revocation: %w", err)
+		}
+		return Result{}, ErrInvalidRefreshToken
+	}
+	if stored.RevokedAt.Valid || !stored.ExpiresAt.Valid ||
+		!stored.ExpiresAt.Time.After(time.Now().UTC()) {
+		return Result{}, ErrInvalidRefreshToken
+	}
+
+	tokens, err := issueTokenPair()
+	if err != nil {
+		return Result{}, err
+	}
+	replacementID, err := queries.CreateRotatedRefreshToken(
+		ctx,
+		database.CreateRotatedRefreshTokenParams{
+			UserID:      stored.UserID,
+			FamilyID:    stored.FamilyID,
+			TokenDigest: tokens.RefreshDigest,
+			ExpiresAt:   timestamp(tokens.RefreshExpiresAt),
+		},
+	)
+	if err != nil {
+		return Result{}, fmt.Errorf("create rotated refresh token: %w", err)
+	}
+	rotated, err := queries.MarkRefreshTokenRotated(ctx, database.MarkRefreshTokenRotatedParams{
+		ReplacedByID: replacementID,
+		ID:           stored.ID,
+	})
+	if err != nil {
+		return Result{}, fmt.Errorf("mark refresh token rotated: %w", err)
+	}
+	if rotated != 1 {
+		return Result{}, errors.New("mark refresh token rotated affected an unexpected number of rows")
+	}
+	if err := createAccessToken(ctx, queries, stored.UserID, stored.FamilyID, tokens); err != nil {
+		return Result{}, fmt.Errorf("create refreshed access token: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Result{}, fmt.Errorf("commit refresh transaction: %w", err)
+	}
+
+	return Result{
+		User: User{
+			ID:            stored.UserID,
+			Email:         stored.Email,
+			EmailVerified: stored.EmailVerified,
+		},
+		Session: sessionFromTokenPair(tokens),
+	}, nil
+}
+
+type tokenPair struct {
+	AccessToken      string
+	AccessDigest     []byte
+	AccessExpiresAt  time.Time
+	RefreshToken     string
+	RefreshDigest    []byte
+	RefreshExpiresAt time.Time
+}
+
+func issueTokenPair() (tokenPair, error) {
+	accessToken, accessDigest, err := newAccessToken()
+	if err != nil {
+		return tokenPair{}, err
+	}
+	refreshToken, refreshDigest, err := newRefreshToken()
+	if err != nil {
+		return tokenPair{}, err
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	return tokenPair{
+		AccessToken:      accessToken,
+		AccessDigest:     accessDigest,
+		AccessExpiresAt:  now.Add(accessTokenLifetime),
+		RefreshToken:     refreshToken,
+		RefreshDigest:    refreshDigest,
+		RefreshExpiresAt: now.Add(refreshTokenLifetime),
+	}, nil
+}
+
+func (s *Service) createTokenFamily(ctx context.Context, userID string) (Session, error) {
+	tokens, err := issueTokenPair()
+	if err != nil {
+		return Session{}, err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return Session{}, fmt.Errorf("begin token family transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+	if err := persistNewTokenFamily(ctx, database.New(tx), userID, tokens); err != nil {
+		return Session{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Session{}, fmt.Errorf("commit token family transaction: %w", err)
+	}
+	return sessionFromTokenPair(tokens), nil
+}
+
+func persistNewTokenFamily(
+	ctx context.Context,
+	queries *database.Queries,
+	userID string,
+	tokens tokenPair,
+) error {
+	refresh, err := queries.CreateRefreshTokenFamily(ctx, database.CreateRefreshTokenFamilyParams{
+		UserID:      userID,
+		TokenDigest: tokens.RefreshDigest,
+		ExpiresAt:   timestamp(tokens.RefreshExpiresAt),
+	})
+	if err != nil {
+		return fmt.Errorf("create refresh token family: %w", err)
+	}
+	return createAccessToken(ctx, queries, userID, refresh.FamilyID, tokens)
+}
+
+func createAccessToken(
+	ctx context.Context,
+	queries *database.Queries,
+	userID string,
+	familyID string,
+	tokens tokenPair,
+) error {
+	if err := queries.CreateAuthSession(ctx, database.CreateAuthSessionParams{
+		UserID:      userID,
+		FamilyID:    familyID,
+		TokenDigest: tokens.AccessDigest,
+		ExpiresAt:   timestamp(tokens.AccessExpiresAt),
+	}); err != nil {
+		return fmt.Errorf("create access token: %w", err)
+	}
+	return nil
+}
+
+func revokeTokenFamily(ctx context.Context, queries *database.Queries, familyID string) error {
+	if _, err := queries.RevokeRefreshTokenFamily(ctx, familyID); err != nil {
+		return fmt.Errorf("revoke refresh tokens: %w", err)
+	}
+	if _, err := queries.RevokeAccessTokenFamily(ctx, familyID); err != nil {
+		return fmt.Errorf("revoke access tokens: %w", err)
+	}
+	return nil
+}
+
+func sessionFromTokenPair(tokens tokenPair) Session {
+	return Session{
+		Token:                 tokens.AccessToken,
+		ExpiresAt:             tokens.AccessExpiresAt,
+		RefreshToken:          tokens.RefreshToken,
+		RefreshTokenExpiresAt: tokens.RefreshExpiresAt,
+	}
+}
+
+func timestamp(value time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: value, Valid: true}
 }
 
 func validateCredentials(email, password string) (string, error) {
@@ -220,12 +395,4 @@ func validateCredentials(email, password string) (string, error) {
 	}
 
 	return normalizedEmail, nil
-}
-
-func validSessionToken(token string) bool {
-	if !strings.HasPrefix(token, sessionTokenPrefix) {
-		return false
-	}
-	raw, err := base64.RawURLEncoding.Strict().DecodeString(strings.TrimPrefix(token, sessionTokenPrefix))
-	return err == nil && len(raw) == sessionTokenBytes
 }

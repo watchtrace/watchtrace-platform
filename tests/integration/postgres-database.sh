@@ -52,7 +52,7 @@ cd "$repository_root"
 
 env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate up
 version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)
-if [ "$version" != "version 6 (clean)" ]; then
+if [ "$version" != "version 7 (clean)" ]; then
     echo "Migration version after up was '$version'." >&2
     exit 1
 fi
@@ -62,8 +62,18 @@ env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
 
 env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate down
 version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)
-if [ "$version" != "version 5 (clean)" ]; then
+if [ "$version" != "version 6 (clean)" ]; then
     echo "Migration version after down was '$version'." >&2
+    exit 1
+fi
+env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
+    WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT=1 \
+    go test ./tests/integration -run '^TestProductionAuthSchemaRollback$' -count=1
+
+env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate down
+version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)
+if [ "$version" != "version 5 (clean)" ]; then
+    echo "Migration version after second down was '$version'." >&2
     exit 1
 fi
 env WATCHTRACE_TEST_DATABASE_URL="$database_url" \

@@ -32,22 +32,29 @@ func TestValidateCredentialsNormalizesEmailAndBoundsPassword(t *testing.T) {
 	}
 }
 
-func TestValidSessionTokenRejectsMalformedValues(t *testing.T) {
-	token, _, err := newSessionToken()
+func TestValidAccessAndRefreshTokensRejectMalformedValues(t *testing.T) {
+	token, _, err := newAccessToken()
 	if err != nil {
-		t.Fatalf("generate session token: %v", err)
+		t.Fatalf("generate access token: %v", err)
 	}
-	if !validSessionToken(token) {
-		t.Fatal("generated session token was rejected")
+	if !validAccessToken(token) {
+		t.Fatal("generated access token was rejected")
+	}
+	refreshToken, _, err := newRefreshToken()
+	if err != nil {
+		t.Fatalf("generate refresh token: %v", err)
+	}
+	if !validRefreshToken(refreshToken) || validAccessToken(refreshToken) {
+		t.Fatal("generated refresh token was not isolated from access tokens")
 	}
 
 	for _, malformed := range []string{
 		"",
 		"wrong_prefix",
-		sessionTokenPrefix + "not-base64!",
-		sessionTokenPrefix + "c2hvcnQ",
+		accessTokenPrefix + "not-base64!",
+		accessTokenPrefix + "c2hvcnQ",
 	} {
-		if validSessionToken(malformed) {
+		if validAccessToken(malformed) {
 			t.Fatalf("malformed token %q was accepted", malformed)
 		}
 	}

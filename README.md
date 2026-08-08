@@ -118,9 +118,10 @@ error, health, and safe-logging conventions.
 Stop the process with `Ctrl+C`; the server stops accepting new connections and
 allows active requests up to 10 seconds to finish.
 
-Minimal signup and login are available under `/api/v1/auth`. See
-[`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for the request, response,
-and short-lived bearer-session contract.
+Signup, login, and rotating refresh sessions are available under
+`/api/v1/auth`. See [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for the
+short-lived bearer access-token, browser cookie, and replay-revocation
+contract.
 
 An authenticated user can create the initial organization, owner membership,
 project, and production environment atomically with `POST

@@ -338,6 +338,12 @@ func deleteOwnershipTestData(
 		}
 	}
 	if _, err := pool.Exec(ctx, `
+		DELETE FROM refresh_tokens
+		WHERE user_id IN (SELECT id FROM users WHERE email = ANY($1::text[]))
+	`, emails); err != nil {
+		t.Fatalf("delete ownership test refresh tokens: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
 		DELETE FROM auth_sessions
 		WHERE user_id IN (SELECT id FROM users WHERE email = ANY($1::text[]))
 	`, emails); err != nil {

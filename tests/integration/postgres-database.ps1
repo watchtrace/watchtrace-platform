@@ -29,6 +29,7 @@ $previousExpectedAuthSchemaAbsent = $env:WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT
 $previousExpectedMonitorSchemaAbsent = $env:WATCHTRACE_EXPECT_MONITOR_SCHEMA_ABSENT
 $previousExpectedSchedulerSchemaAbsent = $env:WATCHTRACE_EXPECT_SCHEDULER_SCHEMA_ABSENT
 $previousExpectedCheckerSchemaAbsent = $env:WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABSENT
+$previousExpectedProductionAuthSchemaAbsent = $env:WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT
 
 function Invoke-Compose {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
@@ -76,7 +77,7 @@ try {
 
     Invoke-Go run ./cmd/migrate up
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 6 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 7 (clean)") {
         throw "Unexpected migration version after up: $version"
     }
 
@@ -84,8 +85,17 @@ try {
 
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 5 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 6 (clean)") {
         throw "Unexpected migration version after down: $version"
+    }
+    $env:WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT = "1"
+    Invoke-Go test ./tests/integration -run '^TestProductionAuthSchemaRollback$' -count=1
+    $env:WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT = $previousExpectedProductionAuthSchemaAbsent
+
+    Invoke-Go run ./cmd/migrate down
+    $version = (& go run ./cmd/migrate version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 5 (clean)") {
+        throw "Unexpected migration version after second down: $version"
     }
     $env:WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABSENT = "1"
     Invoke-Go test ./tests/integration -run '^TestHTTPCheckWorkerSchemaRollback$' -count=1
@@ -110,4 +120,5 @@ finally {
     $env:WATCHTRACE_EXPECT_MONITOR_SCHEMA_ABSENT = $previousExpectedMonitorSchemaAbsent
     $env:WATCHTRACE_EXPECT_SCHEDULER_SCHEMA_ABSENT = $previousExpectedSchedulerSchemaAbsent
     $env:WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABSENT = $previousExpectedCheckerSchemaAbsent
+    $env:WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT = $previousExpectedProductionAuthSchemaAbsent
 }
