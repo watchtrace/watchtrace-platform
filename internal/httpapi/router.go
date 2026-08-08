@@ -10,9 +10,11 @@ import (
 
 // Options contains the dependencies used by the HTTP router.
 type Options struct {
-	Logger         *slog.Logger
-	ReadinessCheck func(context.Context) error
-	AuthService    AuthenticationService
+	Logger           *slog.Logger
+	ReadinessCheck   func(context.Context) error
+	AuthService      AuthenticationService
+	Authenticator    SessionAuthenticator
+	OwnershipService OwnershipService
 }
 
 // NewRouter assembles the HTTP routes owned by the API command.
@@ -50,6 +52,9 @@ func NewRouter(options Options) *gin.Engine {
 	})
 	if options.AuthService != nil {
 		registerAuthRoutes(router, options.AuthService)
+	}
+	if options.Authenticator != nil && options.OwnershipService != nil {
+		registerOwnershipRoutes(router, options.Authenticator, options.OwnershipService)
 	}
 
 	router.NoRoute(func(c *gin.Context) {

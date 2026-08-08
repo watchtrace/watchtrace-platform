@@ -122,6 +122,11 @@ Minimal signup and login are available under `/api/v1/auth`. See
 [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) for the request, response,
 and short-lived bearer-session contract.
 
+An authenticated user can create the initial organization, owner membership,
+project, and production environment atomically with `POST
+/api/v1/organizations`; see
+[`docs/OWNERSHIP_API.md`](docs/OWNERSHIP_API.md).
+
 ## Local PostgreSQL
 
 The Compose service runs PostgreSQL 18.4 on `127.0.0.1:5432` and stores its

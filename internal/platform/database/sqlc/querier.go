@@ -12,6 +12,10 @@ import (
 
 type Querier interface {
 	CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) error
+	CreateOrganization(ctx context.Context, arg CreateOrganizationParams) (CreateOrganizationRow, error)
+	CreateOwnerMembership(ctx context.Context, arg CreateOwnerMembershipParams) error
+	CreateProductionEnvironment(ctx context.Context, arg CreateProductionEnvironmentParams) (CreateProductionEnvironmentRow, error)
+	CreateProject(ctx context.Context, arg CreateProjectParams) (CreateProjectRow, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
 	GetDatabaseTime(ctx context.Context) (pgtype.Timestamptz, error)
 	GetUserByAuthSession(ctx context.Context, tokenDigest []byte) (GetUserByAuthSessionRow, error)

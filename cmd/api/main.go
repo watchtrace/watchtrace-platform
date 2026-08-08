@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
 	"github.com/watchtrace/watchtrace-platform/internal/httpapi"
+	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/config"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/httpserver"
 )
@@ -34,6 +35,7 @@ func main() {
 	}
 	defer databasePool.Close()
 	authService := auth.NewService(databasePool)
+	ownershipService := ownership.NewService(databasePool)
 
 	listener, err := net.Listen("tcp", configuration.HTTPAddress)
 	if err != nil {
@@ -44,9 +46,11 @@ func main() {
 	logger.Info("API server listening", "address", listener.Addr())
 
 	server := httpserver.New(httpapi.NewRouter(httpapi.Options{
-		Logger:         logger,
-		ReadinessCheck: databasePool.Ping,
-		AuthService:    authService,
+		Logger:           logger,
+		ReadinessCheck:   databasePool.Ping,
+		AuthService:      authService,
+		Authenticator:    authService,
+		OwnershipService: ownershipService,
 	}), configuration.ShutdownTimeout)
 	if err := server.Serve(ctx, listener); err != nil {
 		logger.Error("API server stopped", "error", err)

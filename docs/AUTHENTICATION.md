@@ -48,9 +48,10 @@ The success response is:
 ```
 
 Authentication responses set `Cache-Control: no-store`. Clients keep the raw
-token and send it as `Authorization: Bearer <token>` to authenticated endpoints
-introduced by subsequent tasks. The database stores only a SHA-256 digest of
-the random 256-bit token. Sessions expire after 15 minutes.
+token and send it as `Authorization: Bearer <token>` to authenticated endpoints,
+including the [default ownership API](OWNERSHIP_API.md). The database stores
+only a SHA-256 digest of the random 256-bit token. Sessions expire after 15
+minutes.
 
 ## Errors
 
@@ -59,6 +60,7 @@ In addition to the shared API errors:
 | HTTP status | Code | Meaning |
 |---:|---|---|
 | 401 | `invalid_credentials` | Email or password did not authenticate. |
+| 401 | `invalid_session` | A protected route received no valid bearer session. |
 | 409 | `email_in_use` | The normalized signup email already exists. |
 | 422 | `validation_failed` | Email or password failed validation. |
 

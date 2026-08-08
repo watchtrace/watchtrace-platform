@@ -19,7 +19,6 @@ or server session time zone. Organization deletion is represented by nullable
 `deleted_at`; the ownership foreign keys intentionally do not cascade deletes.
 
 A partial unique index allows at most one `owner` membership per organization.
-Creating the user, organization, owner membership, project, and default
-production environment atomically—and ensuring a newly created organization
-never exists without an owner—belongs to P1-103 rather than this schema-only
-task.
+The default ownership API creates the organization, owner membership, project,
+and production environment in one transaction, ensuring organizations created
+through the supported path never exist without their owner.

@@ -234,7 +234,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Return a secure authenticated session suitable for local development.
   - Do not log passwords, tokens, or cookies.
 
-- [ ] **P1-103 — Create the default ownership path**
+- [x] **P1-103 — Create the default ownership path**
   - Let a new user create an organization, project, and production environment.
   - Ensure every child record belongs to the correct organization.
 

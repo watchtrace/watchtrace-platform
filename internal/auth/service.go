@@ -177,7 +177,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (Result, er
 }
 
 // Authenticate resolves a valid unexpired session without exposing its stored
-// digest. It is ready for the authorized ownership APIs added by later tasks.
+// digest. Protected ownership and later tenant APIs use this boundary.
 func (s *Service) Authenticate(ctx context.Context, token string) (User, error) {
 	if !validSessionToken(token) {
 		return User{}, ErrInvalidSession
