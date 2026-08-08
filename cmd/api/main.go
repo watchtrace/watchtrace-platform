@@ -36,16 +36,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer databasePool.Close()
-	verificationSender, err := auth.NewLocalSMTPSender(
+	actionSender, err := auth.NewLocalSMTPSender(
 		configuration.VerificationSMTPAddress,
 		configuration.VerificationFrom,
 		configuration.VerificationURL,
+		configuration.PasswordResetURL,
 	)
 	if err != nil {
 		logger.Error("configure local email verification delivery")
 		os.Exit(1)
 	}
-	authService := auth.NewService(databasePool, verificationSender)
+	authService := auth.NewService(databasePool, actionSender)
 	go runSessionCleanup(ctx, authService, logger)
 	ownershipService := ownership.NewService(databasePool)
 	monitorService := monitor.NewService(databasePool)

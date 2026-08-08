@@ -41,6 +41,53 @@ RETURNING
     users.email,
     (users.email_verified_at IS NOT NULL)::boolean AS email_verified;
 
+-- name: GetUserForPasswordReset :one
+SELECT id::text AS id, email
+FROM users
+WHERE lower(btrim(email)) = $1;
+
+-- name: InvalidateActivePasswordResetTokens :execrows
+UPDATE user_action_tokens
+SET used_at = CURRENT_TIMESTAMP
+WHERE user_id = sqlc.arg(user_id)::text::uuid
+  AND purpose = 'password_reset'
+  AND used_at IS NULL;
+
+-- name: CreatePasswordResetToken :exec
+INSERT INTO user_action_tokens (user_id, purpose, token_digest, expires_at)
+VALUES (
+    sqlc.arg(user_id)::text::uuid,
+    'password_reset',
+    sqlc.arg(token_digest),
+    sqlc.arg(expires_at)
+);
+
+-- name: LockPasswordResetToken :one
+SELECT
+    user_action_tokens.id::text AS id,
+    user_action_tokens.user_id::text AS user_id,
+    user_action_tokens.expires_at,
+    user_action_tokens.used_at
+FROM user_action_tokens
+WHERE user_action_tokens.purpose = 'password_reset'
+  AND user_action_tokens.token_digest = sqlc.arg(token_digest)
+FOR UPDATE;
+
+-- name: CompletePasswordReset :execrows
+WITH consumed AS (
+    UPDATE user_action_tokens
+    SET used_at = CURRENT_TIMESTAMP
+    WHERE id = sqlc.arg(token_id)::text::uuid
+      AND purpose = 'password_reset'
+      AND used_at IS NULL
+    RETURNING user_id
+)
+UPDATE users
+SET password_hash = sqlc.arg(password_hash),
+    updated_at = CURRENT_TIMESTAMP
+FROM consumed
+WHERE users.id = consumed.user_id;
+
 -- name: GetUserForLogin :one
 SELECT
     id::text AS id,

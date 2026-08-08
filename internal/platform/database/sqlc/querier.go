@@ -15,12 +15,14 @@ type Querier interface {
 	ClaimPendingCheckJob(ctx context.Context, arg ClaimPendingCheckJobParams) (ClaimPendingCheckJobRow, error)
 	CompleteCheckJob(ctx context.Context, arg CompleteCheckJobParams) (int64, error)
 	CompleteEmailVerification(ctx context.Context, tokenID string) (CompleteEmailVerificationRow, error)
+	CompletePasswordReset(ctx context.Context, arg CompletePasswordResetParams) (int64, error)
 	CountOrganizationMonitors(ctx context.Context, organizationID string) (int64, error)
 	CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) error
 	CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) error
 	CreateMonitor(ctx context.Context, arg CreateMonitorParams) (CreateMonitorRow, error)
 	CreateOrganization(ctx context.Context, arg CreateOrganizationParams) (CreateOrganizationRow, error)
 	CreateOwnerMembership(ctx context.Context, arg CreateOwnerMembershipParams) error
+	CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) error
 	CreateProductionEnvironment(ctx context.Context, arg CreateProductionEnvironmentParams) (CreateProductionEnvironmentRow, error)
 	CreateProject(ctx context.Context, arg CreateProjectParams) (CreateProjectRow, error)
 	CreateRefreshTokenFamily(ctx context.Context, arg CreateRefreshTokenFamilyParams) (CreateRefreshTokenFamilyRow, error)
@@ -35,14 +37,17 @@ type Querier interface {
 	GetLatestScheduledMonitorResult(ctx context.Context, arg GetLatestScheduledMonitorResultParams) (bool, error)
 	GetUserByAuthSession(ctx context.Context, tokenDigest []byte) (GetUserByAuthSessionRow, error)
 	GetUserForLogin(ctx context.Context, email string) (GetUserForLoginRow, error)
+	GetUserForPasswordReset(ctx context.Context, email string) (GetUserForPasswordResetRow, error)
 	HealthCheckExists(ctx context.Context, jobID string) (bool, error)
 	InsertHealthCheck(ctx context.Context, arg InsertHealthCheckParams) (int64, error)
+	InvalidateActivePasswordResetTokens(ctx context.Context, userID string) (int64, error)
 	ListEnvironmentMonitors(ctx context.Context, arg ListEnvironmentMonitorsParams) ([]ListEnvironmentMonitorsRow, error)
 	ListRecentMonitorResults(ctx context.Context, arg ListRecentMonitorResultsParams) ([]ListRecentMonitorResultsRow, error)
 	LockCheckJobForCompletion(ctx context.Context, jobID string) (LockCheckJobForCompletionRow, error)
 	LockDueMonitors(ctx context.Context, batchSize int32) ([]LockDueMonitorsRow, error)
 	LockEmailVerificationToken(ctx context.Context, tokenDigest []byte) (LockEmailVerificationTokenRow, error)
 	LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (string, error)
+	LockPasswordResetToken(ctx context.Context, tokenDigest []byte) (LockPasswordResetTokenRow, error)
 	LockRefreshTokenForRotation(ctx context.Context, tokenDigest []byte) (LockRefreshTokenForRotationRow, error)
 	MarkRefreshTokenRotated(ctx context.Context, arg MarkRefreshTokenRotatedParams) (int64, error)
 	RevokeAccessTokenFamily(ctx context.Context, familyID string) (int64, error)

@@ -23,6 +23,19 @@ func TestVerificationTokensAreOpaqueAndPurposeSpecific(t *testing.T) {
 	}
 }
 
+func TestPasswordResetTokensAreOpaqueAndPurposeSpecific(t *testing.T) {
+	token, digest, err := newPasswordResetToken()
+	if err != nil {
+		t.Fatalf("create password-reset token: %v", err)
+	}
+	if !validPasswordResetToken(token) || validVerificationToken(token) || validAccessToken(token) || validRefreshToken(token) {
+		t.Fatal("password-reset token was not isolated from other token types")
+	}
+	if len(digest) != 32 || strings.Contains(string(digest), token) {
+		t.Fatal("password-reset token digest is invalid or contains the raw token")
+	}
+}
+
 func TestLocalSMTPSenderDeliversVerificationLinkToLoopback(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -35,7 +48,7 @@ func TestLocalSMTPSenderDeliversVerificationLinkToLoopback(t *testing.T) {
 	go serveTestSMTP(listener, messages, serverErrors)
 
 	sender, err := NewLocalSMTPSender(listener.Addr().String(), "watchtrace@localhost",
-		"http://127.0.0.1:3000/verify-email")
+		"http://127.0.0.1:3000/verify-email", "http://127.0.0.1:3000/reset-password")
 	if err != nil {
 		t.Fatalf("construct local SMTP sender: %v", err)
 	}
@@ -69,9 +82,14 @@ func TestLocalSMTPSenderRejectsNonLoopbackConfiguration(t *testing.T) {
 		{address: "127.0.0.1:1025", url: "https://example.test/verify-email"},
 		{address: "127.0.0.1:1025", url: "http://127.0.0.1/verify-email?token=unsafe"},
 	} {
-		if _, err := NewLocalSMTPSender(test.address, "watchtrace@localhost", test.url); err == nil {
+		if _, err := NewLocalSMTPSender(test.address, "watchtrace@localhost", test.url,
+			"http://127.0.0.1/reset-password"); err == nil {
 			t.Fatalf("unsafe local SMTP configuration accepted: %+v", test)
 		}
+	}
+	if _, err := NewLocalSMTPSender("127.0.0.1:1025", "watchtrace@localhost",
+		"http://127.0.0.1/verify-email", "https://example.test/reset-password"); err == nil {
+		t.Fatal("unsafe password-reset URL was accepted")
 	}
 }
 

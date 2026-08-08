@@ -306,7 +306,7 @@ Complete the identity and ownership features required for a safe multi-user beta
   - Expire tokens and prevent reuse.
   - Provide a safe local email-development path.
 
-- [ ] **P1-204 — Implement forgot-password and reset-password**
+- [x] **P1-204 — Implement forgot-password and reset-password**
   - Do not reveal whether an email address exists.
   - Expire and invalidate reset tokens after use.
   - Revoke existing sessions after a successful reset.

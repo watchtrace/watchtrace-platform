@@ -459,6 +459,161 @@ func TestEmailVerificationWithPostgreSQL(t *testing.T) {
 	}
 }
 
+func TestPasswordResetWithPostgreSQL(t *testing.T) {
+	databaseURL := os.Getenv("WATCHTRACE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("WATCHTRACE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL connection pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	const (
+		email       = "reset-integration@example.test"
+		oldPassword = "P1-204-old-password!"
+		newPassword = "P1-204-new-password!"
+	)
+	deleteAuthTestUser(t, ctx, pool, email)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		deleteAuthTestUser(t, cleanupCtx, pool, email)
+	})
+
+	delivery := &recordingVerificationSender{}
+	service := auth.NewService(pool, delivery)
+	var logs bytes.Buffer
+	router := httpapi.NewRouter(httpapi.Options{
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)), AuthService: service, SecureCookies: true,
+	})
+	signup := performAuthRequest(t, router, "/api/v1/auth/signup", email, oldPassword)
+	if signup.Status != http.StatusCreated {
+		t.Fatalf("signup status = %d: %s", signup.Status, signup.RawBody)
+	}
+	signupRefresh := requireRefreshCookie(t, signup, true)
+	login := performAuthRequest(t, router, "/api/v1/auth/login", email, oldPassword)
+	if login.Status != http.StatusOK {
+		t.Fatalf("login status = %d: %s", login.Status, login.RawBody)
+	}
+	loginRefresh := requireRefreshCookie(t, login, true)
+
+	unknown := performForgotPasswordRequest(t, router, "missing-reset@example.test")
+	known := performForgotPasswordRequest(t, router, strings.ToUpper(email))
+	if unknown.Status != http.StatusAccepted || known.Status != http.StatusAccepted ||
+		unknown.RawBody != known.RawBody || known.RawBody != "" || len(delivery.resetTokens) != 1 {
+		t.Fatalf("forgot-password disclosed state: unknown=%d/%q known=%d/%q deliveries=%d",
+			unknown.Status, unknown.RawBody, known.Status, known.RawBody, len(delivery.resetTokens))
+	}
+	firstToken := delivery.resetTokens[0]
+	var digest []byte
+	var expiry time.Time
+	var usedAt *time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT token_digest, expires_at, used_at
+		FROM user_action_tokens
+		WHERE user_id = $1::text::uuid AND purpose = 'password_reset'
+		ORDER BY created_at DESC LIMIT 1
+	`, signup.Body.User.ID).Scan(&digest, &expiry, &usedAt); err != nil {
+		t.Fatalf("inspect password-reset token: %v", err)
+	}
+	if !bytes.Equal(digest, tokenSHA256(firstToken)) || bytes.Contains(digest, []byte(firstToken)) ||
+		expiry.Before(time.Now().Add(55*time.Minute)) || expiry.After(time.Now().Add(65*time.Minute)) || usedAt != nil ||
+		strings.Contains(known.RawBody, firstToken) || strings.Contains(logs.String(), firstToken) {
+		t.Fatalf("unsafe stored password-reset token: expiry=%s used=%v", expiry, usedAt)
+	}
+
+	second := performForgotPasswordRequest(t, router, email)
+	if second.Status != http.StatusAccepted || len(delivery.resetTokens) != 2 {
+		t.Fatalf("replacement reset request = %d deliveries=%d", second.Status, len(delivery.resetTokens))
+	}
+	firstUse := performResetPasswordRequest(t, router, firstToken, newPassword)
+	assertAuthAPIError(t, firstUse, http.StatusBadRequest, "invalid_reset_token")
+	secondToken := delivery.resetTokens[1]
+	if _, err := pool.Exec(ctx, `
+		UPDATE user_action_tokens
+		SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 hours',
+		    expires_at = CURRENT_TIMESTAMP - INTERVAL '1 hour'
+		WHERE token_digest = $1
+	`, tokenSHA256(secondToken)); err != nil {
+		t.Fatalf("expire password-reset token: %v", err)
+	}
+	expired := performResetPasswordRequest(t, router, secondToken, newPassword)
+	assertAuthAPIError(t, expired, http.StatusBadRequest, "invalid_reset_token")
+
+	if result := performForgotPasswordRequest(t, router, email); result.Status != http.StatusAccepted || len(delivery.resetTokens) != 3 {
+		t.Fatalf("valid reset token request = %d deliveries=%d", result.Status, len(delivery.resetTokens))
+	}
+	validToken := delivery.resetTokens[2]
+	reset := performResetPasswordRequest(t, router, validToken, newPassword)
+	if reset.Status != http.StatusNoContent || reset.RawBody != "" || len(reset.Cookies) != 1 || reset.Cookies[0].MaxAge != -1 {
+		t.Fatalf("password reset response = %d %q cookies=%+v", reset.Status, reset.RawBody, reset.Cookies)
+	}
+	assertAuthAPIError(t, performResetPasswordRequest(t, router, validToken, newPassword),
+		http.StatusBadRequest, "invalid_reset_token")
+	assertAuthAPIError(t, performAuthRequest(t, router, "/api/v1/auth/login", email, oldPassword),
+		http.StatusUnauthorized, "invalid_credentials")
+	if result := performAuthRequest(t, router, "/api/v1/auth/login", email, newPassword); result.Status != http.StatusOK {
+		t.Fatalf("new password login = %d %s", result.Status, result.RawBody)
+	}
+	if _, err := service.Authenticate(ctx, signup.Body.Session.Token); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("signup access session survived reset: %v", err)
+	}
+	if _, err := service.Authenticate(ctx, login.Body.Session.Token); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("login access session survived reset: %v", err)
+	}
+	assertAuthAPIError(t, performRefreshRequest(t, router, signupRefresh), http.StatusUnauthorized, "invalid_refresh_token")
+	assertAuthAPIError(t, performRefreshRequest(t, router, loginRefresh), http.StatusUnauthorized, "invalid_refresh_token")
+
+	if result := performForgotPasswordRequest(t, router, email); result.Status != http.StatusAccepted || len(delivery.resetTokens) != 4 {
+		t.Fatalf("pre-failure reset request = %d deliveries=%d", result.Status, len(delivery.resetTokens))
+	}
+	preservedToken := delivery.resetTokens[3]
+	failing := &recordingVerificationSender{err: errors.New("local SMTP unavailable")}
+	failingRouter := httpapi.NewRouter(httpapi.Options{Logger: discardIntegrationLogger(), AuthService: auth.NewService(pool, failing)})
+	failed := performForgotPasswordRequest(t, failingRouter, email)
+	if failed.Status != http.StatusAccepted || failed.RawBody != "" {
+		t.Fatalf("delivery failure disclosed state: %d %q", failed.Status, failed.RawBody)
+	}
+	var activeTokens int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM user_action_tokens
+		WHERE user_id = $1::text::uuid AND purpose = 'password_reset' AND used_at IS NULL
+	`, signup.Body.User.ID).Scan(&activeTokens); err != nil {
+		t.Fatalf("inspect failed reset delivery: %v", err)
+	}
+	if activeTokens != 1 {
+		t.Fatalf("failed reset delivery left %d active tokens, want the prior token only", activeTokens)
+	}
+	if result := performResetPasswordRequest(t, router, preservedToken, newPassword); result.Status != http.StatusNoContent {
+		t.Fatalf("failed delivery invalidated the prior token: %d %s", result.Status, result.RawBody)
+	}
+}
+
+func TestPasswordResetSchemaRollback(t *testing.T) {
+	if os.Getenv("WATCHTRACE_EXPECT_PASSWORD_RESET_SCHEMA_ABSENT") != "1" {
+		t.Skip("WATCHTRACE_EXPECT_PASSWORD_RESET_SCHEMA_ABSENT is not set")
+	}
+	ctx, tx := beginOwnershipSchemaTest(t)
+	var userID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO users (email, password_hash)
+		VALUES ('reset-rollback@example.test', 'rollback-test-hash')
+		RETURNING id::text
+	`).Scan(&userID); err != nil {
+		t.Fatalf("create rollback test user: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO user_action_tokens (user_id, purpose, token_digest, expires_at)
+		VALUES ($1::text::uuid, 'password_reset', decode(repeat('ab', 32), 'hex'), CURRENT_TIMESTAMP + INTERVAL '1 hour')
+	`, userID); err == nil {
+		t.Fatal("rolled-back schema still permits password-reset tokens")
+	}
+}
+
 func TestEmailVerificationSchemaRollback(t *testing.T) {
 	if os.Getenv("WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT") != "1" {
 		t.Skip("WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT is not set")
@@ -525,14 +680,22 @@ type authAPIResult struct {
 }
 
 type recordingVerificationSender struct {
-	recipients []string
-	tokens     []string
-	err        error
+	recipients      []string
+	tokens          []string
+	resetRecipients []string
+	resetTokens     []string
+	err             error
 }
 
 func (sender *recordingVerificationSender) SendVerification(_ context.Context, recipient, token string) error {
 	sender.recipients = append(sender.recipients, recipient)
 	sender.tokens = append(sender.tokens, token)
+	return sender.err
+}
+
+func (sender *recordingVerificationSender) SendPasswordReset(_ context.Context, recipient, token string) error {
+	sender.resetRecipients = append(sender.resetRecipients, recipient)
+	sender.resetTokens = append(sender.resetTokens, token)
 	return sender.err
 }
 
@@ -652,6 +815,35 @@ func performVerificationRequest(t *testing.T, handler http.Handler, token string
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &result.Body); err != nil {
 		t.Fatalf("decode email verification response: %v", err)
+	}
+	return result
+}
+
+func performForgotPasswordRequest(t *testing.T, handler http.Handler, email string) authAPIResult {
+	t.Helper()
+	requestBody, _ := json.Marshal(map[string]string{"email": email})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/forgot-password", bytes.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return authAPIResult{Status: response.Code, RawBody: response.Body.String(), Cookies: response.Result().Cookies()}
+}
+
+func performResetPasswordRequest(t *testing.T, handler http.Handler, token, password string) authAPIResult {
+	t.Helper()
+	requestBody, _ := json.Marshal(map[string]string{"token": token, "new_password": password})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/reset-password", bytes.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	result := authAPIResult{Status: response.Code, RawBody: response.Body.String(), Cookies: response.Result().Cookies()}
+	if response.Code >= http.StatusBadRequest {
+		var errorBody httpapi.ErrorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &errorBody); err != nil {
+			t.Fatalf("decode password-reset error: %v", err)
+		}
+		result.ErrorCode = errorBody.Error.Code
+		result.ErrorMessage = errorBody.Error.Message
 	}
 	return result
 }

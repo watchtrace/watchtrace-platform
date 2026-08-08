@@ -17,6 +17,8 @@ type AuthenticationService interface {
 	Refresh(context.Context, string) (auth.Result, error)
 	Logout(context.Context, string, bool) error
 	VerifyEmail(context.Context, string) (auth.User, error)
+	ForgotPassword(context.Context, string) error
+	ResetPassword(context.Context, string, string) error
 }
 
 const refreshTokenCookieName = "watchtrace_refresh"
@@ -32,6 +34,15 @@ type logoutRequest struct {
 
 type verifyEmailRequest struct {
 	Token string `json:"token" binding:"required,max=128"`
+}
+
+type forgotPasswordRequest struct {
+	Email string `json:"email" binding:"required,email,max=254"`
+}
+
+type resetPasswordRequest struct {
+	Token       string `json:"token" binding:"required,max=128"`
+	NewPassword string `json:"new_password" binding:"required,min=12,max=1024"`
 }
 
 type verifyEmailResponse struct {
@@ -61,6 +72,38 @@ func registerAuthRoutes(router *gin.Engine, service AuthenticationService, secur
 	router.POST("/api/v1/auth/refresh", refreshAuth(service, secureCookies))
 	router.POST("/api/v1/auth/logout", logoutAuth(service, secureCookies))
 	router.POST("/api/v1/auth/verify-email", verifyEmailAuth(service))
+	router.POST("/api/v1/auth/forgot-password", forgotPasswordAuth(service))
+	router.POST("/api/v1/auth/reset-password", resetPasswordAuth(service, secureCookies))
+}
+
+func forgotPasswordAuth(service AuthenticationService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		var request forgotPasswordRequest
+		if !DecodeJSON(c, &request) {
+			return
+		}
+		// A valid request is always accepted. In particular, neither account
+		// existence nor delivery/database failures cross this public boundary.
+		_ = service.ForgotPassword(c.Request.Context(), request.Email)
+		c.Status(http.StatusAccepted)
+	}
+}
+
+func resetPasswordAuth(service AuthenticationService, secureCookies bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		var request resetPasswordRequest
+		if !DecodeJSON(c, &request) {
+			return
+		}
+		if err := service.ResetPassword(c.Request.Context(), request.Token, request.NewPassword); err != nil {
+			respondAuthError(c, err)
+			return
+		}
+		clearRefreshTokenCookie(c, secureCookies)
+		c.Status(http.StatusNoContent)
+	}
 }
 
 func verifyEmailAuth(service AuthenticationService) gin.HandlerFunc {
@@ -206,6 +249,8 @@ func respondAuthError(c *gin.Context, err error) {
 		RespondError(c, http.StatusUnauthorized, "invalid_refresh_token", "a valid refresh token is required")
 	case errors.Is(err, auth.ErrInvalidVerificationToken):
 		RespondError(c, http.StatusBadRequest, "invalid_verification_token", "a valid unused email verification token is required")
+	case errors.Is(err, auth.ErrInvalidPasswordResetToken):
+		RespondError(c, http.StatusBadRequest, "invalid_reset_token", "a valid unused password reset token is required")
 	default:
 		RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 	}

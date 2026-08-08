@@ -79,6 +79,32 @@ used. Success returns HTTP 200 with the safe `user` object and
 tokens all return the same HTTP 400 `invalid_verification_token` response.
 Tokens cannot be reused.
 
+### `POST /api/v1/auth/forgot-password`
+
+Accepts `{"email":"user@example.com"}` and always returns HTTP 202 with an
+empty body for a syntactically valid email. Known and unknown accounts, plus
+database or local delivery failures, have the same public response. For a
+known account, WatchTrace invalidates any previous unused reset token and
+emails a new random 256-bit token with a one-hour lifetime. Only its SHA-256
+digest is stored.
+
+### `POST /api/v1/auth/reset-password`
+
+Accepts only `application/json`:
+
+```json
+{
+  "token": "wt_reset_<opaque-value>",
+  "new_password": "a-new-password-of-at-least-12-bytes"
+}
+```
+
+A valid token is consumed in the same transaction that replaces the Argon2id
+password hash, invalidates the user's other unused reset tokens, and revokes
+all existing access and refresh sessions. Success returns HTTP 204 and clears
+the refresh cookie. Missing, malformed, unknown, expired, and already used
+tokens all return HTTP 400 `invalid_reset_token`. Tokens cannot be reused.
+
 ## Tokens and cookies
 
 Successful signup, login, and refresh responses include a short-lived access
@@ -126,12 +152,13 @@ In addition to the shared API errors:
 | 401 | `invalid_refresh_token` | The refresh session could not be rotated. |
 | 401 | `invalid_session` | A protected route received no valid bearer session. |
 | 400 | `invalid_verification_token` | The email-verification token is invalid, expired, or used. |
+| 400 | `invalid_reset_token` | The password-reset token is invalid, expired, or used. |
 | 409 | `email_in_use` | The normalized signup email already exists. |
 | 422 | `validation_failed` | Email or password failed validation. |
 
 For local development, Docker Compose runs Mailpit with SMTP on
 `127.0.0.1:1025` and its mailbox UI on `http://127.0.0.1:8025`. The built-in
-adapter refuses non-loopback SMTP servers and non-loopback verification URLs,
+adapter refuses non-loopback SMTP servers and non-loopback action URLs,
 preventing this plaintext development path from being mistaken for production
-delivery. OCI/provider email delivery remains assigned to P1-406. Password
-reset remains assigned to P1-204.
+delivery. Set `WATCHTRACE_PASSWORD_RESET_URL` to the local reset page URL;
+OCI/provider email delivery remains assigned to P1-406.

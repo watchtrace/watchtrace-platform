@@ -44,6 +44,35 @@ func (q *Queries) CompleteEmailVerification(ctx context.Context, tokenID string)
 	return i, err
 }
 
+const completePasswordReset = `-- name: CompletePasswordReset :execrows
+WITH consumed AS (
+    UPDATE user_action_tokens
+    SET used_at = CURRENT_TIMESTAMP
+    WHERE id = $2::text::uuid
+      AND purpose = 'password_reset'
+      AND used_at IS NULL
+    RETURNING user_id
+)
+UPDATE users
+SET password_hash = $1,
+    updated_at = CURRENT_TIMESTAMP
+FROM consumed
+WHERE users.id = consumed.user_id
+`
+
+type CompletePasswordResetParams struct {
+	PasswordHash string
+	TokenID      string
+}
+
+func (q *Queries) CompletePasswordReset(ctx context.Context, arg CompletePasswordResetParams) (int64, error) {
+	result, err := q.db.Exec(ctx, completePasswordReset, arg.PasswordHash, arg.TokenID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createAuthSession = `-- name: CreateAuthSession :exec
 INSERT INTO auth_sessions (user_id, family_id, token_digest, expires_at)
 VALUES (
@@ -89,6 +118,27 @@ type CreateEmailVerificationTokenParams struct {
 
 func (q *Queries) CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) error {
 	_, err := q.db.Exec(ctx, createEmailVerificationToken, arg.UserID, arg.TokenDigest, arg.ExpiresAt)
+	return err
+}
+
+const createPasswordResetToken = `-- name: CreatePasswordResetToken :exec
+INSERT INTO user_action_tokens (user_id, purpose, token_digest, expires_at)
+VALUES (
+    $1::text::uuid,
+    'password_reset',
+    $2,
+    $3
+)
+`
+
+type CreatePasswordResetTokenParams struct {
+	UserID      string
+	TokenDigest []byte
+	ExpiresAt   pgtype.Timestamptz
+}
+
+func (q *Queries) CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) error {
+	_, err := q.db.Exec(ctx, createPasswordResetToken, arg.UserID, arg.TokenDigest, arg.ExpiresAt)
 	return err
 }
 
@@ -273,6 +323,40 @@ func (q *Queries) GetUserForLogin(ctx context.Context, email string) (GetUserFor
 	return i, err
 }
 
+const getUserForPasswordReset = `-- name: GetUserForPasswordReset :one
+SELECT id::text AS id, email
+FROM users
+WHERE lower(btrim(email)) = $1
+`
+
+type GetUserForPasswordResetRow struct {
+	ID    string
+	Email string
+}
+
+func (q *Queries) GetUserForPasswordReset(ctx context.Context, email string) (GetUserForPasswordResetRow, error) {
+	row := q.db.QueryRow(ctx, getUserForPasswordReset, email)
+	var i GetUserForPasswordResetRow
+	err := row.Scan(&i.ID, &i.Email)
+	return i, err
+}
+
+const invalidateActivePasswordResetTokens = `-- name: InvalidateActivePasswordResetTokens :execrows
+UPDATE user_action_tokens
+SET used_at = CURRENT_TIMESTAMP
+WHERE user_id = $1::text::uuid
+  AND purpose = 'password_reset'
+  AND used_at IS NULL
+`
+
+func (q *Queries) InvalidateActivePasswordResetTokens(ctx context.Context, userID string) (int64, error) {
+	result, err := q.db.Exec(ctx, invalidateActivePasswordResetTokens, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const lockEmailVerificationToken = `-- name: LockEmailVerificationToken :one
 SELECT
     user_action_tokens.id::text AS id,
@@ -294,6 +378,37 @@ func (q *Queries) LockEmailVerificationToken(ctx context.Context, tokenDigest []
 	row := q.db.QueryRow(ctx, lockEmailVerificationToken, tokenDigest)
 	var i LockEmailVerificationTokenRow
 	err := row.Scan(&i.ID, &i.ExpiresAt, &i.UsedAt)
+	return i, err
+}
+
+const lockPasswordResetToken = `-- name: LockPasswordResetToken :one
+SELECT
+    user_action_tokens.id::text AS id,
+    user_action_tokens.user_id::text AS user_id,
+    user_action_tokens.expires_at,
+    user_action_tokens.used_at
+FROM user_action_tokens
+WHERE user_action_tokens.purpose = 'password_reset'
+  AND user_action_tokens.token_digest = $1
+FOR UPDATE
+`
+
+type LockPasswordResetTokenRow struct {
+	ID        string
+	UserID    string
+	ExpiresAt pgtype.Timestamptz
+	UsedAt    pgtype.Timestamptz
+}
+
+func (q *Queries) LockPasswordResetToken(ctx context.Context, tokenDigest []byte) (LockPasswordResetTokenRow, error) {
+	row := q.db.QueryRow(ctx, lockPasswordResetToken, tokenDigest)
+	var i LockPasswordResetTokenRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.ExpiresAt,
+		&i.UsedAt,
+	)
 	return i, err
 }
 

@@ -30,7 +30,8 @@ func TestLoadUsesDefaults(t *testing.T) {
 	}
 	if configuration.VerificationSMTPAddress != defaultVerificationSMTP ||
 		configuration.VerificationFrom != defaultVerificationFrom ||
-		configuration.VerificationURL != defaultVerificationURL {
+		configuration.VerificationURL != defaultVerificationURL ||
+		configuration.PasswordResetURL != defaultPasswordResetURL {
 		t.Fatalf("unexpected verification defaults: %+v", configuration)
 	}
 }
@@ -43,6 +44,7 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	t.Setenv(verificationSMTPEnvironment, "127.0.0.1:2025")
 	t.Setenv(verificationFromEnvironment, "local@example.test")
 	t.Setenv(verificationURLEnvironment, "http://localhost:3001/verify")
+	t.Setenv(passwordResetURLEnvironment, "http://localhost:3001/reset")
 
 	configuration, err := Load()
 	if err != nil {
@@ -60,7 +62,8 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	}
 	if configuration.VerificationSMTPAddress != "127.0.0.1:2025" ||
 		configuration.VerificationFrom != "local@example.test" ||
-		configuration.VerificationURL != "http://localhost:3001/verify" {
+		configuration.VerificationURL != "http://localhost:3001/verify" ||
+		configuration.PasswordResetURL != "http://localhost:3001/reset" {
 		t.Fatalf("verification configuration was not loaded: %+v", configuration)
 	}
 }

@@ -16,13 +16,14 @@ import (
 )
 
 const (
-	minimumPasswordBytes = 12
-	maximumPasswordBytes = 1024
-	accessTokenLifetime  = 15 * time.Minute
-	refreshTokenLifetime = 30 * 24 * time.Hour
-	verificationLifetime = 24 * time.Hour
-	cleanupAccessBatch   = 500
-	cleanupFamilyBatch   = 100
+	minimumPasswordBytes  = 12
+	maximumPasswordBytes  = 1024
+	accessTokenLifetime   = 15 * time.Minute
+	refreshTokenLifetime  = 30 * 24 * time.Hour
+	verificationLifetime  = 24 * time.Hour
+	passwordResetLifetime = time.Hour
+	cleanupAccessBatch    = 500
+	cleanupFamilyBatch    = 100
 )
 
 // DefaultCleanupInterval bounds how long expired and revoked session records
@@ -47,6 +48,9 @@ var (
 	// ErrInvalidVerificationToken deliberately covers malformed, unknown,
 	// expired, and already used email-verification tokens.
 	ErrInvalidVerificationToken = errors.New("invalid email verification token")
+	// ErrInvalidPasswordResetToken deliberately covers malformed, unknown,
+	// expired, and already used password-reset tokens.
+	ErrInvalidPasswordResetToken = errors.New("invalid password reset token")
 )
 
 type databaseConnection interface {
@@ -79,16 +83,16 @@ type Result struct {
 
 // Service implements signup, login, rotation, and access-token lookup.
 type Service struct {
-	db                 databaseConnection
-	verificationSender VerificationSender
+	db           databaseConnection
+	actionSender AccountActionSender
 }
 
 // NewService constructs an authentication service backed by PostgreSQL.
-func NewService(db databaseConnection, sender VerificationSender) *Service {
+func NewService(db databaseConnection, sender AccountActionSender) *Service {
 	// Warm the fixed dummy hash once so unknown-account login follows the same
 	// single Argon2id verification path as a wrong password for a known user.
 	_ = dummyPasswordHash()
-	return &Service{db: db, verificationSender: sender}
+	return &Service{db: db, actionSender: sender}
 }
 
 // Signup creates one user and one access/refresh token family atomically.
@@ -142,10 +146,10 @@ func (s *Service) Signup(ctx context.Context, email, password string) (Result, e
 	}); err != nil {
 		return Result{}, fmt.Errorf("create email verification token: %w", err)
 	}
-	if s.verificationSender == nil {
+	if s.actionSender == nil {
 		return Result{}, errors.New("email verification sender is unavailable")
 	}
-	if err := s.verificationSender.SendVerification(ctx, created.Email, verificationToken); err != nil {
+	if err := s.actionSender.SendVerification(ctx, created.Email, verificationToken); err != nil {
 		return Result{}, fmt.Errorf("deliver email verification: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -208,6 +212,114 @@ func issueVerificationToken() (string, []byte, time.Time, error) {
 		return "", nil, time.Time{}, err
 	}
 	expiresAt := time.Now().UTC().Truncate(time.Microsecond).Add(verificationLifetime)
+	return token, digest, expiresAt, nil
+}
+
+// ForgotPassword creates and delivers a replacement reset token only when the
+// normalized email belongs to an account. Callers must return the same public
+// response for nil and non-validation errors so neither account existence nor
+// local delivery health is disclosed.
+func (s *Service) ForgotPassword(ctx context.Context, email string) error {
+	normalizedEmail, err := validateEmail(email)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin forgot-password transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	queries := database.New(tx)
+	user, err := queries.GetUserForPasswordReset(ctx, normalizedEmail)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load password-reset identity: %w", err)
+	}
+	if _, err := queries.InvalidateActivePasswordResetTokens(ctx, user.ID); err != nil {
+		return fmt.Errorf("invalidate password-reset tokens: %w", err)
+	}
+	token, digest, expiresAt, err := issuePasswordResetToken()
+	if err != nil {
+		return err
+	}
+	if err := queries.CreatePasswordResetToken(ctx, database.CreatePasswordResetTokenParams{
+		UserID: user.ID, TokenDigest: digest, ExpiresAt: timestamp(expiresAt),
+	}); err != nil {
+		return fmt.Errorf("create password-reset token: %w", err)
+	}
+	if s.actionSender == nil {
+		return errors.New("password-reset sender is unavailable")
+	}
+	if err := s.actionSender.SendPasswordReset(ctx, user.Email, token); err != nil {
+		return fmt.Errorf("deliver password reset: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit forgot-password transaction: %w", err)
+	}
+	return nil
+}
+
+// ResetPassword atomically consumes one reset token, replaces the password,
+// invalidates sibling reset tokens, and revokes every existing session.
+func (s *Service) ResetPassword(ctx context.Context, token, newPassword string) error {
+	if !validPasswordResetToken(token) {
+		return ErrInvalidPasswordResetToken
+	}
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+	passwordHash, err := hashPassword(newPassword)
+	if err != nil {
+		return fmt.Errorf("hash replacement password: %w", err)
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin password-reset transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	queries := database.New(tx)
+	stored, err := queries.LockPasswordResetToken(ctx, tokenDigest(token))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrInvalidPasswordResetToken
+	}
+	if err != nil {
+		return fmt.Errorf("lock password-reset token: %w", err)
+	}
+	if stored.UsedAt.Valid || !stored.ExpiresAt.Valid || !stored.ExpiresAt.Time.After(time.Now().UTC()) {
+		return ErrInvalidPasswordResetToken
+	}
+	updated, err := queries.CompletePasswordReset(ctx, database.CompletePasswordResetParams{
+		TokenID: stored.ID, PasswordHash: passwordHash,
+	})
+	if err != nil {
+		return fmt.Errorf("complete password reset: %w", err)
+	}
+	if updated != 1 {
+		return ErrInvalidPasswordResetToken
+	}
+	if _, err := queries.InvalidateActivePasswordResetTokens(ctx, stored.UserID); err != nil {
+		return fmt.Errorf("invalidate sibling password-reset tokens: %w", err)
+	}
+	if err := revokeUserSessions(ctx, queries, stored.UserID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit password reset: %w", err)
+	}
+	return nil
+}
+
+func issuePasswordResetToken() (string, []byte, time.Time, error) {
+	token, digest, err := newPasswordResetToken()
+	if err != nil {
+		return "", nil, time.Time{}, err
+	}
+	expiresAt := time.Now().UTC().Truncate(time.Microsecond).Add(passwordResetLifetime)
 	return token, digest, expiresAt, nil
 }
 
@@ -538,6 +650,17 @@ func timestamp(value time.Time) pgtype.Timestamptz {
 }
 
 func validateCredentials(email, password string) (string, error) {
+	normalizedEmail, err := validateEmail(email)
+	if err != nil {
+		return "", err
+	}
+	if err := validatePassword(password); err != nil {
+		return "", err
+	}
+	return normalizedEmail, nil
+}
+
+func validateEmail(email string) (string, error) {
 	normalizedEmail := strings.ToLower(strings.TrimSpace(email))
 	if normalizedEmail == "" || len(normalizedEmail) > 254 {
 		return "", ErrInvalidInput
@@ -546,9 +669,12 @@ func validateCredentials(email, password string) (string, error) {
 	if err != nil || parsed.Address != normalizedEmail {
 		return "", ErrInvalidInput
 	}
-	if len(password) < minimumPasswordBytes || len(password) > maximumPasswordBytes {
-		return "", ErrInvalidInput
-	}
-
 	return normalizedEmail, nil
+}
+
+func validatePassword(password string) error {
+	if len(password) < minimumPasswordBytes || len(password) > maximumPasswordBytes {
+		return ErrInvalidInput
+	}
+	return nil
 }

@@ -20,6 +20,7 @@ const (
 	verificationSMTPEnvironment = "WATCHTRACE_VERIFICATION_SMTP_ADDRESS"
 	verificationFromEnvironment = "WATCHTRACE_VERIFICATION_FROM"
 	verificationURLEnvironment  = "WATCHTRACE_VERIFICATION_URL"
+	passwordResetURLEnvironment = "WATCHTRACE_PASSWORD_RESET_URL"
 
 	defaultHTTPAddress      = "127.0.0.1:8080"
 	defaultShutdownTimeout  = 10 * time.Second
@@ -27,6 +28,7 @@ const (
 	defaultVerificationSMTP = "127.0.0.1:1025"
 	defaultVerificationFrom = "watchtrace@localhost"
 	defaultVerificationURL  = "http://127.0.0.1:3000/verify-email"
+	defaultPasswordResetURL = "http://127.0.0.1:3000/reset-password"
 )
 
 // Config contains the validated settings needed to start the API.
@@ -38,6 +40,7 @@ type Config struct {
 	VerificationSMTPAddress string
 	VerificationFrom        string
 	VerificationURL         string
+	PasswordResetURL        string
 }
 
 // Load reads configuration from the process environment and validates it.
@@ -89,7 +92,8 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	verificationSMTP := stringSetting(lookup, verificationSMTPEnvironment, defaultVerificationSMTP)
 	verificationFrom := stringSetting(lookup, verificationFromEnvironment, defaultVerificationFrom)
 	verificationURL := stringSetting(lookup, verificationURLEnvironment, defaultVerificationURL)
-	if verificationSMTP == "" || verificationFrom == "" || verificationURL == "" {
+	passwordResetURL := stringSetting(lookup, passwordResetURLEnvironment, defaultPasswordResetURL)
+	if verificationSMTP == "" || verificationFrom == "" || verificationURL == "" || passwordResetURL == "" {
 		return Config{}, errors.New("email verification settings must not be empty")
 	}
 
@@ -101,6 +105,7 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		VerificationSMTPAddress: verificationSMTP,
 		VerificationFrom:        verificationFrom,
 		VerificationURL:         verificationURL,
+		PasswordResetURL:        passwordResetURL,
 	}, nil
 }
 

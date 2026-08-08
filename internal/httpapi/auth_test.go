@@ -273,6 +273,54 @@ func TestVerifyEmailEndpointMapsInvalidTokenSafely(t *testing.T) {
 	}
 }
 
+func TestForgotPasswordDoesNotRevealAccountOrDeliveryState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, serviceErr := range []error{nil, errors.New("database or delivery detail")} {
+		service := &fakeAuthenticationService{err: serviceErr}
+		router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/forgot-password",
+			strings.NewReader(`{"email":"user@example.test"}`))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+
+		if response.Code != http.StatusAccepted || response.Body.Len() != 0 || service.forgotEmail != "user@example.test" {
+			t.Fatalf("forgot-password response = %d %q email=%q", response.Code, response.Body.String(), service.forgotEmail)
+		}
+	}
+}
+
+func TestResetPasswordClearsCookieAndMapsInvalidToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const token = "wt_reset_safe-test-token"
+	const password = "new-safe-password"
+
+	service := &fakeAuthenticationService{}
+	router := NewRouter(Options{Logger: discardLogger(), AuthService: service, SecureCookies: true})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/reset-password",
+		strings.NewReader(`{"token":"`+token+`","new_password":"`+password+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || service.resetToken != token || service.newPassword != password {
+		t.Fatalf("reset response = %d input=%q/%q", response.Code, service.resetToken, service.newPassword)
+	}
+	if cookies := response.Result().Cookies(); len(cookies) != 1 || cookies[0].MaxAge != -1 || !cookies[0].Secure {
+		t.Fatalf("reset did not clear the refresh cookie safely: %+v", cookies)
+	}
+
+	service = &fakeAuthenticationService{err: auth.ErrInvalidPasswordResetToken}
+	router = NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/reset-password",
+		strings.NewReader(`{"token":"`+token+`","new_password":"`+password+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || decodeErrorResponse(t, response).Error.Code != "invalid_reset_token" {
+		t.Fatalf("invalid reset response = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestAuthEndpointsMapErrorsWithoutLeakingDetails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -347,6 +395,9 @@ type fakeAuthenticationService struct {
 	logoutAll         bool
 	verifiedUser      auth.User
 	verificationToken string
+	forgotEmail       string
+	resetToken        string
+	newPassword       string
 }
 
 func (service *fakeAuthenticationService) Signup(context.Context, string, string) (auth.Result, error) {
@@ -376,4 +427,17 @@ func (service *fakeAuthenticationService) VerifyEmail(_ context.Context, token s
 	service.calls++
 	service.verificationToken = token
 	return service.verifiedUser, service.err
+}
+
+func (service *fakeAuthenticationService) ForgotPassword(_ context.Context, email string) error {
+	service.calls++
+	service.forgotEmail = email
+	return service.err
+}
+
+func (service *fakeAuthenticationService) ResetPassword(_ context.Context, token, newPassword string) error {
+	service.calls++
+	service.resetToken = token
+	service.newPassword = newPassword
+	return service.err
 }
