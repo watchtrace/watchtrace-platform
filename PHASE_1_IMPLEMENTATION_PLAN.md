@@ -347,11 +347,11 @@ Finish the organization and authorization foundation before adding more tenant-o
 
 ### Phase 1.1 gate
 
-- [ ] A new user can complete signup, verification, login, and logout.
-- [ ] Password reset works without exposing whether an account exists.
-- [ ] Role permissions pass their API tests.
-- [ ] Cross-organization access tests pass for every Phase 1 resource implemented so far.
-- [ ] Authentication secrets never appear in logs or API responses.
+- [x] A new user can complete signup, verification, login, and logout.
+- [x] Password reset works without exposing whether an account exists.
+- [x] Role permissions pass their API tests.
+- [x] Cross-organization access tests pass for every Phase 1 resource implemented so far.
+- [x] Authentication secrets never appear in logs or API responses.
 
 ---
 
