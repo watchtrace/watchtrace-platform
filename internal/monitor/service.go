@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/watchtrace/watchtrace-platform/internal/authorization"
 	"github.com/watchtrace/watchtrace-platform/internal/destination"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
@@ -39,6 +40,7 @@ var (
 	// ErrMonitorNotFound covers an unknown monitor and one outside the
 	// authorized organization and environment to avoid tenant enumeration.
 	ErrMonitorNotFound = errors.New("monitor not found")
+	ErrForbidden       = errors.New("permission denied")
 )
 
 var allowedIntervals = map[int32]struct{}{
@@ -143,7 +145,7 @@ func (s *Service) Create(
 	}()
 
 	queries := database.New(tx)
-	organizationID, err := queries.LockEnvironmentForMonitorCreation(ctx, database.LockEnvironmentForMonitorCreationParams{
+	authorized, err := queries.LockEnvironmentForMonitorCreation(ctx, database.LockEnvironmentForMonitorCreationParams{
 		UserID:        userID,
 		EnvironmentID: environmentID,
 	})
@@ -153,6 +155,10 @@ func (s *Service) Create(
 	if err != nil {
 		return Monitor{}, fmt.Errorf("authorize monitor environment: %w", err)
 	}
+	if !authorization.Allows(authorization.Role(authorized.Role), authorization.PermissionMonitorsManage) {
+		return Monitor{}, ErrForbidden
+	}
+	organizationID := authorized.OrganizationID
 
 	monitorCount, err := queries.CountOrganizationMonitors(ctx, organizationID)
 	if err != nil {
@@ -190,7 +196,7 @@ func (s *Service) List(ctx context.Context, userID, environmentID string) ([]Mon
 	}
 
 	queries := database.New(s.db)
-	organizationID, err := queries.GetAccessibleEnvironmentOrganization(
+	authorized, err := queries.GetAccessibleEnvironmentOrganization(
 		ctx,
 		database.GetAccessibleEnvironmentOrganizationParams{
 			UserID:        userID,
@@ -203,6 +209,10 @@ func (s *Service) List(ctx context.Context, userID, environmentID string) ([]Mon
 	if err != nil {
 		return nil, fmt.Errorf("authorize monitor list: %w", err)
 	}
+	if !authorization.Allows(authorization.Role(authorized.Role), authorization.PermissionMonitorsRead) {
+		return nil, ErrEnvironmentNotFound
+	}
+	organizationID := authorized.OrganizationID
 
 	rows, err := queries.ListEnvironmentMonitors(ctx, database.ListEnvironmentMonitorsParams{
 		OrganizationID: organizationID,
@@ -231,7 +241,7 @@ func (s *Service) Get(ctx context.Context, userID, environmentID, monitorID stri
 	}
 
 	queries := database.New(s.db)
-	organizationID, err := queries.GetAccessibleEnvironmentOrganization(
+	authorized, err := queries.GetAccessibleEnvironmentOrganization(
 		ctx,
 		database.GetAccessibleEnvironmentOrganizationParams{
 			UserID:        userID,
@@ -244,6 +254,10 @@ func (s *Service) Get(ctx context.Context, userID, environmentID, monitorID stri
 	if err != nil {
 		return Detail{}, fmt.Errorf("authorize monitor read: %w", err)
 	}
+	if !authorization.Allows(authorization.Role(authorized.Role), authorization.PermissionMonitorsRead) {
+		return Detail{}, ErrEnvironmentNotFound
+	}
+	organizationID := authorized.OrganizationID
 
 	storedMonitor, err := queries.GetEnvironmentMonitor(ctx, database.GetEnvironmentMonitorParams{
 		OrganizationID: organizationID,

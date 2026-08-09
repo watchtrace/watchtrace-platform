@@ -11,6 +11,7 @@ import (
 )
 
 type Querier interface {
+	AcceptOrganizationInvitation(ctx context.Context, arg AcceptOrganizationInvitationParams) (int64, error)
 	AdvanceMonitorSchedule(ctx context.Context, arg AdvanceMonitorScheduleParams) (int64, error)
 	ClaimPendingCheckJob(ctx context.Context, arg ClaimPendingCheckJobParams) (ClaimPendingCheckJobRow, error)
 	CompleteCheckJob(ctx context.Context, arg CompleteCheckJobParams) (int64, error)
@@ -21,6 +22,7 @@ type Querier interface {
 	CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) error
 	CreateMonitor(ctx context.Context, arg CreateMonitorParams) (CreateMonitorRow, error)
 	CreateOrganization(ctx context.Context, arg CreateOrganizationParams) (CreateOrganizationRow, error)
+	CreateOrganizationInvitation(ctx context.Context, arg CreateOrganizationInvitationParams) error
 	CreateOwnerMembership(ctx context.Context, arg CreateOwnerMembershipParams) error
 	CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) error
 	CreateProductionEnvironment(ctx context.Context, arg CreateProductionEnvironmentParams) (CreateProductionEnvironmentRow, error)
@@ -31,22 +33,27 @@ type Querier interface {
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
 	DeleteExpiredOrRevokedAccessTokens(ctx context.Context, batchSize int32) (int64, error)
 	DeleteExpiredRefreshTokenFamilies(ctx context.Context, batchSize int32) (int64, error)
-	GetAccessibleEnvironmentOrganization(ctx context.Context, arg GetAccessibleEnvironmentOrganizationParams) (string, error)
+	ExistingOrganizationMemberByEmail(ctx context.Context, arg ExistingOrganizationMemberByEmailParams) (bool, error)
+	GetAccessibleEnvironmentOrganization(ctx context.Context, arg GetAccessibleEnvironmentOrganizationParams) (GetAccessibleEnvironmentOrganizationRow, error)
 	GetDatabaseTime(ctx context.Context) (pgtype.Timestamptz, error)
 	GetEnvironmentMonitor(ctx context.Context, arg GetEnvironmentMonitorParams) (GetEnvironmentMonitorRow, error)
 	GetLatestScheduledMonitorResult(ctx context.Context, arg GetLatestScheduledMonitorResultParams) (bool, error)
+	GetOrganizationMembershipRole(ctx context.Context, arg GetOrganizationMembershipRoleParams) (string, error)
 	GetUserByAuthSession(ctx context.Context, tokenDigest []byte) (GetUserByAuthSessionRow, error)
 	GetUserForLogin(ctx context.Context, email string) (GetUserForLoginRow, error)
 	GetUserForPasswordReset(ctx context.Context, email string) (GetUserForPasswordResetRow, error)
-	HealthCheckExists(ctx context.Context, jobID string) (bool, error)
+	HealthCheckExists(ctx context.Context, arg HealthCheckExistsParams) (bool, error)
 	InsertHealthCheck(ctx context.Context, arg InsertHealthCheckParams) (int64, error)
 	InvalidateActivePasswordResetTokens(ctx context.Context, userID string) (int64, error)
+	InvalidatePendingInvitation(ctx context.Context, arg InvalidatePendingInvitationParams) (int64, error)
 	ListEnvironmentMonitors(ctx context.Context, arg ListEnvironmentMonitorsParams) ([]ListEnvironmentMonitorsRow, error)
+	ListOrganizationMembers(ctx context.Context, organizationID string) ([]ListOrganizationMembersRow, error)
 	ListRecentMonitorResults(ctx context.Context, arg ListRecentMonitorResultsParams) ([]ListRecentMonitorResultsRow, error)
-	LockCheckJobForCompletion(ctx context.Context, jobID string) (LockCheckJobForCompletionRow, error)
+	LockCheckJobForCompletion(ctx context.Context, arg LockCheckJobForCompletionParams) (LockCheckJobForCompletionRow, error)
 	LockDueMonitors(ctx context.Context, batchSize int32) ([]LockDueMonitorsRow, error)
 	LockEmailVerificationToken(ctx context.Context, tokenDigest []byte) (LockEmailVerificationTokenRow, error)
-	LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (string, error)
+	LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (LockEnvironmentForMonitorCreationRow, error)
+	LockOrganizationInvitation(ctx context.Context, tokenDigest []byte) (LockOrganizationInvitationRow, error)
 	LockPasswordResetToken(ctx context.Context, tokenDigest []byte) (LockPasswordResetTokenRow, error)
 	LockRefreshTokenForRotation(ctx context.Context, tokenDigest []byte) (LockRefreshTokenForRotationRow, error)
 	MarkRefreshTokenRotated(ctx context.Context, arg MarkRefreshTokenRotatedParams) (int64, error)

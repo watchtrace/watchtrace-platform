@@ -41,6 +41,7 @@ func main() {
 		configuration.VerificationFrom,
 		configuration.VerificationURL,
 		configuration.PasswordResetURL,
+		configuration.InvitationURL,
 	)
 	if err != nil {
 		logger.Error("configure local email verification delivery")
@@ -48,7 +49,7 @@ func main() {
 	}
 	authService := auth.NewService(databasePool, actionSender)
 	go runSessionCleanup(ctx, authService, logger)
-	ownershipService := ownership.NewService(databasePool)
+	ownershipService := ownership.NewService(databasePool, actionSender)
 	monitorService := monitor.NewService(databasePool)
 
 	listener, err := net.Listen("tcp", configuration.HTTPAddress)

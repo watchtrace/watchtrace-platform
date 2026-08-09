@@ -43,26 +43,36 @@ RETURNING
 
 -- name: LockCheckJobForCompletion :one
 SELECT
-    id::text AS job_id,
-    organization_id::text AS organization_id,
-    environment_id::text AS environment_id,
-    monitor_id::text AS monitor_id,
-    job_type,
-    state,
-    scheduled_at,
+    check_jobs.id::text AS job_id,
+    check_jobs.organization_id::text AS organization_id,
+    check_jobs.environment_id::text AS environment_id,
+    check_jobs.monitor_id::text AS monitor_id,
+    check_jobs.job_type,
+    check_jobs.state,
+    check_jobs.scheduled_at,
     COALESCE(
         lease_token,
         '00000000-0000-0000-0000-000000000000'::uuid
     )::text AS lease_token
 FROM check_jobs
-WHERE id = sqlc.arg(job_id)::text::uuid
-FOR UPDATE;
+JOIN monitors
+  ON monitors.organization_id = check_jobs.organization_id
+ AND monitors.environment_id = check_jobs.environment_id
+ AND monitors.id = check_jobs.monitor_id
+WHERE check_jobs.id = sqlc.arg(job_id)::text::uuid
+  AND check_jobs.organization_id = sqlc.arg(organization_id)::text::uuid
+  AND check_jobs.environment_id = sqlc.arg(environment_id)::text::uuid
+  AND check_jobs.monitor_id = sqlc.arg(monitor_id)::text::uuid
+FOR UPDATE OF check_jobs;
 
 -- name: HealthCheckExists :one
 SELECT EXISTS (
     SELECT 1
     FROM health_checks
     WHERE job_id = sqlc.arg(job_id)::text::uuid
+      AND organization_id = sqlc.arg(organization_id)::text::uuid
+      AND environment_id = sqlc.arg(environment_id)::text::uuid
+      AND monitor_id = sqlc.arg(monitor_id)::text::uuid
 ) AS result_exists;
 
 -- name: InsertHealthCheck :execrows
@@ -104,5 +114,8 @@ SET state = 'completed',
     lease_token = NULL,
     lease_expires_at = NULL
 WHERE id = sqlc.arg(job_id)::text::uuid
+  AND organization_id = sqlc.arg(organization_id)::text::uuid
+  AND environment_id = sqlc.arg(environment_id)::text::uuid
+  AND monitor_id = sqlc.arg(monitor_id)::text::uuid
   AND state = 'running'
   AND lease_token = sqlc.arg(lease_token)::text::uuid;

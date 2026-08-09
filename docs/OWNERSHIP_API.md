@@ -75,3 +75,31 @@ from another organization from being linked.
 | 401 | `invalid_session` | Bearer session is missing, invalid, or expired. |
 | 409 | `organization_slug_in_use` | The normalized slug already exists. |
 | 422 | `validation_failed` | Organization or project data is invalid. |
+
+## Membership and invitations
+
+`GET /api/v1/organizations/{orgId}/members` returns the current members for a
+tenant where the caller has a current database membership. Every role may read
+the member list.
+
+Owners and admins may call `POST /api/v1/organizations/{orgId}/invitations`:
+
+```json
+{"email":"teammate@example.com","role":"member"}
+```
+
+The assignable roles are `admin`, `member`, and `viewer`; ownership cannot be
+transferred through an invitation. The API returns safe invitation metadata,
+never the raw token. A replacement request invalidates the previous pending
+invitation, and an existing member returns HTTP 409 `already_member`.
+
+The email link supplies its token to authenticated
+`POST /api/v1/auth/accept-invitation` as `{"token":"wt_invite_<opaque>"}`.
+The authenticated account must have a verified email matching the invitation.
+Tokens expire after seven days, are stored only as SHA-256 digests, and cannot
+be reused. Acceptance and membership creation are one transaction.
+
+The server reads roles from `org_members` on every operation. Owners and admins
+manage invitations and monitors; members manage monitors; viewers have
+read-only monitor and membership access. Requests outside the caller's tenant
+return the same not-found response as unknown tenant resources.

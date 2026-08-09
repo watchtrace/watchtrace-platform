@@ -32,6 +32,7 @@ $previousExpectedCheckerSchemaAbsent = $env:WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABS
 $previousExpectedProductionAuthSchemaAbsent = $env:WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT
 $previousExpectedEmailVerificationSchemaAbsent = $env:WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT
 $previousExpectedPasswordResetSchemaAbsent = $env:WATCHTRACE_EXPECT_PASSWORD_RESET_SCHEMA_ABSENT
+$previousExpectedMembershipSchemaAbsent = $env:WATCHTRACE_EXPECT_MEMBERSHIP_SCHEMA_ABSENT
 
 function Invoke-Compose {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
@@ -79,7 +80,7 @@ try {
 
     Invoke-Go run ./cmd/migrate up
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 9 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 10 (clean)") {
         throw "Unexpected migration version after up: $version"
     }
 
@@ -87,8 +88,17 @@ try {
 
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 8 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 9 (clean)") {
         throw "Unexpected migration version after down: $version"
+    }
+    $env:WATCHTRACE_EXPECT_MEMBERSHIP_SCHEMA_ABSENT = "1"
+    Invoke-Go test ./tests/integration -run '^TestMembershipTenantSecuritySchemaRollback$' -count=1
+    $env:WATCHTRACE_EXPECT_MEMBERSHIP_SCHEMA_ABSENT = $previousExpectedMembershipSchemaAbsent
+
+    Invoke-Go run ./cmd/migrate down
+    $version = (& go run ./cmd/migrate version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 8 (clean)") {
+        throw "Unexpected migration version after second down: $version"
     }
     $env:WATCHTRACE_EXPECT_PASSWORD_RESET_SCHEMA_ABSENT = "1"
     Invoke-Go test ./tests/integration -run '^TestPasswordResetSchemaRollback$' -count=1
@@ -97,7 +107,7 @@ try {
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $version -ne "version 7 (clean)") {
-        throw "Unexpected migration version after second down: $version"
+        throw "Unexpected migration version after third down: $version"
     }
     $env:WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT = "1"
     Invoke-Go test ./tests/integration -run '^TestEmailVerificationSchemaRollback$' -count=1
@@ -106,7 +116,7 @@ try {
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $version -ne "version 6 (clean)") {
-        throw "Unexpected migration version after third down: $version"
+        throw "Unexpected migration version after fourth down: $version"
     }
     $env:WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT = "1"
     Invoke-Go test ./tests/integration -run '^TestProductionAuthSchemaRollback$' -count=1
@@ -115,7 +125,7 @@ try {
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $version -ne "version 5 (clean)") {
-        throw "Unexpected migration version after fourth down: $version"
+        throw "Unexpected migration version after fifth down: $version"
     }
     $env:WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABSENT = "1"
     Invoke-Go test ./tests/integration -run '^TestHTTPCheckWorkerSchemaRollback$' -count=1
@@ -143,4 +153,5 @@ finally {
     $env:WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT = $previousExpectedProductionAuthSchemaAbsent
     $env:WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT = $previousExpectedEmailVerificationSchemaAbsent
     $env:WATCHTRACE_EXPECT_PASSWORD_RESET_SCHEMA_ABSENT = $previousExpectedPasswordResetSchemaAbsent
+    $env:WATCHTRACE_EXPECT_MEMBERSHIP_SCHEMA_ABSENT = $previousExpectedMembershipSchemaAbsent
 }

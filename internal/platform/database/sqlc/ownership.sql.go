@@ -7,7 +7,33 @@ package database
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const acceptOrganizationInvitation = `-- name: AcceptOrganizationInvitation :execrows
+WITH consumed AS (
+    UPDATE org_invitations SET accepted_at = CURRENT_TIMESTAMP
+    WHERE id = $2::text::uuid AND accepted_at IS NULL
+    RETURNING organization_id, role
+)
+INSERT INTO org_members (organization_id, user_id, role)
+SELECT organization_id, $1::text::uuid, role FROM consumed
+ON CONFLICT (organization_id, user_id) DO NOTHING
+`
+
+type AcceptOrganizationInvitationParams struct {
+	UserID       string
+	InvitationID string
+}
+
+func (q *Queries) AcceptOrganizationInvitation(ctx context.Context, arg AcceptOrganizationInvitationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, acceptOrganizationInvitation, arg.UserID, arg.InvitationID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
 
 const createOrganization = `-- name: CreateOrganization :one
 INSERT INTO organizations (name, slug)
@@ -31,6 +57,33 @@ func (q *Queries) CreateOrganization(ctx context.Context, arg CreateOrganization
 	var i CreateOrganizationRow
 	err := row.Scan(&i.ID, &i.Name, &i.Slug)
 	return i, err
+}
+
+const createOrganizationInvitation = `-- name: CreateOrganizationInvitation :exec
+INSERT INTO org_invitations (organization_id, invited_by_user_id, email, role, token_digest, expires_at)
+VALUES ($1::text::uuid, $2::text::uuid,
+        $3, $4, $5, $6)
+`
+
+type CreateOrganizationInvitationParams struct {
+	OrganizationID  string
+	InvitedByUserID string
+	Email           string
+	Role            string
+	TokenDigest     []byte
+	ExpiresAt       pgtype.Timestamptz
+}
+
+func (q *Queries) CreateOrganizationInvitation(ctx context.Context, arg CreateOrganizationInvitationParams) error {
+	_, err := q.db.Exec(ctx, createOrganizationInvitation,
+		arg.OrganizationID,
+		arg.InvitedByUserID,
+		arg.Email,
+		arg.Role,
+		arg.TokenDigest,
+		arg.ExpiresAt,
+	)
+	return err
 }
 
 const createOwnerMembership = `-- name: CreateOwnerMembership :exec
@@ -117,6 +170,141 @@ func (q *Queries) CreateProject(ctx context.Context, arg CreateProjectParams) (C
 		&i.OrganizationID,
 		&i.Name,
 		&i.Description,
+	)
+	return i, err
+}
+
+const existingOrganizationMemberByEmail = `-- name: ExistingOrganizationMemberByEmail :one
+SELECT EXISTS (
+    SELECT 1 FROM org_members
+    JOIN users ON users.id = org_members.user_id
+    WHERE org_members.organization_id = $1::text::uuid
+      AND lower(btrim(users.email)) = $2
+) AS member_exists
+`
+
+type ExistingOrganizationMemberByEmailParams struct {
+	OrganizationID string
+	Email          string
+}
+
+func (q *Queries) ExistingOrganizationMemberByEmail(ctx context.Context, arg ExistingOrganizationMemberByEmailParams) (bool, error) {
+	row := q.db.QueryRow(ctx, existingOrganizationMemberByEmail, arg.OrganizationID, arg.Email)
+	var member_exists bool
+	err := row.Scan(&member_exists)
+	return member_exists, err
+}
+
+const getOrganizationMembershipRole = `-- name: GetOrganizationMembershipRole :one
+SELECT org_members.role
+FROM org_members
+JOIN organizations ON organizations.id = org_members.organization_id
+WHERE org_members.organization_id = $1::text::uuid
+  AND org_members.user_id = $2::text::uuid
+  AND organizations.deleted_at IS NULL
+`
+
+type GetOrganizationMembershipRoleParams struct {
+	OrganizationID string
+	UserID         string
+}
+
+func (q *Queries) GetOrganizationMembershipRole(ctx context.Context, arg GetOrganizationMembershipRoleParams) (string, error) {
+	row := q.db.QueryRow(ctx, getOrganizationMembershipRole, arg.OrganizationID, arg.UserID)
+	var role string
+	err := row.Scan(&role)
+	return role, err
+}
+
+const invalidatePendingInvitation = `-- name: InvalidatePendingInvitation :execrows
+UPDATE org_invitations SET accepted_at = CURRENT_TIMESTAMP
+WHERE organization_id = $1::text::uuid
+  AND lower(btrim(email)) = $2
+  AND accepted_at IS NULL
+`
+
+type InvalidatePendingInvitationParams struct {
+	OrganizationID string
+	Email          string
+}
+
+func (q *Queries) InvalidatePendingInvitation(ctx context.Context, arg InvalidatePendingInvitationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, invalidatePendingInvitation, arg.OrganizationID, arg.Email)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const listOrganizationMembers = `-- name: ListOrganizationMembers :many
+SELECT users.id::text AS user_id, users.email, org_members.role,
+       org_members.incident_notifications_enabled, org_members.created_at
+FROM org_members
+JOIN users ON users.id = org_members.user_id
+WHERE org_members.organization_id = $1::text::uuid
+ORDER BY org_members.created_at, users.id
+`
+
+type ListOrganizationMembersRow struct {
+	UserID                       string
+	Email                        string
+	Role                         string
+	IncidentNotificationsEnabled bool
+	CreatedAt                    pgtype.Timestamptz
+}
+
+func (q *Queries) ListOrganizationMembers(ctx context.Context, organizationID string) ([]ListOrganizationMembersRow, error) {
+	rows, err := q.db.Query(ctx, listOrganizationMembers, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOrganizationMembersRow{}
+	for rows.Next() {
+		var i ListOrganizationMembersRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Email,
+			&i.Role,
+			&i.IncidentNotificationsEnabled,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockOrganizationInvitation = `-- name: LockOrganizationInvitation :one
+SELECT id::text AS id, organization_id::text AS organization_id, email, role, expires_at, accepted_at
+FROM org_invitations
+WHERE token_digest = $1
+FOR UPDATE
+`
+
+type LockOrganizationInvitationRow struct {
+	ID             string
+	OrganizationID string
+	Email          string
+	Role           string
+	ExpiresAt      pgtype.Timestamptz
+	AcceptedAt     pgtype.Timestamptz
+}
+
+func (q *Queries) LockOrganizationInvitation(ctx context.Context, tokenDigest []byte) (LockOrganizationInvitationRow, error) {
+	row := q.db.QueryRow(ctx, lockOrganizationInvitation, tokenDigest)
+	var i LockOrganizationInvitationRow
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.Email,
+		&i.Role,
+		&i.ExpiresAt,
+		&i.AcceptedAt,
 	)
 	return i, err
 }

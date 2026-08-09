@@ -26,3 +26,9 @@ A partial unique index allows at most one `owner` membership per organization.
 The default ownership API creates the organization, owner membership, project,
 and production environment in one transaction, ensuring organizations created
 through the supported path never exist without their owner.
+
+Migration `000010_membership_tenant_security` adds digest-only, expiring
+`org_invitations`. A partial unique index permits only one pending invitation
+per organization and normalized email. It also connects `health_checks` to
+`check_jobs` with the complete organization, environment, monitor, and job key,
+so a result cannot reference queue work from another tenant hierarchy.

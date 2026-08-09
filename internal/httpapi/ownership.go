@@ -4,14 +4,20 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/watchtrace/watchtrace-platform/internal/auth"
+	"github.com/watchtrace/watchtrace-platform/internal/authorization"
 	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 )
 
 // OwnershipService is the tenant creation boundary used by the HTTP API.
 type OwnershipService interface {
 	CreateDefault(context.Context, string, ownership.CreateDefaultInput) (ownership.DefaultResult, error)
+	ListMembers(context.Context, string, string) ([]ownership.Member, error)
+	Invite(context.Context, string, string, string, authorization.Role) (ownership.Invitation, error)
+	AcceptInvitation(context.Context, auth.User, string) (ownership.Membership, error)
 }
 
 type defaultOwnershipRequest struct {
@@ -63,6 +69,30 @@ type environmentResponse struct {
 	Type           string `json:"type"`
 }
 
+type invitationRequest struct {
+	Email string `json:"email" binding:"required,email,max=254"`
+	Role  string `json:"role" binding:"required,oneof=admin member viewer"`
+}
+type acceptInvitationRequest struct {
+	Token string `json:"token" binding:"required,max=128"`
+}
+type memberResponse struct {
+	UserID                       string    `json:"user_id"`
+	Email                        string    `json:"email"`
+	Role                         string    `json:"role"`
+	IncidentNotificationsEnabled bool      `json:"incident_notifications_enabled"`
+	CreatedAt                    time.Time `json:"created_at"`
+}
+type membersResponse struct {
+	Members []memberResponse `json:"members"`
+}
+type invitationResponse struct {
+	OrganizationID string    `json:"organization_id"`
+	Email          string    `json:"email"`
+	Role           string    `json:"role"`
+	ExpiresAt      time.Time `json:"expires_at"`
+}
+
 func registerOwnershipRoutes(
 	router *gin.Engine,
 	authenticator SessionAuthenticator,
@@ -73,6 +103,69 @@ func registerOwnershipRoutes(
 		requireAuthenticatedUser(authenticator),
 		createDefaultOwnership(service),
 	)
+	router.GET("/api/v1/organizations/:orgId/members", requireAuthenticatedUser(authenticator), listOrganizationMembers(service))
+	router.POST("/api/v1/organizations/:orgId/invitations", requireAuthenticatedUser(authenticator), inviteOrganizationMember(service))
+	router.POST("/api/v1/auth/accept-invitation", requireAuthenticatedUser(authenticator), acceptOrganizationInvitation(service))
+}
+
+func listOrganizationMembers(service OwnershipService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, 500, "internal_error", "an internal error occurred")
+			return
+		}
+		members, err := service.ListMembers(c.Request.Context(), user.ID, c.Param("orgId"))
+		if err != nil {
+			respondOwnershipError(c, err)
+			return
+		}
+		response := make([]memberResponse, 0, len(members))
+		for _, member := range members {
+			response = append(response, memberResponse{UserID: member.UserID, Email: member.Email, Role: string(member.Role), IncidentNotificationsEnabled: member.IncidentNotificationsEnabled, CreatedAt: member.CreatedAt})
+		}
+		c.JSON(http.StatusOK, membersResponse{Members: response})
+	}
+}
+
+func inviteOrganizationMember(service OwnershipService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, 500, "internal_error", "an internal error occurred")
+			return
+		}
+		var request invitationRequest
+		if !DecodeJSON(c, &request) {
+			return
+		}
+		invitation, err := service.Invite(c.Request.Context(), user.ID, c.Param("orgId"), request.Email, authorization.Role(request.Role))
+		if err != nil {
+			respondOwnershipError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, invitationResponse{OrganizationID: invitation.OrganizationID, Email: invitation.Email, Role: string(invitation.Role), ExpiresAt: invitation.ExpiresAt})
+	}
+}
+
+func acceptOrganizationInvitation(service OwnershipService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, 500, "internal_error", "an internal error occurred")
+			return
+		}
+		var request acceptInvitationRequest
+		if !DecodeJSON(c, &request) {
+			return
+		}
+		membership, err := service.AcceptInvitation(c.Request.Context(), user, request.Token)
+		if err != nil {
+			respondOwnershipError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, membershipResponse{OrganizationID: membership.OrganizationID, UserID: membership.UserID, Role: membership.Role})
+	}
 }
 
 func createDefaultOwnership(service OwnershipService) gin.HandlerFunc {
@@ -131,6 +224,16 @@ func respondOwnershipError(c *gin.Context, err error) {
 		RespondError(c, http.StatusUnprocessableEntity, "validation_failed", "organization or project details are invalid")
 	case errors.Is(err, ownership.ErrSlugInUse):
 		RespondError(c, http.StatusConflict, "organization_slug_in_use", "organization slug is already in use")
+	case errors.Is(err, ownership.ErrOrganizationNotFound):
+		RespondError(c, http.StatusNotFound, "organization_not_found", "organization not found")
+	case errors.Is(err, ownership.ErrForbidden):
+		RespondError(c, http.StatusForbidden, "permission_denied", "permission denied")
+	case errors.Is(err, ownership.ErrAlreadyMember):
+		RespondError(c, http.StatusConflict, "already_member", "user is already an organization member")
+	case errors.Is(err, ownership.ErrInvalidInvitation):
+		RespondError(c, http.StatusBadRequest, "invalid_invitation", "a valid unused invitation is required")
+	case errors.Is(err, ownership.ErrEmailNotVerified):
+		RespondError(c, http.StatusForbidden, "email_not_verified", "verify your email before accepting invitations")
 	default:
 		RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 	}

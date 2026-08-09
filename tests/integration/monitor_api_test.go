@@ -250,7 +250,7 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 	viewerCreate := performMonitorCreate(t, router, secondSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, monitorCreateBody{
 		Name: "Viewer monitor", URL: "https://example.test/viewer",
 	})
-	if viewerCreate.Status != http.StatusNotFound || viewerCreate.ErrorCode != "environment_not_found" {
+	if viewerCreate.Status != http.StatusForbidden || viewerCreate.ErrorCode != "permission_denied" {
 		t.Fatalf("viewer create = %d %q", viewerCreate.Status, viewerCreate.ErrorCode)
 	}
 
@@ -536,6 +536,13 @@ func insertMonitorAPIResult(
 	t.Helper()
 	var jobID string
 	if err := pool.QueryRow(ctx, `
+		INSERT INTO check_jobs (organization_id, environment_id, monitor_id, job_type, state, scheduled_at, started_at, completed_at)
+		VALUES ($1::text::uuid, $2::text::uuid, $3::text::uuid, $4, 'completed', $5, $5, $5)
+		RETURNING id::text
+	`, organizationID, environmentID, monitorID, jobType, scheduledAt).Scan(&jobID); err != nil {
+		t.Fatalf("insert monitor API job: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO health_checks (
 			job_id,
 			organization_id,
@@ -551,21 +558,20 @@ func insertMonitorAPIResult(
 			total_duration_microseconds
 		)
 		VALUES (
-			gen_random_uuid(),
 			$1::text::uuid,
 			$2::text::uuid,
 			$3::text::uuid,
-			$4,
+			$4::text::uuid,
 			$5,
-			$5::timestamptz + INTERVAL '100 milliseconds',
-			$5::timestamptz + INTERVAL '600 milliseconds',
 			$6,
-			$7::smallint,
-			$8::text,
+			$6::timestamptz + INTERVAL '100 milliseconds',
+			$6::timestamptz + INTERVAL '600 milliseconds',
+			$7,
+			$8::smallint,
+			$9::text,
 			500000
 		)
-		RETURNING job_id::text
-	`, organizationID, environmentID, monitorID, jobType, scheduledAt, succeeded, statusCode, errorCategory).Scan(&jobID); err != nil {
+	`, jobID, organizationID, environmentID, monitorID, jobType, scheduledAt, succeeded, statusCode, errorCategory); err != nil {
 		t.Fatalf("insert monitor API result: %v", err)
 	}
 	return jobID

@@ -293,6 +293,10 @@ func TestHTTPCheckWorkerSchemaConstraintsWithPostgreSQL(t *testing.T) {
 	secondMonitorID := insertSchedulerMonitor(
 		t, ctx, pool, secondOrganizationID, secondEnvironmentID, "Second schema", 60, scheduledAt.Add(time.Hour),
 	)
+	var secondJobID string
+	if err := pool.QueryRow(ctx, `INSERT INTO check_jobs (organization_id, environment_id, monitor_id, scheduled_at) VALUES ($1::text::uuid, $2::text::uuid, $3::text::uuid, $4) RETURNING id::text`, secondOrganizationID, secondEnvironmentID, secondMonitorID, scheduledAt).Scan(&secondJobID); err != nil {
+		t.Fatalf("insert second schema job: %v", err)
+	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	_, err := pool.Exec(ctx, `
 		INSERT INTO health_checks (
@@ -312,10 +316,10 @@ func TestHTTPCheckWorkerSchemaConstraintsWithPostgreSQL(t *testing.T) {
 			scheduled_at, started_at, completed_at, succeeded,
 			total_duration_microseconds
 		) VALUES (
-			gen_random_uuid(), $1::text::uuid, $2::text::uuid, $3::text::uuid,
-			'scheduled', $4, $5, $5, true, 0
+			$1::text::uuid, $2::text::uuid, $3::text::uuid, $4::text::uuid,
+			'scheduled', $5, $6, $6, true, 0
 		)
-	`, secondOrganizationID, secondEnvironmentID, secondMonitorID, scheduledAt, now)
+	`, secondJobID, secondOrganizationID, secondEnvironmentID, secondMonitorID, scheduledAt, now)
 	assertPostgreSQLErrorCode(t, err, "23514")
 
 	var bodyColumns int

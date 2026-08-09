@@ -17,6 +17,7 @@ import (
 const (
 	verificationTokenPrefix  = "wt_verify_"
 	passwordResetTokenPrefix = "wt_reset_"
+	invitationTokenPrefix    = "wt_invite_"
 	verificationSendTimeout  = 5 * time.Second
 )
 
@@ -25,21 +26,23 @@ const (
 type AccountActionSender interface {
 	SendVerification(context.Context, string, string) error
 	SendPasswordReset(context.Context, string, string) error
+	SendInvitation(context.Context, string, string) error
 }
 
 // LocalSMTPSender delivers development account mail to a loopback SMTP capture
 // service such as Mailpit.
 type LocalSMTPSender struct {
-	address  string
-	from     string
-	baseURL  *url.URL
-	resetURL *url.URL
+	address   string
+	from      string
+	baseURL   *url.URL
+	resetURL  *url.URL
+	inviteURL *url.URL
 }
 
 // NewLocalSMTPSender constructs a local-only plaintext SMTP adapter. Both the
 // SMTP server and verification link must use loopback hosts so this adapter
 // cannot accidentally become a production mail path.
-func NewLocalSMTPSender(address, from, baseURL, resetURL string) (*LocalSMTPSender, error) {
+func NewLocalSMTPSender(address, from, baseURL, resetURL, inviteURL string) (*LocalSMTPSender, error) {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil || !isLoopbackHost(host) {
 		return nil, errors.New("verification SMTP address must be a loopback host:port")
@@ -55,7 +58,11 @@ func NewLocalSMTPSender(address, from, baseURL, resetURL string) (*LocalSMTPSend
 	if err != nil {
 		return nil, errors.New("password-reset URL must be an absolute loopback HTTP URL without query or fragment")
 	}
-	return &LocalSMTPSender{address: address, from: from, baseURL: parsed, resetURL: parsedReset}, nil
+	parsedInvite, err := parseLocalActionURL(inviteURL)
+	if err != nil {
+		return nil, errors.New("invitation URL must be an absolute loopback HTTP URL without query or fragment")
+	}
+	return &LocalSMTPSender{address: address, from: from, baseURL: parsed, resetURL: parsedReset, inviteURL: parsedInvite}, nil
 }
 
 func parseLocalActionURL(value string) (*url.URL, error) {
@@ -83,6 +90,14 @@ func (sender *LocalSMTPSender) SendPasswordReset(ctx context.Context, recipient,
 	}
 	return sender.send(ctx, recipient, sender.message(recipient, token, sender.resetURL,
 		"Reset your WatchTrace password", "Reset your WatchTrace password within 1 hour:"))
+}
+
+func (sender *LocalSMTPSender) SendInvitation(ctx context.Context, recipient, token string) error {
+	if sender == nil || strings.ContainsAny(recipient, "\r\n") || !ValidInvitationToken(token) {
+		return errors.New("invalid invitation delivery input")
+	}
+	return sender.send(ctx, recipient, sender.message(recipient, token, sender.inviteURL,
+		"Join a WatchTrace organization", "Accept this WatchTrace invitation within 7 days:"))
 }
 
 func (sender *LocalSMTPSender) send(ctx context.Context, recipient, message string) error {
@@ -164,6 +179,16 @@ func newPasswordResetToken() (string, []byte, error) {
 
 func validPasswordResetToken(token string) bool {
 	return validOpaqueToken(token, passwordResetTokenPrefix)
+}
+
+// NewInvitationToken creates a purpose-separated raw token and digest for the
+// ownership package. Only the digest belongs in PostgreSQL.
+func NewInvitationToken() (string, []byte, error) {
+	return newOpaqueTokenFrom(rand.Reader, invitationTokenPrefix)
+}
+
+func ValidInvitationToken(token string) bool {
+	return validOpaqueToken(token, invitationTokenPrefix)
 }
 
 func isLoopbackHost(host string) bool {

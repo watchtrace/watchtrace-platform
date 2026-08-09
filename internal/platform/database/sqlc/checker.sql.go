@@ -109,18 +109,31 @@ SET state = 'completed',
     lease_token = NULL,
     lease_expires_at = NULL
 WHERE id = $2::text::uuid
+  AND organization_id = $3::text::uuid
+  AND environment_id = $4::text::uuid
+  AND monitor_id = $5::text::uuid
   AND state = 'running'
-  AND lease_token = $3::text::uuid
+  AND lease_token = $6::text::uuid
 `
 
 type CompleteCheckJobParams struct {
-	CompletedAt pgtype.Timestamptz
-	JobID       string
-	LeaseToken  string
+	CompletedAt    pgtype.Timestamptz
+	JobID          string
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+	LeaseToken     string
 }
 
 func (q *Queries) CompleteCheckJob(ctx context.Context, arg CompleteCheckJobParams) (int64, error) {
-	result, err := q.db.Exec(ctx, completeCheckJob, arg.CompletedAt, arg.JobID, arg.LeaseToken)
+	result, err := q.db.Exec(ctx, completeCheckJob,
+		arg.CompletedAt,
+		arg.JobID,
+		arg.OrganizationID,
+		arg.EnvironmentID,
+		arg.MonitorID,
+		arg.LeaseToken,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -132,11 +145,26 @@ SELECT EXISTS (
     SELECT 1
     FROM health_checks
     WHERE job_id = $1::text::uuid
+      AND organization_id = $2::text::uuid
+      AND environment_id = $3::text::uuid
+      AND monitor_id = $4::text::uuid
 ) AS result_exists
 `
 
-func (q *Queries) HealthCheckExists(ctx context.Context, jobID string) (bool, error) {
-	row := q.db.QueryRow(ctx, healthCheckExists, jobID)
+type HealthCheckExistsParams struct {
+	JobID          string
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+}
+
+func (q *Queries) HealthCheckExists(ctx context.Context, arg HealthCheckExistsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, healthCheckExists,
+		arg.JobID,
+		arg.OrganizationID,
+		arg.EnvironmentID,
+		arg.MonitorID,
+	)
 	var result_exists bool
 	err := row.Scan(&result_exists)
 	return result_exists, err
@@ -212,21 +240,35 @@ func (q *Queries) InsertHealthCheck(ctx context.Context, arg InsertHealthCheckPa
 
 const lockCheckJobForCompletion = `-- name: LockCheckJobForCompletion :one
 SELECT
-    id::text AS job_id,
-    organization_id::text AS organization_id,
-    environment_id::text AS environment_id,
-    monitor_id::text AS monitor_id,
-    job_type,
-    state,
-    scheduled_at,
+    check_jobs.id::text AS job_id,
+    check_jobs.organization_id::text AS organization_id,
+    check_jobs.environment_id::text AS environment_id,
+    check_jobs.monitor_id::text AS monitor_id,
+    check_jobs.job_type,
+    check_jobs.state,
+    check_jobs.scheduled_at,
     COALESCE(
         lease_token,
         '00000000-0000-0000-0000-000000000000'::uuid
     )::text AS lease_token
 FROM check_jobs
-WHERE id = $1::text::uuid
-FOR UPDATE
+JOIN monitors
+  ON monitors.organization_id = check_jobs.organization_id
+ AND monitors.environment_id = check_jobs.environment_id
+ AND monitors.id = check_jobs.monitor_id
+WHERE check_jobs.id = $1::text::uuid
+  AND check_jobs.organization_id = $2::text::uuid
+  AND check_jobs.environment_id = $3::text::uuid
+  AND check_jobs.monitor_id = $4::text::uuid
+FOR UPDATE OF check_jobs
 `
+
+type LockCheckJobForCompletionParams struct {
+	JobID          string
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+}
 
 type LockCheckJobForCompletionRow struct {
 	JobID          string
@@ -239,8 +281,13 @@ type LockCheckJobForCompletionRow struct {
 	LeaseToken     string
 }
 
-func (q *Queries) LockCheckJobForCompletion(ctx context.Context, jobID string) (LockCheckJobForCompletionRow, error) {
-	row := q.db.QueryRow(ctx, lockCheckJobForCompletion, jobID)
+func (q *Queries) LockCheckJobForCompletion(ctx context.Context, arg LockCheckJobForCompletionParams) (LockCheckJobForCompletionRow, error) {
+	row := q.db.QueryRow(ctx, lockCheckJobForCompletion,
+		arg.JobID,
+		arg.OrganizationID,
+		arg.EnvironmentID,
+		arg.MonitorID,
+	)
 	var i LockCheckJobForCompletionRow
 	err := row.Scan(
 		&i.JobID,

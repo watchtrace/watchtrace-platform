@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
+	"github.com/watchtrace/watchtrace-platform/internal/authorization"
 	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 )
 
@@ -199,6 +200,21 @@ type fakeOwnershipService struct {
 	calls  int
 	userID string
 	input  ownership.CreateDefaultInput
+}
+
+func (service *fakeOwnershipService) ListMembers(context.Context, string, string) ([]ownership.Member, error) {
+	service.calls++
+	return nil, service.err
+}
+
+func (service *fakeOwnershipService) Invite(context.Context, string, string, string, authorization.Role) (ownership.Invitation, error) {
+	service.calls++
+	return ownership.Invitation{}, service.err
+}
+
+func (service *fakeOwnershipService) AcceptInvitation(context.Context, auth.User, string) (ownership.Membership, error) {
+	service.calls++
+	return ownership.Membership{}, service.err
 }
 
 func (service *fakeOwnershipService) CreateDefault(

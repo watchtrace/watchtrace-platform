@@ -160,5 +160,6 @@ For local development, Docker Compose runs Mailpit with SMTP on
 `127.0.0.1:1025` and its mailbox UI on `http://127.0.0.1:8025`. The built-in
 adapter refuses non-loopback SMTP servers and non-loopback action URLs,
 preventing this plaintext development path from being mistaken for production
-delivery. Set `WATCHTRACE_PASSWORD_RESET_URL` to the local reset page URL;
+delivery. Set `WATCHTRACE_PASSWORD_RESET_URL` and `WATCHTRACE_INVITATION_URL`
+to the local account-action page URLs;
 OCI/provider email delivery remains assigned to P1-406.

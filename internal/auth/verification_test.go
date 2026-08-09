@@ -36,6 +36,19 @@ func TestPasswordResetTokensAreOpaqueAndPurposeSpecific(t *testing.T) {
 	}
 }
 
+func TestInvitationTokensAreOpaqueAndPurposeSpecific(t *testing.T) {
+	token, digest, err := NewInvitationToken()
+	if err != nil {
+		t.Fatalf("create invitation token: %v", err)
+	}
+	if !ValidInvitationToken(token) || validVerificationToken(token) || validPasswordResetToken(token) || validAccessToken(token) || validRefreshToken(token) {
+		t.Fatal("invitation token was not isolated from other token types")
+	}
+	if len(digest) != 32 || strings.Contains(string(digest), token) {
+		t.Fatal("invitation digest is invalid or contains the raw token")
+	}
+}
+
 func TestLocalSMTPSenderDeliversVerificationLinkToLoopback(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -48,7 +61,8 @@ func TestLocalSMTPSenderDeliversVerificationLinkToLoopback(t *testing.T) {
 	go serveTestSMTP(listener, messages, serverErrors)
 
 	sender, err := NewLocalSMTPSender(listener.Addr().String(), "watchtrace@localhost",
-		"http://127.0.0.1:3000/verify-email", "http://127.0.0.1:3000/reset-password")
+		"http://127.0.0.1:3000/verify-email", "http://127.0.0.1:3000/reset-password",
+		"http://127.0.0.1:3000/accept-invitation")
 	if err != nil {
 		t.Fatalf("construct local SMTP sender: %v", err)
 	}
@@ -83,13 +97,19 @@ func TestLocalSMTPSenderRejectsNonLoopbackConfiguration(t *testing.T) {
 		{address: "127.0.0.1:1025", url: "http://127.0.0.1/verify-email?token=unsafe"},
 	} {
 		if _, err := NewLocalSMTPSender(test.address, "watchtrace@localhost", test.url,
-			"http://127.0.0.1/reset-password"); err == nil {
+			"http://127.0.0.1/reset-password", "http://127.0.0.1/accept-invitation"); err == nil {
 			t.Fatalf("unsafe local SMTP configuration accepted: %+v", test)
 		}
 	}
 	if _, err := NewLocalSMTPSender("127.0.0.1:1025", "watchtrace@localhost",
-		"http://127.0.0.1/verify-email", "https://example.test/reset-password"); err == nil {
+		"http://127.0.0.1/verify-email", "https://example.test/reset-password",
+		"http://127.0.0.1/accept-invitation"); err == nil {
 		t.Fatal("unsafe password-reset URL was accepted")
+	}
+	if _, err := NewLocalSMTPSender("127.0.0.1:1025", "watchtrace@localhost",
+		"http://127.0.0.1/verify-email", "http://127.0.0.1/reset-password",
+		"https://example.test/accept-invitation"); err == nil {
+		t.Fatal("unsafe invitation URL was accepted")
 	}
 }
 

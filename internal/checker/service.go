@@ -280,7 +280,7 @@ func (service *Service) complete(ctx context.Context, job claimedJob, result che
 	}()
 
 	queries := database.New(tx)
-	locked, err := queries.LockCheckJobForCompletion(ctx, job.ID)
+	locked, err := queries.LockCheckJobForCompletion(ctx, database.LockCheckJobForCompletionParams{JobID: job.ID, OrganizationID: job.OrganizationID, EnvironmentID: job.EnvironmentID, MonitorID: job.MonitorID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrLeaseLost
 	}
@@ -288,7 +288,7 @@ func (service *Service) complete(ctx context.Context, job claimedJob, result che
 		return fmt.Errorf("lock check job for completion: %w", err)
 	}
 	if locked.State == "completed" {
-		exists, err := queries.HealthCheckExists(ctx, job.ID)
+		exists, err := queries.HealthCheckExists(ctx, database.HealthCheckExistsParams{JobID: job.ID, OrganizationID: job.OrganizationID, EnvironmentID: job.EnvironmentID, MonitorID: job.MonitorID})
 		if err != nil {
 			return fmt.Errorf("verify completed check result: %w", err)
 		}
@@ -332,9 +332,12 @@ func (service *Service) complete(ctx context.Context, job claimedJob, result che
 	}
 
 	completed, err := queries.CompleteCheckJob(ctx, database.CompleteCheckJobParams{
-		CompletedAt: pgtype.Timestamptz{Time: result.CompletedAt, Valid: true},
-		JobID:       locked.JobID,
-		LeaseToken:  job.LeaseToken,
+		CompletedAt:    pgtype.Timestamptz{Time: result.CompletedAt, Valid: true},
+		JobID:          locked.JobID,
+		LeaseToken:     job.LeaseToken,
+		OrganizationID: locked.OrganizationID,
+		EnvironmentID:  locked.EnvironmentID,
+		MonitorID:      locked.MonitorID,
 	})
 	if err != nil {
 		return fmt.Errorf("complete check job: %w", err)

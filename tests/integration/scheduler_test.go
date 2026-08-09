@@ -583,6 +583,7 @@ func deleteSchedulerTestData(
 		`DELETE FROM monitors WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM environments WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM projects WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
+		`DELETE FROM org_invitations WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM org_members WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM organizations WHERE slug = ANY($1::text[])`,
 	}

@@ -320,7 +320,7 @@ Finish the organization and authorization foundation before adding more tenant-o
 
 ### Execution package
 
-- [ ] **P1-205 — Complete membership, authorization, and tenant security**
+- [x] **P1-205 — Complete membership, authorization, and tenant security**
 
   **Combines former tasks:** P1-205 through P1-208.
 

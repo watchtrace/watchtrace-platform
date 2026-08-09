@@ -680,11 +680,13 @@ type authAPIResult struct {
 }
 
 type recordingVerificationSender struct {
-	recipients      []string
-	tokens          []string
-	resetRecipients []string
-	resetTokens     []string
-	err             error
+	recipients       []string
+	tokens           []string
+	resetRecipients  []string
+	resetTokens      []string
+	inviteRecipients []string
+	inviteTokens     []string
+	err              error
 }
 
 func (sender *recordingVerificationSender) SendVerification(_ context.Context, recipient, token string) error {
@@ -696,6 +698,12 @@ func (sender *recordingVerificationSender) SendVerification(_ context.Context, r
 func (sender *recordingVerificationSender) SendPasswordReset(_ context.Context, recipient, token string) error {
 	sender.resetRecipients = append(sender.resetRecipients, recipient)
 	sender.resetTokens = append(sender.resetTokens, token)
+	return sender.err
+}
+
+func (sender *recordingVerificationSender) SendInvitation(_ context.Context, recipient, token string) error {
+	sender.inviteRecipients = append(sender.inviteRecipients, recipient)
+	sender.inviteTokens = append(sender.inviteTokens, token)
 	return sender.err
 }
 

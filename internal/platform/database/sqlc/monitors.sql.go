@@ -116,7 +116,7 @@ func (q *Queries) CreateMonitor(ctx context.Context, arg CreateMonitorParams) (C
 }
 
 const getAccessibleEnvironmentOrganization = `-- name: GetAccessibleEnvironmentOrganization :one
-SELECT environments.organization_id::text AS organization_id
+SELECT environments.organization_id::text AS organization_id, org_members.role
 FROM environments
 JOIN organizations ON organizations.id = environments.organization_id
 JOIN org_members
@@ -131,11 +131,16 @@ type GetAccessibleEnvironmentOrganizationParams struct {
 	EnvironmentID string
 }
 
-func (q *Queries) GetAccessibleEnvironmentOrganization(ctx context.Context, arg GetAccessibleEnvironmentOrganizationParams) (string, error) {
+type GetAccessibleEnvironmentOrganizationRow struct {
+	OrganizationID string
+	Role           string
+}
+
+func (q *Queries) GetAccessibleEnvironmentOrganization(ctx context.Context, arg GetAccessibleEnvironmentOrganizationParams) (GetAccessibleEnvironmentOrganizationRow, error) {
 	row := q.db.QueryRow(ctx, getAccessibleEnvironmentOrganization, arg.UserID, arg.EnvironmentID)
-	var organization_id string
-	err := row.Scan(&organization_id)
-	return organization_id, err
+	var i GetAccessibleEnvironmentOrganizationRow
+	err := row.Scan(&i.OrganizationID, &i.Role)
+	return i, err
 }
 
 const getEnvironmentMonitor = `-- name: GetEnvironmentMonitor :one
@@ -364,7 +369,7 @@ func (q *Queries) ListRecentMonitorResults(ctx context.Context, arg ListRecentMo
 }
 
 const lockEnvironmentForMonitorCreation = `-- name: LockEnvironmentForMonitorCreation :one
-SELECT environments.organization_id::text AS organization_id
+SELECT environments.organization_id::text AS organization_id, org_members.role
 FROM environments
 JOIN organizations ON organizations.id = environments.organization_id
 JOIN org_members
@@ -372,7 +377,6 @@ JOIN org_members
  AND org_members.user_id = $1::text::uuid
 WHERE environments.id = $2::text::uuid
   AND organizations.deleted_at IS NULL
-  AND org_members.role IN ('owner', 'admin', 'member')
 FOR UPDATE OF organizations
 `
 
@@ -381,9 +385,14 @@ type LockEnvironmentForMonitorCreationParams struct {
 	EnvironmentID string
 }
 
-func (q *Queries) LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (string, error) {
+type LockEnvironmentForMonitorCreationRow struct {
+	OrganizationID string
+	Role           string
+}
+
+func (q *Queries) LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (LockEnvironmentForMonitorCreationRow, error) {
 	row := q.db.QueryRow(ctx, lockEnvironmentForMonitorCreation, arg.UserID, arg.EnvironmentID)
-	var organization_id string
-	err := row.Scan(&organization_id)
-	return organization_id, err
+	var i LockEnvironmentForMonitorCreationRow
+	err := row.Scan(&i.OrganizationID, &i.Role)
+	return i, err
 }

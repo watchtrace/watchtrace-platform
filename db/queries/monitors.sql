@@ -1,5 +1,5 @@
 -- name: LockEnvironmentForMonitorCreation :one
-SELECT environments.organization_id::text AS organization_id
+SELECT environments.organization_id::text AS organization_id, org_members.role
 FROM environments
 JOIN organizations ON organizations.id = environments.organization_id
 JOIN org_members
@@ -7,7 +7,6 @@ JOIN org_members
  AND org_members.user_id = sqlc.arg(user_id)::text::uuid
 WHERE environments.id = sqlc.arg(environment_id)::text::uuid
   AND organizations.deleted_at IS NULL
-  AND org_members.role IN ('owner', 'admin', 'member')
 FOR UPDATE OF organizations;
 
 -- name: CountOrganizationMonitors :one
@@ -51,7 +50,7 @@ RETURNING
     updated_at;
 
 -- name: GetAccessibleEnvironmentOrganization :one
-SELECT environments.organization_id::text AS organization_id
+SELECT environments.organization_id::text AS organization_id, org_members.role
 FROM environments
 JOIN organizations ON organizations.id = environments.organization_id
 JOIN org_members

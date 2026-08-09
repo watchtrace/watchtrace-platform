@@ -223,6 +223,8 @@ func respondMonitorError(c *gin.Context, err error) {
 		RespondError(c, http.StatusNotFound, "monitor_not_found", "monitor not found")
 	case errors.Is(err, monitor.ErrMonitorLimitReached):
 		RespondError(c, http.StatusConflict, "monitor_limit_reached", "organization monitor limit reached")
+	case errors.Is(err, monitor.ErrForbidden):
+		RespondError(c, http.StatusForbidden, "permission_denied", "permission denied")
 	default:
 		RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 	}
