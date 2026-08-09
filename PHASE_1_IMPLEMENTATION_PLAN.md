@@ -29,7 +29,7 @@ At the end of Phase 1, a user must be able to:
 8. See missing checks as unknown coverage instead of successful uptime.
 9. Restart the application without losing checks that were waiting to run.
 
-The system will run locally with Docker Compose and deploy to one Oracle Cloud Always Free ARM64 VM for personal use and a small beta.
+The system will run locally with Docker Compose and deploy as a small hybrid-cloud beta: one Oracle Cloud Always Free ARM64 VM for the application and PostgreSQL, plus managed Amazon SQS queues in one AWS Region. AWS usage is budgeted and is not assumed to be permanently free.
 
 ---
 
@@ -40,13 +40,13 @@ The system will run locally with Docker Compose and deploy to one Oracle Cloud A
 - Two Git repositories: one backend repository and one frontend repository.
 - One modular Go application in a backend monorepo.
 - A React and TypeScript dashboard in the frontend repository.
-- PostgreSQL as the source of truth.
-- PostgreSQL-backed durable queues for check jobs and notification work.
+- PostgreSQL as the source of truth for configuration, job identity and state, results, and transactional outboxes.
+- Amazon SQS Standard queues as the durable delivery transport for check jobs and notification work.
 - Server-Sent Events with a polling fallback.
 - Docker Compose for local and Oracle Cloud deployment.
 - OCI Email Delivery, Vault, Object Storage, and other free OCI services where suitable.
 
-The Go application may contain API, scheduler, checker, incident, notification, and live-event modules. These are code modules, not independent microservices in Phase 1. All backend modules and commands remain in the backend monorepo. They may run in one application process initially and be separated later without duplicating business rules or creating a repository per service. Scheduler and checker modules communicate through durable PostgreSQL job rows even when they share a process; an in-memory channel is not the source of truth for queued work.
+The Go application may contain API, scheduler, SQS dispatcher, checker, incident, notification, and live-event modules. These are code modules, not independent microservices in Phase 1. All backend modules and commands remain in the backend monorepo. They may run in one application process initially and be separated later without duplicating business rules or creating a repository per service. PostgreSQL owns the transactional job ledger and an outbox records messages that must be published. Amazon SQS owns durable delivery to workers; an in-memory channel is never the source of truth.
 
 The React application lives in the separate frontend repository. The two repositories integrate only through the documented HTTP and Server-Sent Events contract. Each repository has independent CI. The backend monorepo owns database migrations, backend deployment definitions, and the versioned OpenAPI contract; the frontend repository consumes that contract and produces a versioned build artifact or image for deployment.
 
@@ -55,7 +55,7 @@ The React application lives in the separate frontend repository. The two reposit
 - Distributed tracing. It begins in Phase 2.
 - Metrics or log ingestion products.
 - Multi-region monitoring.
-- Redis, Kafka, ClickHouse, Kubernetes, or another external queue server. PostgreSQL provides the Phase 1 durable queues.
+- Redis, Kafka, ClickHouse, Kubernetes, or a self-managed queue server. Amazon SQS is the managed Phase 1 queue transport.
 - Billing, paid plans, enterprise login, or public status pages.
 - POST, PUT, PATCH, or DELETE synthetic checks.
 - Response-body storage.
@@ -63,21 +63,22 @@ The React application lives in the separate frontend repository. The two reposit
 
 ### Durable queue contract
 
-Phase 1 uses the `check_jobs` table as its check queue. This contract should be implemented before adding scheduler optimizations:
+Phase 1 uses Amazon SQS Standard queues for check delivery and PostgreSQL `check_jobs` plus `check_dispatch_outbox` rows for identity, state, idempotency, and atomic dispatch intent. Scheduled and manual jobs use separate source queues so manual traffic cannot displace scheduled monitoring. Each source queue has its own dead-letter queue (DLQ). This contract must be implemented before adding scheduler optimizations:
 
 | Part | Phase 1 rule |
 |---|---|
 | Job identity | Every job has a stable UUID. `health_checks.job_id` is unique, so retrying a job cannot store a second final result. |
-| Job types | `scheduled` and `manual_test`. Scheduled work has higher priority. |
+| Job types | `scheduled` and `manual_test`. Separate SQS queues provide strict worker-side preference for scheduled work. |
 | States | `pending`, `running`, `completed`, `cancelled`, and `dead`. |
-| Claim | A worker changes a ready `pending` job to `running` in a short transaction and records its worker ID, a new lease token, and lease expiry. |
-| Completion | Only the worker holding the current lease token may finish the job. The result and completed state are committed together. |
-| Recovery | A detected internal failure returns the job to `pending` with a short bounded delay. A crash is recovered after lease expiry. After three internal attempts the job becomes `dead`. |
+| Dispatch | Creating the job, recording an outbox message, and advancing `next_check_at` happen in one PostgreSQL transaction. A repeatable dispatcher publishes the stable job ID to SQS and records the SQS message ID. |
+| Receive | A worker long-polls only for available capacity. The SQS receipt handle and visibility deadline act as the delivery lease; PostgreSQL records the worker, receive count, and current processing token for stale-completion protection. |
+| Completion | The result and completed job state commit together in PostgreSQL. The worker deletes the SQS message only after that commit. A redelivered completed/cancelled job is acknowledged without another request. |
+| Recovery | A detected internal failure changes message visibility with bounded delay. A crash is recovered when SQS visibility expires. The source queue redrive policy moves poison messages to the DLQ after three receives; reconciliation marks their database jobs `dead`. |
 | Target failure | DNS, connection, TLS, timeout, or unexpected HTTP status is stored once as an unhealthy result; it is not retried as an internal error. |
 | Stale work | Work for a paused, deleted, or changed monitor becomes `cancelled` before a request is sent. |
-| Scheduling | Creating a scheduled job and advancing `next_check_at` happen in one database transaction. |
-| Wake-up signal | PostgreSQL notifications or an in-process signal may wake workers faster, but polling the table must preserve correctness if that signal is lost. |
-| Cleanup | Completed jobs are removed after 48 hours; dead and cancelled jobs after seven days. Monitoring results follow their separate retention rules. |
+| SQS payload | Contains only schema version, stable job ID, job type, and safe routing metadata. It never contains URLs, decrypted headers, credentials, or response data. |
+| Security | Server-side encryption is enabled. Queue policies and IAM roles grant only the minimum send, receive, visibility, delete, redrive, and attribute permissions required by each module. |
+| Cleanup | SQS retention and DLQ retention are configured explicitly. Completed ledger rows are removed after 48 hours; dead and cancelled rows after seven days. Monitoring results follow separate retention rules. |
 
 Allowed state changes:
 
@@ -85,13 +86,29 @@ Allowed state changes:
 pending -> running -> completed
 pending -> cancelled
 running -> cancelled
-running -> pending   (internal error or expired lease; attempts remain)
-running -> dead      (internal error or expired lease; attempt limit reached)
+running -> pending   (internal error or SQS visibility expiry; attempts remain)
+running -> dead      (DLQ reconciliation after the receive limit)
 ```
 
 This gives at-least-once request execution and at-most-one stored result per job ID. It does not promise exactly-once HTTP requests.
 
-Email delivery uses a separate durable `notification_outbox` table with its own delivery ID, lease, retry time, attempt limit, and final failed state. A check job and an email job must not share state or retry rules. Phase 1.3 defines this flow.
+Email delivery uses a separate transactional `notification_outbox`, SQS source queue, and DLQ with its own delivery ID and retry rules. A check job and an email job never share queues, state, or redrive policy. Phase 1.3 defines this flow.
+
+### Phase 1 AWS SQS configuration contract
+
+The repository stores queue settings and example names, never AWS secrets. Phase 1.2 requires:
+
+- AWS account ID and Region;
+- scheduled-check queue URL and ARN plus its DLQ URL and ARN;
+- manual-check queue URL and ARN plus its DLQ URL and ARN;
+- queue type fixed to Standard, server-side encryption selection, retention periods, long-poll wait, visibility timeout, redrive `maxReceiveCount`, and alarm thresholds;
+- an optional customer-managed KMS key ARN when SSE-SQS is not used;
+- a local-development SQS endpoint override and non-production queue names; and
+- workload identity details for production, preferably an IAM role rather than long-lived access keys.
+
+The application loads AWS Region and credentials through the AWS SDK for Go v2 default configuration chain. Production should use temporary role credentials. Local development may use an AWS IAM Identity Center/profile session or short-lived environment credentials. Access key IDs, secret access keys, session tokens, SSO cache files, and production `.env` files must never be committed or pasted into documentation, tests, logs, issues, or chat.
+
+Minimum permissions are split by module: the dispatcher may send and read queue attributes; workers may receive, change visibility, delete, and read queue attributes; the DLQ reconciler may receive/delete from the DLQs; infrastructure provisioning separately manages queues, policies, redrive settings, alarms, and KMS grants. If SSE-KMS is selected, the applicable roles also need only the required KMS permissions for the chosen key.
 
 ---
 
@@ -127,7 +144,7 @@ Use the same package ID in the checklist, GitHub Issue, and every related commit
 Example:
 
 ```text
-Issue:  P1-306 Durable scheduling, leased workers, and queue controls
+Issue:  P1-306 Durable scheduling, SQS workers, and queue controls
 Commit: feat(p1-306): add durable job claiming
 Commit: test(p1-306): verify lease recovery
 ```
@@ -254,12 +271,16 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Prevent duplicate jobs with a unique monitor-and-scheduled-time key.
   - Record scheduled time separately from start and completion time.
 
+  This completed PostgreSQL-only path is the initial compatibility slice. P1-306 replaces its delivery and claim mechanism with the SQS dispatch-outbox contract while retaining stable job IDs and database idempotency.
+
 - [x] **P1-107 — Execute and store an HTTP check**
   - Claim a pending job with a worker ID and lease using `FOR UPDATE SKIP LOCKED`.
   - Apply the monitor timeout and expected status range.
   - Idempotently store at most one final success or failure, status code, error category, and total duration per job ID.
   - Mark the job completed in the same result transaction.
   - Do not save the response body.
+
+  This completed PostgreSQL lease path remains historical foundation work. P1-306 migrates claiming and recovery to SQS receipt handles and visibility timeouts.
 
 - [x] **P1-108 — Add the first monitoring read API**
   - Return the monitor's current state and recent check results.
@@ -385,25 +406,29 @@ Turn the first working check into a bounded, restart-safe monitoring engine.
   - Monitor lifecycle, encryption, redaction, request limits, timing, redirect, IPv4, IPv6, metadata, and DNS-rebinding tests pass.
   - Only controlled target APIs are used by network tests.
 
-- [ ] **P1-306 — Complete durable scheduling, leased workers, and queue controls**
+- [ ] **P1-306 — Complete durable scheduling, SQS workers, and queue controls**
 
   **Combines former tasks:** P1-306 through P1-308.
 
   **Depends on:** P1-301.
 
   **Deliverables:**
-  - Implement the complete `check_jobs` schema, states, indexes, stable IDs, monitor version, priorities, attempts, availability time, leases, safe errors, and lifecycle timestamps.
-  - Insert a job and advance `next_check_at` atomically while preventing duplicate or unlimited overdue scheduling.
+  - Implement the complete PostgreSQL job ledger, `check_dispatch_outbox`, states, indexes, stable IDs, monitor version, receive counts, processing tokens, safe errors, SQS message IDs, and lifecycle timestamps.
+  - Provision separate SQS Standard queues for scheduled and manual checks, with server-side encryption, long polling, explicit retention, visibility timeout, least-privilege policies, DLQs, and redrive policies.
+  - Insert a job, record dispatch intent, and advance `next_check_at` atomically while preventing duplicate or unlimited overdue scheduling.
+  - Publish outbox rows idempotently to SQS and reconcile ambiguous publish outcomes without losing durable jobs or exposing secret monitor data in messages.
   - Enforce one outstanding scheduled job per monitor and stable schedule spreading.
-  - Claim only available worker capacity using `FOR UPDATE SKIP LOCKED`, worker identity, lease token, and lease expiry.
-  - Retry only internal failures with bounded delay; reclaim expired work; reject stale completion; move exhausted jobs to `dead`.
+  - Long-poll only available worker capacity; record worker identity, SQS receipt metadata, processing token, receive count, and visibility deadline.
+  - Retry only internal failures with bounded visibility changes; recover after visibility expiry; reject stale completion; reconcile exhausted messages from the DLQ to `dead`.
   - Store target failures once, cancel stale monitor work, and keep manual tests out of uptime and incident calculations.
-  - Enforce worker, scheduled-job, and manual-job limits, priority, cleanup, disk bounds, queue metrics, and operational alerts.
+  - Delete an SQS message only after the PostgreSQL result transaction commits; safely acknowledge duplicate deliveries for already terminal jobs.
+  - Enforce worker, scheduled-job, manual-job, and database-ledger limits; scheduled/manual queue isolation; cleanup; CloudWatch queue metrics; and operational alerts.
+  - Support a local SQS-compatible test service through Docker Compose; production uses Amazon SQS through the AWS SDK default credential chain.
 
-  **Relevant specification:** Sections 8.2, 8.4–8.6, 13.1–13.3, and 14.2; risks R-018 and R-060–R-065.
+  **Relevant specification:** Sections 8.2, 8.4–8.6, 13.1–13.3, and 14.2; risks R-018 and R-060–R-068.
 
   **Package verification:**
-  - Atomic enqueue, duplicate prevention, concurrent claim, lease expiry, stale completion, retry, dead-job, priority, hard-limit, cleanup, pause, overdue, restart, timeout-storm, and database-slowdown tests pass.
+  - Atomic outbox creation, publisher retry, ambiguous publish, duplicate delivery, concurrent receive, visibility expiry, stale completion, retry, DLQ/dead-job reconciliation, scheduled/manual isolation, hard-limit, cleanup, pause, overdue, restart, timeout-storm, SQS-unavailability, and database-slowdown tests pass.
   - A crash after target response may repeat the request but stores at most one result per job ID.
 
 - [ ] **P1-309 — Complete reliability reporting, retention, and engine verification**
@@ -430,10 +455,10 @@ Turn the first working check into a bounded, restart-safe monitoring engine.
 
 - [ ] Monitoring survives an application restart without an unlimited replay storm.
 - [ ] Pending jobs survive application and worker restarts.
-- [ ] Expired leases are reclaimed and stale lease owners cannot commit over a newer attempt.
+- [ ] Expired SQS visibility timeouts are redelivered and stale processing tokens cannot commit over a newer attempt.
 - [ ] Duplicate scheduling and worker recovery cannot create duplicate stored results for one job ID.
-- [ ] Dead jobs and queue-limit events are visible and lower coverage appropriately.
-- [ ] The durable queue stays within its row and disk limits during at least 100 concurrent timeouts.
+- [ ] DLQ jobs and queue-limit events are visible and lower coverage appropriately.
+- [ ] SQS backlog, in-flight work, DLQs, and the PostgreSQL job ledger stay within configured limits during at least 100 concurrent timeouts.
 - [ ] Direct, DNS, redirect, metadata, private-IP, and DNS-rebinding safety tests pass.
 - [ ] Missing work lowers coverage and is not counted as success.
 - [ ] Stored or logged data never contains plaintext monitor secrets or response bodies.
@@ -700,7 +725,7 @@ This combines former tasks P1-701 and P1-702. Production deployment must add nig
 
 ### Deferred package P1-703 — Oracle production deployment
 
-This combines former tasks P1-703 through P1-706. Production deployment must provide a version-pinned Docker Compose stack, Nginx with HTTPS and correct React/API/SSE routing, persistent PostgreSQL storage, OCI Vault and other approved OCI integrations, and documented provisioning, deployment, upgrade, rollback, and recovery procedures. Current Oracle Free Tier allowances must be verified at that time.
+This combines former tasks P1-703 through P1-706. Production deployment must provide a version-pinned Docker Compose stack, Nginx with HTTPS and correct React/API/SSE routing, persistent PostgreSQL storage, OCI Vault and other approved OCI integrations, and versioned AWS infrastructure for SQS queues, DLQs, encryption, least-privilege workload identity, CloudWatch alarms, budgets, and cross-cloud failure runbooks. Provisioning, deployment, upgrade, rollback, and recovery procedures must cover both providers. Current Oracle and AWS allowances and pricing must be verified at that time.
 
 ### Deferred package P1-707 — Release qualification and beta operations
 
@@ -715,8 +740,9 @@ These deferred packages are mandatory before production or a public beta. Deferr
 - [ ] A clean-environment PostgreSQL restore has succeeded and is documented.
 - [ ] Load-test results state the measured safe capacity.
 - [ ] Security tests pass.
+- [ ] Production uses temporary AWS workload credentials; no static AWS secret is stored in source, images, PostgreSQL, SQS messages, or production Compose files.
 - [ ] Disk, memory, queue, scheduler, notification, and backup health are visible.
-- [ ] Queue depth, oldest pending age, lease expiry, dead jobs, and hard-limit events are visible.
+- [ ] SQS visible/in-flight depth, oldest-message age, visibility expiry, DLQ jobs, dispatch-outbox backlog, and hard-limit events are visible.
 - [ ] Deployment and rollback have each been tested at least once.
 
 ---
@@ -729,7 +755,7 @@ The active Phase 1 implementation is development-complete only when all of the f
 - [ ] Monitoring survives application and container restarts.
 - [ ] Durable check and notification jobs survive application and worker restarts.
 - [ ] The system demonstrates at-least-once check execution with one stored result per stable job ID.
-- [ ] PostgreSQL queue hard limits, cleanup, dead-job handling, and operator alerts pass their tests.
+- [ ] SQS admission limits, dispatch-outbox and ledger cleanup, DLQ/dead-job handling, and operator alerts pass their tests.
 - [ ] Email alerts survive temporary provider failure.
 - [ ] Private IP, metadata, redirect, IPv6, and DNS-rebinding safety tests pass.
 - [ ] Cross-organization access tests pass for every tenant-owned resource.

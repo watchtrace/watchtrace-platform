@@ -4,7 +4,7 @@
 
 - **Status:** Source of truth for implementation
 - **Project type:** Personal project designed to grow into a startup
-- **Initial hosting:** Oracle Cloud Infrastructure Always Free
+- **Initial hosting:** Oracle Cloud Infrastructure Always Free for compute/database plus managed Amazon SQS in one AWS Region
 - **Growth plan:** Buy infrastructure when real usage requires it
 - **Last updated:** 2026-08-04
 
@@ -16,7 +16,7 @@ Companion document: [Risks, Caveats, and Constraints](./RISKS_AND_CAVEATS.md)
 
 This document explains what we are building, how the main parts work, and the order in which we will build them.
 
-The product will begin as a small monitoring platform running on Oracle Cloud Free Tier. It will later grow into a scalable startup product without requiring a complete rewrite.
+The product will begin as a small monitoring platform running primarily on Oracle Cloud Free Tier, with Amazon SQS providing managed durable delivery. It will later grow into a scalable startup product without requiring a complete rewrite.
 
 The work is divided into four phases:
 
@@ -182,14 +182,15 @@ Phase 2 additionally targets trace-batch acceptance below one second and recent 
 | HTTP API | Gin | Small and easy to understand |
 | Database access | SQLC | Generates safe Go code from explicit SQL |
 | Main database | PostgreSQL | Reliable transactions and enough capacity for the first two phases |
-| Phase 1 durable queue | PostgreSQL job tables | Check and notification work survives application restarts without another server |
+| Phase 1 durable delivery | Amazon SQS Standard queues | Managed at-least-once delivery, visibility timeouts, long polling, and DLQs |
+| Queue transaction ledger | PostgreSQL job and dispatch-outbox tables | Atomic schedule advancement, stable identity, state, and idempotent results across the PostgreSQL/SQS boundary |
 | Frontend | React and TypeScript | Good dashboard ecosystem |
 | UI components | Mantine | Speeds up accessible UI development |
 | Charts | Apache ECharts | Suitable for time-series and trace charts |
 | Live dashboard | Server-Sent Events | Simpler than WebSockets for one-way updates |
 | Public proxy | Nginx | HTTPS, static files, and basic request limits |
 | Trace format | OpenTelemetry OTLP | Open standard supported by many languages |
-| Email | OCI Email Delivery | Fits the initial no-paid-service rule |
+| Email | OCI Email Delivery | Uses the deployment provider's email integration |
 | Secrets | OCI Vault | Keeps encryption keys outside the database |
 | Initial deployment | Docker Compose | Simple enough for one VM |
 | Large telemetry storage | ClickHouse in Phase 3 | Designed for large analytical datasets |
@@ -209,16 +210,19 @@ Browser ──▶ Nginx ──▶ Go API
                          ▼
                     PostgreSQL
                     ├── configuration and results
-                    ├── durable check_jobs queue
-                    └── notification_outbox queue
-                         ▲                 ▲
-                         │                 │
-                    check workers     email worker
+                    ├── job ledger and check dispatch outbox
+                    └── notification outbox
+                              │
+                              ▼
+                    SQS dispatchers ──▶ Amazon SQS source queues + DLQs
+                                             │                 │
+                                             ▼                 ▼
+                                        check workers      email worker
 
-scheduler ── atomically enqueue due jobs and advance schedules ──▶ PostgreSQL
+scheduler ── atomically records job, dispatch intent, and schedule advance ──▶ PostgreSQL
 ```
 
-This is one modular application, not a collection of microservices. The scheduler and workers may run in the same Go process at first, but they communicate through PostgreSQL job rows rather than an in-memory work channel. They can therefore become separate processes later without changing queue behavior.
+This is one modular application, not a collection of microservices. The scheduler, dispatchers, and workers may run in the same Go process at first, but durable delivery crosses Amazon SQS and transactional state remains in PostgreSQL. They can therefore become separate processes later without changing message or idempotency contracts.
 
 ### 6.2 Phase 2 architecture
 
@@ -305,7 +309,8 @@ There must be exactly one organization owner. Creating an organization, project,
 | `monitor_secrets` | Encrypted request headers | monitor, encrypted value, key version |
 | `monitor_state` | Latest known state | healthy/degraded/down/unknown, counters, last check |
 | `monitor_schedule_periods` | History of interval and pause changes | monitor, interval, active period |
-| `check_jobs` | Durable queue of scheduled and manual checks | monitor, scheduled time, state, lease, attempts, priority |
+| `check_jobs` | Transactional job ledger for scheduled and manual checks | monitor, scheduled time, state, receive count, processing token, SQS message ID |
+| `check_dispatch_outbox` | Atomic SQS publication intent | job, queue kind, publish state, attempt, safe error, SQS message ID |
 | `health_checks` | Individual results | unique job ID, monitor, scheduled time, timings, status, error |
 | `monitor_rollups_hourly` | Hourly summary | expected, observed, healthy, failed, latency |
 | `monitor_rollups_daily` | Daily summary | expected, observed, healthy, failed, latency |
@@ -385,17 +390,20 @@ These limits are starting safety settings. Load tests decide whether they can be
 | Outstanding scheduled jobs per monitor | 1 |
 | Global scheduled jobs pending or running | At most 1,000 |
 | Manual test jobs waiting | At most 100 platform-wide |
-| Worker lease | 60 seconds, configurable |
-| Internal job attempts | 3 before dead-letter state |
-| Completed queue-row retention | 48 hours |
-| Dead/cancelled queue-row retention | 7 days |
+| SQS visibility timeout | 60 seconds, configurable and safely above request timeout |
+| SQS receive wait | 20-second long polling |
+| Internal receives | 3 before SQS DLQ redrive |
+| SQS source-message retention | 4 days |
+| SQS DLQ retention | 14 days |
+| Completed ledger-row retention | 48 hours |
+| Dead/cancelled ledger-row retention | 7 days |
 | Default timeout | 5 seconds |
 | Maximum timeout | 10 seconds |
 | Raw checks | 7 days |
 | Hourly summaries | 90 days |
 | Daily summaries | 1 year |
 
-The 20 checks/second goal assumes ordinary endpoints respond in about two seconds or less. If many endpoints use the full timeout, the durable queue will grow on disk rather than in memory. Hard queue limits and one outstanding scheduled job per monitor prevent unlimited growth.
+The 20 checks/second goal assumes ordinary endpoints respond in about two seconds or less. If many endpoints use the full timeout, the SQS backlog and PostgreSQL job ledger will grow. Hard admission limits, one outstanding scheduled job per monitor, explicit SQS retention, and CloudWatch alarms prevent silent unlimited growth.
 
 ### 8.3 Monitor configuration
 
@@ -414,26 +422,26 @@ Phase 1 does not store response bodies. Later we may add small text matching wit
 
 ### 8.4 Durable check queue and scheduler
 
-Phase 1 uses PostgreSQL as a durable queue. It does not depend on an in-memory channel for ownership of scheduled work.
+Phase 1 uses Amazon SQS Standard queues as the durable delivery transport. PostgreSQL remains the transactional source of truth for schedules, stable job identity, job state, coverage, and results. No in-memory channel owns work.
 
 The scheduler polls due monitors in small batches. For each due monitor, one database transaction:
 
 1. Locks the due monitor so another scheduler cannot schedule the same time slot.
-2. Inserts a `check_jobs` row with a stable job ID and scheduled time.
-3. Advances `next_check_at` from the planned time, not from completion time.
-4. Commits both changes together.
+2. Inserts a `check_jobs` ledger row with a stable job ID and scheduled time.
+3. Inserts a `check_dispatch_outbox` row containing only safe routing data and the job ID.
+4. Advances `next_check_at` from the planned time, not from completion time.
+5. Commits all three changes together.
 
-The insert is idempotent through a unique monitor-and-scheduled-time key. If the transaction fails, neither the new job nor the schedule advance is committed.
+The job insert is idempotent through a unique monitor-and-scheduled-time key. If the transaction fails, the job, dispatch intent, and schedule advance all roll back. A repeatable dispatcher reads unpublished outbox rows, sends the stable job ID to the appropriate SQS queue, and records the returned SQS message ID. If a publish response is lost, republishing can create a duplicate Standard-queue message; worker idempotency makes that safe.
 
-The queue stores:
+The PostgreSQL ledger stores:
 
 - organization, environment, monitor, and monitor version;
 - `scheduled` or `manual_test` job type;
-- scheduled and available time;
+- scheduled time and dispatch state;
 - `pending`, `running`, `completed`, `cancelled`, or `dead` state;
-- priority;
-- attempt count and maximum attempts;
-- lease owner, lease token, and lease expiry;
+- SQS queue kind and message ID;
+- approximate receive count, worker identity, processing token, and visibility deadline;
 - last internal error; and
 - created, started, and completed times.
 
@@ -446,11 +454,43 @@ Important rules:
 - Small stable timing offsets spread jobs so they do not all become due at once.
 - The scheduler advances an overdue monitor to the first future slot instead of replaying every missed interval.
 - When the queue is at its hard limit, new work is not added blindly. The skipped time lowers coverage and raises an operational alert.
-- PostgreSQL is the queue source of truth. Process-local wakeups may reduce delay but may never be required for correctness.
+- Scheduled and manual checks use separate Standard queues and DLQs. Workers always reserve scheduled capacity before polling manual work.
+- SQS messages contain no URL, custom header, credential, response body, or tenant secret. Workers load current monitor data from PostgreSQL after receiving the stable job ID.
+- Server-side encryption is mandatory. Queue policies and IAM roles are least privilege; public access is prohibited.
+- SQS is the delivery source of truth and PostgreSQL is the state/idempotency source of truth. Reconciliation detects unpublished outbox rows, messages moved to DLQs, and non-terminal ledger rows with no viable delivery.
 
-### 8.5 Worker claiming, leases, and result flow
+#### 8.4.1 SQS resources, configuration, and identity
 
-A worker claims only as many jobs as it has free execution slots. It uses `FOR UPDATE SKIP LOCKED` to change selected pending jobs to `running`, assigns its worker ID, increments the attempt count, and gives each job a short lease.
+Phase 1.2 provisions four check queues in one AWS account and Region:
+
+| Queue | Purpose |
+|---|---|
+| Scheduled source | Normal scheduled checks; workers reserve capacity for this queue |
+| Scheduled DLQ | Scheduled messages that exceed the receive limit |
+| Manual source | User-requested test-now checks with a separate global admission limit |
+| Manual DLQ | Manual messages that exceed the receive limit |
+
+All four are Standard queues. Source queues use 20-second long polling, a 60-second default visibility timeout, four-day retention, server-side encryption, and a redrive policy with `maxReceiveCount` 3. DLQs use 14-day retention and a redrive-allow policy restricted to their source queue. Exact values remain configuration and infrastructure code, and tests assert deployed attributes rather than assuming console defaults.
+
+Required non-secret application settings are AWS Region, source queue URLs, DLQ URLs for reconciliation, an optional SQS endpoint override for the local emulator, and alarm thresholds. Queue ARNs, AWS account ID, encryption choice, and optional KMS key ARN are required by infrastructure and IAM policy configuration.
+
+The Go application uses the AWS SDK for Go v2 default configuration and credential chain. Production uses temporary workload-role credentials whenever possible. Local development uses an authenticated AWS profile/Identity Center session or short-lived environment credentials. Static access keys are never embedded in source, images, migrations, database rows, queue messages, or committed `.env` files.
+
+IAM is split by responsibility:
+
+- scheduler/dispatcher: `sqs:SendMessage` and the minimum queue-attribute read permissions on the two source queues;
+- checker workers: `sqs:ReceiveMessage`, `sqs:ChangeMessageVisibility`, `sqs:DeleteMessage`, and minimum queue-attribute reads on source queues;
+- DLQ reconciler: receive/delete/attribute access only on the two check DLQs;
+- infrastructure operator: queue creation, tagging, policies, redrive configuration, encryption, and CloudWatch alarms; and
+- KMS permissions only when a customer-managed key is selected, scoped to the queue encryption use case.
+
+CloudWatch alarms cover oldest-message age, visible and not-visible counts, DLQ depth, dispatch-outbox age, publish failures, and non-terminal ledger reconciliation failures. Metrics must not use job, monitor, user, or organization IDs as dimensions.
+
+Implementation references: [SQS at-least-once delivery](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/standard-queues-at-least-once-delivery.html), [visibility timeouts](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html), [dead-letter queues](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html), [long polling](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/best-practices-setting-up-long-polling.html), [server-side encryption](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-server-side-encryption.html), [least-privilege IAM examples](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-basic-examples-of-iam-policies.html), and [AWS SDK for Go v2 configuration and credential chain](https://docs.aws.amazon.com/sdk-for-go/v2/developer-guide/configure-gosdk.html).
+
+### 8.5 Worker receiving, visibility, and result flow
+
+A worker long-polls only when it has free execution slots. For each received SQS message it starts a short PostgreSQL transaction that locks the stable job row, rejects malformed or stale work, records the worker ID, SQS receive metadata, a random processing token, and the visibility deadline, then changes an eligible `pending` job to `running`. The SQS receipt handle is held only in worker memory and never logged. A redelivery of a completed, cancelled, or dead job is deleted without sending another request.
 
 The HTTP request happens outside the claim transaction. After the request finishes, one result transaction:
 
@@ -458,21 +498,26 @@ The HTTP request happens outside the claim transaction. After the request finish
 2. Updates monitor state.
 3. Creates or resolves an incident when required.
 4. Inserts any notification outbox rows.
-5. Marks the check job completed.
+5. Marks the check job completed while comparing the current processing token.
+
+Only after that transaction commits does the worker call `DeleteMessage` with the current receipt handle. If deletion fails, SQS may redeliver the message; the terminal database state prevents another request and the duplicate delivery is deleted.
 
 Target outcomes such as DNS failure, timeout, connection failure, TLS failure, or an unexpected status are valid unhealthy results. They complete the job and are **not** retried.
 
-Only internal failures that prevent a valid result from being stored—such as a worker crash or temporary database failure—are retried. When the worker can still reach PostgreSQL, it returns the job to `pending` with a short bounded delay. Otherwise, lease expiry makes the job reclaimable. After three internal attempts, the job moves to `dead`, creates an operational alert, and its scheduled check is counted as unknown coverage.
+Only internal failures that prevent a valid result from being stored—such as a worker crash, SQS API interruption, or temporary database failure—are retried. When possible, the worker returns the database job to `pending` and uses `ChangeMessageVisibility` for a short bounded delay. Otherwise the visibility timeout expires and SQS redelivers the message. After three receives, the SQS redrive policy moves the message to its DLQ; a reconciler marks the database job `dead`, creates an operational alert, and counts the scheduled check as unknown coverage.
 
-The execution guarantee is **at least once**, not exactly once. If a worker crashes after sending the HTTP request but before committing the result, another worker may send the same GET or HEAD request again. The unique job ID prevents duplicate stored results, but it cannot prevent the monitored server from seeing a rare duplicate request.
+The execution guarantee is **at least once**, not exactly once. SQS Standard queues can deliver a message more than once. If a worker crashes after sending the HTTP request but before committing the result, another delivery may send the same GET or HEAD request again. The unique job ID and processing-token comparison prevent duplicate stored results and stale completion, but they cannot prevent the monitored server from seeing a rare duplicate request.
 
 ### 8.6 Check flow
 
 ```text
-Scheduler commits durable check job
+Scheduler commits job, dispatch outbox, and schedule advance
         │
         ▼
-Worker claims job with a lease
+Dispatcher publishes stable job ID to SQS
+        │
+        ▼
+Worker receives message with a visibility timeout
         │
         ▼
 Worker validates destination and monitor version
@@ -487,6 +532,9 @@ One database transaction:
   create or resolve incident
   create notification outbox work
   mark check job completed
+        │
+        ▼
+Delete the SQS message with its current receipt handle
         │
         ▼
 Send live dashboard event after commit
@@ -508,7 +556,7 @@ Only one open incident may exist for the same monitor and rule. An acknowledged 
 
 ### 8.8 Email delivery
 
-Incident emails are written to a PostgreSQL outbox table in the same transaction as the incident. A separate worker sends them through OCI Email Delivery.
+Incident emails are written to a PostgreSQL outbox table in the same transaction as the incident. A dispatcher publishes only the delivery ID to a separate SQS notification queue, and a separate worker sends through OCI Email Delivery. The notification queue and DLQ do not share check-job policies or retry settings.
 
 Retry schedule:
 
@@ -582,7 +630,7 @@ api-monitor
 postgres
 ```
 
-Use one ARM64 Ampere A1 VM with the current free allocation. Keep PostgreSQL data on a separate block volume. Use OCI Vault, Object Storage, Monitoring, Logging, Bastion, and Email Delivery within their free allowances.
+Use one ARM64 Ampere A1 VM with the current free allocation. Keep PostgreSQL data on a separate block volume. Use OCI Vault, Object Storage, Monitoring, Logging, Bastion, and Email Delivery where suitable. The VM must also reach the selected regional Amazon SQS endpoint over HTTPS. SQS requests, data transfer, CloudWatch alarms, and optional KMS use are budgeted AWS dependencies and are not assumed to be permanently free.
 
 Oracle currently documents 2 A1 OCPUs and 12 GB memory for an Always Free tenancy. These limits can change, so verify them before deployment: [OCI Free Tier](https://docs.oracle.com/iaas/Content/FreeTier/freetier.htm).
 
@@ -592,13 +640,13 @@ Oracle currently documents 2 A1 OCPUs and 12 GB memory for an Always Free tenanc
 2. Users, sessions, email verification, password reset.
 3. Organizations, projects, environments, members, and roles.
 4. Monitor CRUD and strong URL safety.
-5. PostgreSQL durable check queue, scheduler, leased workers, and test endpoints.
+5. PostgreSQL job ledger and dispatch outbox, Amazon SQS source queues and DLQs, scheduler, SQS workers, and test endpoints.
 6. Result transaction, state, incidents, and recovery.
-7. Email outbox and OCI Email Delivery.
+7. Notification outbox, separate SQS notification queue and DLQ, and OCI Email Delivery.
 8. Dashboard APIs and React pages.
 9. Live events and polling fallback.
 10. Rollups, retention, audit records, metrics, logs, and backups.
-11. Load tests, security tests, restore test, and OCI deployment.
+11. Load tests, security tests, restore test, OCI deployment, AWS SQS infrastructure, workload identity, budgets, and cross-cloud recovery exercises.
 
 ### 8.13 Phase 1 completion rules
 
@@ -607,7 +655,7 @@ Phase 1 is complete when:
 - A new user can complete the full flow without database edits.
 - Monitoring survives an application restart.
 - Pending check jobs survive application and worker restarts.
-- An expired worker lease is reclaimed without creating duplicate stored results.
+- An expired SQS visibility timeout is redelivered without allowing stale completion or duplicate stored results.
 - A target timeout becomes one unhealthy result and is not retried as an internal job failure.
 - Queue hard limits and dead jobs produce visible operational alerts.
 - Alert and recovery emails are not lost when email delivery is temporarily unavailable.
@@ -917,7 +965,7 @@ These programs remain in the backend monorepo. Splitting backend programs for de
 
 ### 10.5 Check scheduling at scale
 
-Phase 1 already provides durable PostgreSQL jobs and worker leases. Phase 3 keeps the same job identity and at-least-once rules while moving high-volume delivery to an external durable broker:
+Phase 1 already provides SQS delivery, PostgreSQL job identity, and transactional dispatch outboxes. Phase 3 keeps the same job identity and at-least-once rules while adding regional routing and, only if measured throughput requires it, migrating to a higher-volume broker:
 
 1. Scheduler instances claim due monitors through PostgreSQL leases.
 2. A transactional outbox records the broker message before the schedule transaction is acknowledged.
@@ -926,7 +974,7 @@ Phase 1 already provides durable PostgreSQL jobs and worker leases. Phase 3 keep
 5. Results are published and stored in batches.
 6. Idempotent job and result IDs make broker replay safe.
 
-The Phase 3 migration runs PostgreSQL-queue and broker paths in a controlled compatibility period. Jobs must never be acknowledged in PostgreSQL before their broker publication is durably recorded.
+Any Phase 3 broker migration runs SQS and replacement-broker paths in a controlled compatibility period. Dispatch intent must remain durably recorded before broker publication, and results remain idempotent by stable job ID.
 
 Multi-region checks include at least three probe locations. Alert rules can require failure from two locations before opening an incident, which reduces alerts caused by one regional network problem.
 
@@ -1037,7 +1085,7 @@ Final commercial plans are a business decision and can change without changing t
 1. Measure Phase 2 bottlenecks and define paid capacity needs.
 2. Move PostgreSQL to a highly available setup with tested backups.
 3. Introduce ClickHouse and copy telemetry with a verified migration pipeline.
-4. Migrate the PostgreSQL job queue to an external durable broker with a transactional outbox, replay tests, and rollback.
+4. Keep Amazon SQS or migrate to a measured higher-volume broker with the same transactional outbox, replay tests, and rollback contract.
 5. Split and scale checker and ingestion programs.
 6. Add multi-region check workers.
 7. Add OTLP metrics and metrics dashboards.
@@ -1443,7 +1491,7 @@ Rules:
 3. **Phase 1 is a modular Go application.** Microservices are not required to demonstrate good architecture.
 4. **PostgreSQL handles the first two phases.** ClickHouse is added when paid scale and measured data volume justify it.
 5. **Redis is not needed on one application instance.** It may be added in Phase 3 for shared short-lived state.
-6. **Phase 1 uses PostgreSQL durable queues.** Kafka is not required on the free VM. An external durable broker is added in Phase 3 when regional delivery and telemetry spikes outgrow PostgreSQL queue throughput.
+6. **Phase 1 uses Amazon SQS Standard queues for durable delivery and PostgreSQL outboxes/job ledgers for atomic state.** Kafka is not required. A different broker is considered only when measured regional delivery or telemetry throughput outgrows SQS or needs broker features SQS does not provide.
 7. **GET and HEAD are the only Phase 1 check methods.** Side-effecting synthetic workflows require a later safety design.
 8. **Missing checks are unknown, not healthy.** Coverage is shown with uptime.
 9. **The free deployment is a beta, not a 99.9% SLA.** A commercial SLA comes only after paid high-availability infrastructure is proven.
@@ -1462,9 +1510,11 @@ Create organization, project, and production environment
    │
 Create one GET monitor
    │
-Scheduler commits a durable check job
+Scheduler commits a stable job and SQS dispatch intent
    │
-Worker leases and executes the job
+Dispatcher publishes to SQS
+   │
+Worker receives and executes the job under a visibility timeout
    │
 Result appears in PostgreSQL
    │
