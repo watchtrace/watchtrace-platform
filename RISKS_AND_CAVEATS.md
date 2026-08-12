@@ -2,7 +2,7 @@
 
 - **Companion to:** `DESIGN_SPECIFICATION.md`
 - **Purpose:** Record what can go wrong, what the product cannot promise yet, and what must be tested before each release
-- **Last updated:** 2026-08-04
+- **Last updated:** 2026-08-12
 
 ---
 
@@ -42,9 +42,10 @@ These are the issues most likely to affect the project.
 6. Distributed traces are often incomplete because of sampling, missing instrumentation, or broken trace context.
 7. Telemetry data grows much faster than ordinary business data.
 8. Email acceptance does not guarantee delivery to a mailbox.
-9. Amazon SQS survives application restarts, but Standard queues provide at-least-once delivery and can duplicate or reorder messages; PostgreSQL remains required for stable job state and idempotency.
-10. Splitting into microservices adds network failures and data-consistency problems.
-11. A technically successful product may still have poor business economics because telemetry storage and support are expensive.
+9. Amazon SQS FIFO reduces duplicate publication only within a five-minute deduplication window; it does not make an external HTTP check globally exactly once.
+10. A database-free customer worker requires self-contained encrypted jobs, signed results, isolated routing, careful key rotation, and a local journal.
+11. Splitting into microservices adds network failures and data-consistency problems.
+12. A technically successful product may still have poor business economics because telemetry storage and support are expensive.
 
 ---
 
@@ -113,7 +114,7 @@ Always Free capacity may be temporarily unavailable during provisioning. Oracle 
 - **Level:** High
 - **Affects:** Phases 1–2
 
-VM failure, operating-system failure, full disk, Docker failure, PostgreSQL failure, or maintenance can stop the API, scheduling, workers, traces, and notifications together. SQS retains already published messages independently, but they cannot be processed until application and database access recover.
+VM failure, operating-system failure, full disk, Docker failure, PostgreSQL failure, or maintenance can stop the API, scheduling, hosted workers, traces, and notifications together. SQS retains published jobs and results independently. A database-free worker may continue executing queued jobs during a database outage, while the result FIFO safely buffers its results until the central consumer recovers.
 
 **Control:** Use readiness monitoring, external health checks, automatic container restart, block-volume backups, and a tested manual restore. Accept best-effort beta availability until paid infrastructure is introduced.
 
@@ -131,7 +132,7 @@ Some container images, native libraries, browser-test tools, or monitoring agent
 - **Level:** Critical
 - **Affects:** Phases 1–2
 
-PostgreSQL raw checks, job-ledger and outbox rows, indexes, write-ahead logs, traces, temporary files, and Docker logs share limited storage. A full disk can stop dispatch recording, result commits, and new writes even while SQS still holds published messages.
+PostgreSQL raw checks, job-ledger and immutable outbox rows, indexes, write-ahead logs, traces, worker SQLite journals, temporary files, and Docker logs share limited storage. A full disk can stop dispatch recording, result commits, and new writes even while SQS still holds published messages.
 
 **Control:** Set hard ingestion limits, short retention, disk alerts at 60%, 75%, and 85%, partition deletion, bounded Docker logs, and an emergency switch that rejects telemetry before control data is threatened.
 
@@ -231,7 +232,7 @@ A broad outage may cause every request to use its full timeout. One hundred work
 
 An attacker may try to use the checker to call localhost, private networks, OCI or AWS instance metadata, or another protected system. Simple URL validation is not sufficient.
 
-**Control:** Validate scheme, port, every IPv4/IPv6 result, actual dialed address, and every redirect. Block private, loopback, link-local, multicast, metadata, and special-use destinations. Test DNS rebinding.
+**Control:** Hosted workers validate scheme, port, every IPv4/IPv6 result, actual dialed address, and every redirect, and block private, loopback, link-local, multicast, metadata, and special-use destinations. A customer-VPC worker may allow only explicit CIDRs from its protected local configuration; a queue message can never widen that allowlist. It still blocks metadata, loopback, link-local, multicast, and unexpected redirects. Test DNS rebinding and allowlist escape in both modes.
 
 ### R-020: The platform can be used to attack third parties
 
@@ -365,7 +366,7 @@ Incident storms, test emails, and many recipients can consume the monthly allowa
 
 The process may crash after SMTP accepts an email but before PostgreSQL records success, causing a retry and duplicate.
 
-**Control:** Use an idempotent outbox for job creation, include a stable incident ID, and document rare duplicate delivery.
+**Control:** Create a stable notification-outbox row in the incident transaction, lease and retry it idempotently, include a stable incident and delivery ID, and document rare duplicate delivery.
 
 ### R-034: Alert fatigue makes the product less useful
 
@@ -621,86 +622,140 @@ An availability promise needs precise measurement, exclusions, support commitmen
 
 ## 14. Durable Queue Caveats
 
-### R-060: Durable does not mean exactly once
+### R-060: FIFO deduplication lasts only five minutes
 
 - **Level:** High
 - **Affects:** Phase 1 onward
 
-Amazon SQS Standard queues can deliver a message more than once. If a worker sends a request and crashes before committing its result, the visibility timeout expires and another delivery may send the GET or HEAD request again. PostgreSQL can prevent a second stored result for the same stable job ID, but it cannot undo the duplicate request received by the monitored server.
+`MessageDeduplicationId = job_id` prevents a second enqueued copy only when the retry reaches the same FIFO queue within SQS's five-minute deduplication window. SQS accepts same-ID retries during that window without delivering them again, even if the original was already received or deleted. A retry after the window may create another delivery.
 
-**Control:** Permit only GET and HEAD, use stable job IDs, make result writes idempotent, document at-least-once execution, and test a crash between network completion and database commit.
+**Control:** Store the exact immutable body, deduplication ID, group ID, and destination in the outbox; make the three fast job-publication retries within 30 seconds; never automatically publish a job after its two-minute start expiry; retain worker-journal and result-consumer idempotency for visibility redelivery, result retry, and controlled redrive; and test both in-window suppression and forced late duplicates. Do not describe this as global exactly-once execution.
 
 ### R-061: PostgreSQL and SQS cannot commit atomically
 
 - **Level:** High
 - **Affects:** Phases 1–2
 
-A scheduler cannot atomically advance a PostgreSQL schedule and send an SQS message. Sending first can create orphan messages; committing PostgreSQL first without durable dispatch intent can lose work. A lost `SendMessage` response can also make publication outcome ambiguous.
+The scheduler cannot atomically commit PostgreSQL and `SendMessage`. If SQS accepts a job but the publisher crashes before updating PostgreSQL, the outbox still appears unpublished. A lost response has the same ambiguity.
 
-**Control:** Commit the stable job, dispatch-outbox row, and schedule advance in one database transaction. Publish the outbox asynchronously, tolerate duplicate Standard-queue messages, record the SQS message ID, and reconcile old unpublished rows. Test rollback, publisher crash, lost response, duplicate publication, and SQS outage.
+**Control:** Commit the stable job, immutable encrypted message, publication identifiers, and schedule advance in one PostgreSQL transaction. Publish asynchronously and retry the identical FIFO message three times within 30 seconds. Let a valid result repair missing dispatch confirmation. Retain uncertain rows until the job-start expiry, then mark the slot unknown instead of publishing stale work. Test rollback, accepted-send crash, lost response, SQS outage, result-based repair, and post-expiry refusal.
 
-### R-062: Visibility can expire while a healthy worker is still running
-
-- **Level:** High
-- **Affects:** Phase 1 onward
-
-A long pause, overloaded process, network interruption, or badly chosen visibility timeout can make SQS redeliver a job while the first worker is still executing it. Receipt handles change on redelivery.
-
-**Control:** Keep request timeout safely below visibility timeout, receive only available worker capacity, extend visibility when justified, never log or persist receipt handles, identify every worker, and make completion compare the current PostgreSQL processing token. Test stale completion after redelivery.
-
-### R-063: Poison jobs can retry forever or block useful work
+### R-062: A target can still receive a duplicate check
 
 - **Level:** High
 - **Affects:** Phase 1 onward
 
-A malformed monitor record or repeatable internal bug can fail every time the job is claimed.
+A worker can crash after the target responds but before the local journal stores the result, or a different worker can receive a later duplicate. No SQS setting can atomically combine a third-party HTTP request with the worker journal or result queue.
 
-**Control:** Separate target failures from internal failures, set source-queue redrive `maxReceiveCount` to three, use dedicated DLQs, reconcile DLQ messages to visible database `dead` state and unknown coverage, record only a safe error category, alert operators, and provide a controlled redrive tool after the bug is fixed.
+**Control:** Permit only GET and HEAD, include `X-WatchTrace-Job-ID`, use a durable local journal, publish the result before deleting the job, accept one valid database result per job ID, document the remaining duplicate window, and test crashes at every execution boundary. Side-effecting synthetic methods require a later protocol.
 
-### R-064: A durable backlog can grow without using much application memory
+### R-063: Visibility expiry and poison message groups
+
+- **Level:** High
+- **Affects:** Phase 1 onward
+
+A pause, overloaded worker, network interruption, corrupt envelope, or engine bug can leave a job unacknowledged. Visibility expiry causes redelivery. FIFO also blocks later messages in the same group while one message is in flight.
+
+**Control:** Keep the ten-second request timeout safely below the 90-second job visibility timeout, receive only available capacity, use `MessageGroupId = job_id` so one poison job does not block later monitor jobs, use a five-receive job DLQ rule, distinguish target outcomes from internal failures, alert on DLQ movement, and provide controlled redrive after repair.
+
+### R-064: A durable backlog can grow invisibly
 
 - **Level:** Critical for availability
 - **Affects:** Phase 1 onward
 
-Moving delivery to SQS prevents an in-memory crash but can hide overload while SQS messages, in-flight work, dispatch-outbox rows, and PostgreSQL ledger rows grow. SQS retention can then expire work that was never processed. Durability is not permission for an unlimited queue.
+FIFO queues prevent in-memory loss but can hide overload while job messages, result messages, in-flight work, immutable outbox rows, and PostgreSQL ledger rows grow. Retention can expire unprocessed data.
 
-**Control:** Enforce one outstanding scheduled job per monitor and database-backed global admission limits; monitor visible, not-visible, oldest-message, DLQ, and outbox age; advance overdue schedules without replaying every slot; configure explicit retention; clean terminal ledger rows; and reject manual work before scheduled work.
+**Control:** Enforce one outstanding scheduled job per monitor and global admission limits; monitor both FIFO queues, both DLQs, oldest-message age, in-flight count, outbox age, and result-consumer delay; skip unlimited overdue replay; configure retention; and count unrecoverable scheduled work as unknown coverage.
 
-### R-065: Queue priority can become unfair
+### R-065: The local worker journal is not a shared lock
 
 - **Level:** Medium
-- **Affects:** Public beta onward
+- **Affects:** Phase 1 onward
 
-SQS Standard queues do not provide application priority. Manual tests or one large organization may consume worker capacity and delay regular checks for everyone else.
+SQLite prevents repeated execution only when the same worker instance retains the same disk. Replacing the container without its volume, moving the job to another worker, or corrupting the journal removes that protection. A journal can also grow or expose target metadata.
 
-**Control:** Use separate scheduled and manual source queues and DLQs, reserve worker capacity for scheduled checks, rate-limit manual jobs, keep manual results out of uptime and incident calculations, apply organization quotas, and measure delay by organization without putting organization IDs into high-cardinality metrics.
+**Control:** Mount a durable restricted volume, store only bounded job IDs, hashes, states, and signed results, encrypt the volume where practical, apply retention and disk alarms, treat journal loss as degraded protection rather than data loss, and keep database uniqueness as the final storage guard.
 
-### R-066: AWS credentials or receipt handles can leak
+### R-066: Queue credentials, lease tokens, or cryptographic keys can leak
 
 - **Level:** Critical
 - **Affects:** Phase 1 onward
 
-Long-lived access keys, temporary session tokens, SSO cache material, or SQS receipt handles can grant queue access. Logs, committed `.env` files, images, error responses, and diagnostic dumps are common leak paths.
+AWS credentials, SQS receipt handles, HTTPS lease tokens, worker credentials, worker private keys, or platform signing keys can allow message theft, forged results, or decryption of targets and headers.
 
-**Control:** Use the AWS SDK default credential chain and temporary IAM workload roles in production; use authenticated profiles or short-lived credentials locally; never embed credentials in code; redact AWS authorization data and receipt handles; grant least privilege per module; rotate exposed credentials immediately; and run secret scanning plus log/API redaction tests.
+**Control:** Use temporary least-privilege AWS roles for direct SQS, short-lived audience-bound gateway credentials or mTLS, short-lived authenticated-encrypted lease tokens, separate keys per worker pool and purpose, protected key files, rotation and revocation, secret scanning, and strict redaction. Never expose raw receipt handles or place private keys in logs, PostgreSQL plaintext, images, issues, or chat.
 
 ### R-067: Cross-cloud SQS dependency can stop dispatch or increase cost
 
 - **Level:** High
 - **Affects:** Phases 1–2
 
-The initial application runs on OCI while SQS runs in AWS. Internet routing, DNS, TLS, either provider, AWS account configuration, quotas, or billing controls can interrupt queue access. SQS requests, CloudWatch, KMS, and cross-cloud data transfer may create costs even when the OCI VM is free.
+The initial control plane runs on OCI while SQS runs in AWS. Internet routing, DNS, TLS, either provider, AWS quotas, or billing controls can interrupt job publication, worker pulls, result publication, or result consumption. SQS requests, CloudWatch, KMS, and cross-cloud transfer create costs.
 
-**Control:** Use a regional HTTPS endpoint, short bounded SDK retries, outbox backlog alarms, queue-age alarms, AWS budgets, cost-allocation tags, explicit quotas, and a runbook for AWS or network failure. Queue payloads stay minimal. Test SQS unavailability without losing dispatch intent or replaying unlimited overdue schedules.
+**Control:** Use a regional HTTPS endpoint, bounded SDK retries, outbox and both-queue age alarms, AWS budgets and tags, explicit quotas, minimal bounded payloads, and a cross-cloud outage runbook. Verify that job intent remains in PostgreSQL and accepted results remain in SQS during either-side outages.
 
-### R-068: SQS retention or DLQ misconfiguration can lose visible work
+### R-068: Retention or DLQ configuration can lose visible work
 
 - **Level:** Critical for coverage
 - **Affects:** Phase 1 onward
 
-Messages can expire under the source retention period, move to the wrong DLQ, or become inaccessible through an incorrect queue policy. A DLQ with shorter effective retention may delete diagnostic work before operators respond.
+Jobs or results can expire, move to the wrong DLQ, or become inaccessible through a bad queue policy. Treating a result DLQ entry as a target failure would also be incorrect because the result may be valid but not yet stored.
 
-**Control:** Manage queue attributes and policies as versioned infrastructure, keep DLQ retention longer than source retention, restrict redrive sources, reconcile database non-terminal jobs against dispatch and DLQ state, alarm before retention windows are approached, and count unrecoverable work as unknown coverage.
+**Control:** Version queue attributes and policies, require FIFO DLQs for FIFO sources, keep DLQ retention longer than source retention, restrict redrive sources, reconcile ledger state with job/result DLQs, alert well before retention expiry, and count only unrecoverable job work as unknown. Quarantine and redrive recoverable results.
+
+### R-069: Self-contained job messages carry sensitive data
+
+- **Level:** Critical
+- **Affects:** Phase 1 onward
+
+A database-free worker needs the target URL and optional request headers in its job. SQS server-side encryption protects storage but does not by itself prevent a worker, gateway, or leaked queue credential from reading a message.
+
+**Control:** Sign then encrypt each immutable job for the assigned worker-pool public key; use server-side queue encryption as a second layer; keep application messages below 64 KiB; bind schema, audience, job ID, expiry, and snapshot hash; never log decrypted envelopes; and test wrong-pool, tampered, expired, and rotated-key cases.
+
+### R-070: A forged or conflicting result could corrupt monitoring state
+
+- **Level:** Critical
+- **Affects:** Phase 1 onward
+
+A compromised worker could report invented status, another pool could submit a result, or two attempts could return different outcomes. Blindly accepting the first message by job ID could open or close an incident incorrectly.
+
+**Control:** Sign results with a registered worker-pool key; authenticate gateway submissions; verify job ID, snapshot hash, assigned pool, time bounds, schema, and size; accept the first valid result transactionally; quarantine conflicting later results; audit conflicts; and support worker-pool revocation. Worker trust is explicit and visible to the customer.
+
+### R-071: Direct SQS and HTTPS modes can behave differently
+
+- **Level:** High
+- **Affects:** Phase 1 onward
+
+Two transport paths can drift in acknowledgement order, visibility handling, retry timing, error mapping, or authentication. A bug in the stateless gateway can expose receipt handles or delete a job before its result is durable.
+
+**Control:** Put execution, envelope, journal, and state-machine logic in shared packages; make adapters pass the same contract suite; in both modes publish the result before deleting an executed job and allow only a signed expired-job acknowledgement as the exception; keep the gateway free of product rules and PostgreSQL access; and run failure tests against both transports.
+
+### R-072: Dedicated worker-pool queues create operational growth
+
+- **Level:** Medium in Phase 1; High at startup scale
+- **Affects:** Phase 1 onward
+
+One dedicated FIFO job queue per customer worker pool gives strong routing isolation but increases queue, alarm, IAM-policy, key, and lifecycle-management counts. A shared queue is unsafe for unrelated customer workers because a consumer cannot filter before receiving a message.
+
+**Control:** Start with one hosted pool and a small number of approved customer pools; automate provisioning, tagging, alarms, revocation, and deletion; enforce pool quotas; review AWS quotas and cost; and redesign routing in Phase 3 when measured pool count requires it.
+
+### R-073: Published self-contained jobs cannot be recalled instantly
+
+- **Level:** Medium
+- **Affects:** Phase 1 onward
+
+Because a worker does not query PostgreSQL, pausing, deleting, or editing a monitor cannot synchronously cancel an encrypted job already accepted by SQS. A job may run with the configuration version valid when it was scheduled.
+
+**Control:** Keep only one outstanding scheduled job per monitor, use a two-minute job-start expiry, stop future publication immediately, and record the monitor version and snapshot hash. A valid unstarted expired job is acknowledged without calling the target; the control plane marks a result-less job unknown by deadline. A valid late executed result may correct provisional expiry but must not overwrite newer monitor state. Provide queue purge/revocation only for exceptional security events, and explain this bounded behavior in the UI and beta terms.
+
+### R-074: Customer worker clocks can be wrong
+
+- **Level:** Medium
+- **Affects:** Phase 1 onward
+
+A worker with a fast clock may discard a valid job as expired; a slow clock may run stale work. Worker timestamps can also make latency or ordering appear impossible.
+
+**Control:** Require UTC time synchronization, expose clock-offset health, allow a small bounded expiry tolerance, use the control plane's scheduled and receive times as authoritative, validate worker timestamps within limits, and never let worker time alone overwrite newer monitor state. Test fast and slow clocks in both transport modes.
 
 ---
 
@@ -709,19 +764,25 @@ Messages can expire under the source retention period, move to the wrong DLQ, or
 ### 15.1 Before a public Phase 1 beta
 
 - [ ] URL, redirect, IPv4, IPv6, metadata, and DNS-rebinding tests pass.
+- [ ] Hosted pools block private/special destinations and customer pools cannot escape their protected local CIDR allowlists.
 - [ ] Cross-organization access tests pass for every resource.
 - [ ] Request, queue, worker, and response-size limits are enforced.
-- [ ] Due scheduling, stable job insertion, dispatch-outbox creation, and schedule advancement commit atomically; SQS publication and reconciliation tests pass.
-- [ ] Workers long-poll only available capacity and duplicate deliveries cannot overwrite a newer processing attempt.
-- [ ] Expired SQS visibility timeouts are redelivered and duplicate stored results are prevented by job ID.
+- [ ] Due scheduling, stable job insertion, immutable encrypted outbox creation, and schedule advancement commit atomically.
+- [ ] FIFO job/result queues and FIFO DLQs use explicit attributes, encryption, least-privilege policies, and `job_id` deduplication/group identifiers.
+- [ ] A publisher crash after SQS acceptance is repaired by exact-message retry or result arrival; tests cover in-window suppression, post-expiry publish refusal, and forced late-duplicate handling.
+- [ ] Direct-SQS and HTTPS workers pass the same contract tests and have no PostgreSQL dependency.
+- [ ] Workers verify and decrypt jobs, journal execution, sign results, publish the result before deleting an executed job, use only the documented expired-job acknowledgement exception, and long-poll only available capacity.
+- [ ] The result consumer verifies job, snapshot, pool, signature, size, and time bounds; duplicates cannot store a second result or repeat incident/notification side effects.
+- [ ] Expired visibility timeouts are redelivered safely and conflicting results are quarantined.
 - [ ] Target failures complete once without internal retry; only internal failures consume job attempts.
-- [ ] DLQ jobs, oldest-message age, visible/in-flight depth, outbox backlog, and queue hard-limit events create operational alerts.
+- [ ] Job DLQ, result DLQ, oldest-message age, visible/in-flight depth, outbox backlog, gateway health, journal health, and queue hard-limit events create operational alerts.
 - [ ] Worker-crash tests demonstrate and document the rare duplicate-request window.
+- [ ] Worker clock-skew tests preserve expiry, result validation, and monitor-state ordering.
 - [ ] Unknown checks and coverage are shown correctly.
 - [ ] Incident and notification creation is transactional and idempotent.
 - [ ] Email domain, SPF, DKIM, retries, quota alerts, and suppressions are tested.
 - [ ] Secrets do not appear in logs, database plaintext, or API responses.
-- [ ] Disk, scheduler, database, email queue, and backup age have alerts.
+- [ ] Disk, scheduler, database, notification outbox, and backup age have alerts.
 - [ ] A backup has been restored on a clean machine.
 - [ ] Terms of use, privacy notice, and abuse contact exist before accepting unknown public users.
 
@@ -771,8 +832,10 @@ The initial beta accepts the following limitations:
 - Best-effort availability with no SLA.
 - Monitoring from one network location.
 - Manual recovery within the documented target.
-- Published check jobs survive application restarts in SQS, and committed dispatch intent survives in PostgreSQL; PostgreSQL failure still stops new scheduling and safe execution until recovery.
-- A worker crash or duplicate SQS delivery may cause a rare duplicate GET or HEAD after visibility expiry.
+- Published check jobs and results survive application restarts in SQS, and committed immutable dispatch intent survives in PostgreSQL; PostgreSQL failure stops new scheduling but result messages can wait durably for recovery.
+- FIFO suppresses same-job publication retries only within five minutes. Worker crashes, lost journals, visibility expiry, or later retries may still cause a rare duplicate GET or HEAD.
+- A job already published may run after its monitor is paused or edited; it is bounded by job expiry and recorded against the scheduled monitor version.
+- Customer-VPC workers are trusted execution components with dedicated routing and keys; compromise of a worker can affect checks assigned to its pool.
 - The OCI deployment depends on AWS SQS availability, credentials, quotas, networking, and a controlled AWS budget.
 - A check that reaches dead-letter state becomes unknown coverage until an operator resolves the internal failure.
 - Rare duplicate email delivery.

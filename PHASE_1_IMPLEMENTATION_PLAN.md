@@ -41,12 +41,14 @@ The system will run locally with Docker Compose and deploy as a small hybrid-clo
 - One modular Go application in a backend monorepo.
 - A React and TypeScript dashboard in the frontend repository.
 - PostgreSQL as the source of truth for configuration, job identity and state, results, and transactional outboxes.
-- Amazon SQS Standard queues as the durable delivery transport for check jobs and notification work.
+- Amazon SQS FIFO queues as the durable transport for encrypted check jobs and signed check results.
+- A modular database-free Go check worker with direct-SQS and outbound-HTTPS transport adapters.
+- A stateless HTTPS queue gateway that translates authenticated worker operations to SQS without reading PostgreSQL.
 - Server-Sent Events with a polling fallback.
 - Docker Compose for local and Oracle Cloud deployment.
 - OCI Email Delivery, Vault, Object Storage, and other free OCI services where suitable.
 
-The Go application may contain API, scheduler, SQS dispatcher, checker, incident, notification, and live-event modules. These are code modules, not independent microservices in Phase 1. All backend modules and commands remain in the backend monorepo. They may run in one application process initially and be separated later without duplicating business rules or creating a repository per service. PostgreSQL owns the transactional job ledger and an outbox records messages that must be published. Amazon SQS owns durable delivery to workers; an in-memory channel is never the source of truth.
+The backend monorepo may contain API, scheduler, FIFO publisher, result consumer, check worker, queue gateway, incident, notification, and live-event commands and modules. These are not separate repositories or independently owned microservices in Phase 1. Control-plane modules may share one deployment initially. The check worker and queue gateway remain process and dependency boundaries: neither contains a PostgreSQL driver, SQL queries, database credentials, or product-data access. Amazon SQS owns durable transport between the control plane and workers; an in-memory channel is never the source of truth.
 
 The React application lives in the separate frontend repository. The two repositories integrate only through the documented HTTP and Server-Sent Events contract. Each repository has independent CI. The backend monorepo owns database migrations, backend deployment definitions, and the versioned OpenAPI contract; the frontend repository consumes that contract and produces a versioned build artifact or image for deployment.
 
@@ -63,52 +65,61 @@ The React application lives in the separate frontend repository. The two reposit
 
 ### Durable queue contract
 
-Phase 1 uses Amazon SQS Standard queues for check delivery and PostgreSQL `check_jobs` plus `check_dispatch_outbox` rows for identity, state, idempotency, and atomic dispatch intent. Scheduled and manual jobs use separate source queues so manual traffic cannot displace scheduled monitoring. Each source queue has its own dead-letter queue (DLQ). This contract must be implemented before adding scheduler optimizations:
+Phase 1 uses two logical Amazon SQS FIFO flows: encrypted check jobs from the control plane to workers, and signed results from workers to the control plane. Each main FIFO has a FIFO DLQ. PostgreSQL `check_jobs` and `check_dispatch_outbox` rows provide stable identity, immutable publication intent, and final result idempotency. The first hosted worker pool uses one job FIFO; each approved customer-VPC worker pool uses isolated job routing and keys. This contract must be implemented before scheduler optimization:
 
 | Part | Phase 1 rule |
 |---|---|
-| Job identity | Every job has a stable UUID. `health_checks.job_id` is unique, so retrying a job cannot store a second final result. |
-| Job types | `scheduled` and `manual_test`. Separate SQS queues provide strict worker-side preference for scheduled work. |
-| States | `pending`, `running`, `completed`, `cancelled`, and `dead`. |
-| Dispatch | Creating the job, recording an outbox message, and advancing `next_check_at` happen in one PostgreSQL transaction. A repeatable dispatcher publishes the stable job ID to SQS and records the SQS message ID. |
-| Receive | A worker long-polls only for available capacity. The SQS receipt handle and visibility deadline act as the delivery lease; PostgreSQL records the worker, receive count, and current processing token for stale-completion protection. |
-| Completion | The result and completed job state commit together in PostgreSQL. The worker deletes the SQS message only after that commit. A redelivered completed/cancelled job is acknowledged without another request. |
-| Recovery | A detected internal failure changes message visibility with bounded delay. A crash is recovered when SQS visibility expires. The source queue redrive policy moves poison messages to the DLQ after three receives; reconciliation marks their database jobs `dead`. |
+| Job identity | Every job has one stable UUID. Both FIFO flows use `MessageDeduplicationId = job_id` and `MessageGroupId = job_id`; `health_checks.job_id` is unique. |
+| Job types | `scheduled` and `manual_test` share the same protocol. Strict manual admission limits protect scheduled work; manual results never affect uptime or incidents. |
+| Job states | `pending_publish`, `published`, `completed`, `dead`, and `expired`. Delivery attempts are observations, not database locks held by the worker. |
+| Atomic intent | Job creation, the exact encrypted FIFO body, bounded safe attributes, FIFO identifiers, and `next_check_at` advancement commit in one PostgreSQL transaction. |
+| Publication | The publisher retries the identical stored body and identifiers. Three fast attempts stay inside the five-minute FIFO deduplication window; uncertain rows wait for result-based repair and are never automatically republished after the two-minute job-start expiry. |
+| Job envelope | A versioned, signed, worker-pool-audience-bound execution snapshot is encrypted for that pool. It contains required URL/check settings but no database, user, or AWS credentials. Its bytes and hash never change for the job ID. |
+| Worker boundary | The worker verifies and decrypts the envelope, executes through a shared check engine, and signs a result. Direct-SQS and HTTPS gateway adapters follow the same state machine. Neither the worker nor gateway connects to PostgreSQL. |
+| Local journal | SQLite records accepted job IDs, snapshot hashes, and completed signed results. Same-worker redelivery republishes the saved result instead of repeating the request. |
+| Completion | The worker publishes to the result FIFO before deleting an executed job message; a signed valid unstarted-expired acknowledgement is the only exception. The result consumer commits one result per job ID before deleting the result message. |
+| Recovery | Visibility expiry redelivers internal failures. Job messages move to their DLQ after five receives; result messages move after ten. Job DLQ reconciliation marks unrecoverable scheduled work unknown; result DLQ entries remain recoverable and urgent. |
 | Target failure | DNS, connection, TLS, timeout, or unexpected HTTP status is stored once as an unhealthy result; it is not retried as an internal error. |
-| Stale work | Work for a paused, deleted, or changed monitor becomes `cancelled` before a request is sent. |
-| SQS payload | Contains only schema version, stable job ID, job type, and safe routing metadata. It never contains URLs, decrypted headers, credentials, or response data. |
-| Security | Server-side encryption is enabled. Queue policies and IAM roles grant only the minimum send, receive, visibility, delete, redrive, and attribute permissions required by each module. |
-| Cleanup | SQS retention and DLQ retention are configured explicitly. Completed ledger rows are removed after 48 hours; dead and cancelled rows after seven days. Monitoring results follow separate retention rules. |
+| Already-published work | Pausing or editing stops future jobs. An already published self-contained job may run until its short expiry and is recorded against its scheduled monitor version. |
+| Security | Application-level signing and per-pool encryption protect job content; worker signatures protect results. SQS server-side encryption, least-privilege IAM, short-lived gateway credentials or mTLS, key rotation, and redaction are mandatory. |
+| Cleanup | SQS retention and DLQ retention are configured explicitly. Completed ledger rows are removed after 48 hours; dead and expired rows after seven days. Monitoring results follow separate retention rules. |
 
 Allowed state changes:
 
 ```text
-pending -> running -> completed
-pending -> cancelled
-running -> cancelled
-running -> pending   (internal error or SQS visibility expiry; attempts remain)
-running -> dead      (DLQ reconciliation after the receive limit)
+pending_publish -> published -> completed
+pending_publish -> completed   (result proves an ambiguously recorded publish succeeded)
+pending_publish -> expired
+published -> dead              (job DLQ or unrecoverable internal failure)
+published -> expired           (no accepted result by the deadline)
+expired -> completed           (a valid late executed result corrects provisional expiry)
+dead -> completed              (a valid late executed result corrects provisional failure)
 ```
 
-This gives at-least-once request execution and at-most-one stored result per job ID. It does not promise exactly-once HTTP requests.
+This gives durable publication intent, best-effort FIFO producer deduplication, and at most one accepted result per job ID. It does not promise exactly-once HTTP requests. A crash after a target response but before durable local journaling can still cause a duplicate GET or HEAD.
 
-Email delivery uses a separate transactional `notification_outbox`, SQS source queue, and DLQ with its own delivery ID and retry rules. A check job and an email job never share queues, state, or redrive policy. Phase 1.3 defines this flow.
+Email delivery uses a separate transactional PostgreSQL `notification_outbox` with its own delivery ID, database lease, and retry rules. Email work never shares the check-job or check-result FIFOs. Phase 1.3 defines this flow.
 
 ### Phase 1 AWS SQS configuration contract
 
 The repository stores queue settings and example names, never AWS secrets. Phase 1.2 requires:
 
 - AWS account ID and Region;
-- scheduled-check queue URL and ARN plus its DLQ URL and ARN;
-- manual-check queue URL and ARN plus its DLQ URL and ARN;
-- queue type fixed to Standard, server-side encryption selection, retention periods, long-poll wait, visibility timeout, redrive `maxReceiveCount`, and alarm thresholds;
+- hosted check-job FIFO URL and ARN plus its FIFO DLQ URL and ARN;
+- shared check-result FIFO URL and ARN plus its FIFO DLQ URL and ARN;
+- optional dedicated job FIFO and FIFO DLQ routing for approved customer worker pools;
+- queue type fixed to FIFO, content-based deduplication disabled, server-side encryption selection, retention, long polling, job visibility 90 seconds, result visibility 60 seconds, redrive counts 5 and 10, and alarm thresholds;
+- a two-minute job-start expiry and seven-day terminal worker-journal retention;
+- application message size capped at 64 KiB;
 - an optional customer-managed KMS key ARN when SSE-SQS is not used;
-- a local-development SQS endpoint override and non-production queue names; and
-- workload identity details for production, preferably an IAM role rather than long-lived access keys.
+- a local-development SQS endpoint override and non-production queue names;
+- workload identity details for production, preferably an IAM role rather than long-lived access keys;
+- platform signing-key IDs, per-worker-pool encryption and result-signing key IDs, rotation state, and safe local-development keys; and
+- HTTPS gateway mTLS trust configuration, optional external token issuer/audience, pool-to-queue mapping, and authenticated-encrypted lease-token lifetime.
 
 The application loads AWS Region and credentials through the AWS SDK for Go v2 default configuration chain. Production should use temporary role credentials. Local development may use an AWS IAM Identity Center/profile session or short-lived environment credentials. Access key IDs, secret access keys, session tokens, SSO cache files, and production `.env` files must never be committed or pasted into documentation, tests, logs, issues, or chat.
 
-Minimum permissions are split by module: the dispatcher may send and read queue attributes; workers may receive, change visibility, delete, and read queue attributes; the DLQ reconciler may receive/delete from the DLQs; infrastructure provisioning separately manages queues, policies, redrive settings, alarms, and KMS grants. If SSE-KMS is selected, the applicable roles also need only the required KMS permissions for the chosen key.
+Minimum permissions are split by module: the publisher sends to assigned job FIFOs; direct workers receive/change visibility/delete only from their assigned job FIFO and send to the result FIFO; the stateless gateway has the same queue-limited permissions but no PostgreSQL access; the result consumer receives/deletes from the result FIFO; reconcilers receive/delete only from assigned DLQs; and infrastructure provisioning separately manages queues, policies, redrive, alarms, and KMS grants.
 
 ---
 
@@ -144,9 +155,10 @@ Use the same package ID in the checklist, GitHub Issue, and every related commit
 Example:
 
 ```text
-Issue:  P1-306 Durable scheduling, SQS workers, and queue controls
-Commit: feat(p1-306): add durable job claiming
-Commit: test(p1-306): verify lease recovery
+Issue:  P1-306 FIFO scheduling, modular workers, and result processing
+Commit: feat(p1-306): add immutable fifo job publication
+Commit: feat(p1-306): add database-free worker transports
+Commit: test(p1-306): verify ambiguous send and result replay
 ```
 
 ### 3.4 Implementation rule
@@ -232,8 +244,9 @@ Prove the product's central path as early as possible:
 
 ```text
 User -> Organization -> Project -> Environment -> Monitor
-  -> Durable PostgreSQL check job -> Leased worker
-  -> Stored HTTP result -> Authorized API response
+  -> Durable PostgreSQL job/outbox -> FIFO job message
+  -> Database-free worker -> FIFO result message
+  -> Idempotent PostgreSQL result -> Authorized API response
 ```
 
 Account handling in this milestone may be minimal, but passwords must still be hashed securely. Public-beta account features are completed across Phase 1.0 and Phase 1.1. Verify this slice with API and database integration tests; do not build React pages yet.
@@ -271,7 +284,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Prevent duplicate jobs with a unique monitor-and-scheduled-time key.
   - Record scheduled time separately from start and completion time.
 
-  This completed PostgreSQL-only path is the initial compatibility slice. P1-306 replaces its delivery and claim mechanism with the SQS dispatch-outbox contract while retaining stable job IDs and database idempotency.
+  This completed PostgreSQL-only path is the initial compatibility slice. P1-306 replaces its delivery and claim mechanism with the immutable FIFO job/result contract while retaining stable job IDs and database idempotency.
 
 - [x] **P1-107 — Execute and store an HTTP check**
   - Claim a pending job with a worker ID and lease using `FOR UPDATE SKIP LOCKED`.
@@ -280,7 +293,7 @@ Account handling in this milestone may be minimal, but passwords must still be h
   - Mark the job completed in the same result transaction.
   - Do not save the response body.
 
-  This completed PostgreSQL lease path remains historical foundation work. P1-306 migrates claiming and recovery to SQS receipt handles and visibility timeouts.
+  This completed PostgreSQL lease path remains historical foundation work. P1-306 moves execution into the database-free worker and moves result commits into the central result consumer. The old worker lease is removed from the final Phase 1 path.
 
 - [x] **P1-108 — Add the first monitoring read API**
   - Return the monitor's current state and recent check results.
@@ -395,10 +408,12 @@ Turn the first working check into a bounded, restart-safe monitoring engine.
   - Support the documented intervals, timeouts, expected status ranges, and encrypted custom headers with key versions.
   - Keep encryption keys outside PostgreSQL and redact secrets from responses, errors, and logs.
   - Validate every resolved IPv4 and IPv6 address before connection and every redirect destination.
-  - Block private, loopback, link-local, multicast, metadata, alternate-address, and DNS-rebinding paths.
+  - In hosted mode, block private, loopback, link-local, multicast, metadata, alternate-address, and DNS-rebinding paths.
+  - In customer-VPC mode, allow private destinations only inside the worker's protected local CIDR allowlist; never let a job widen it; and still block metadata, loopback, link-local, multicast, unsafe redirects, and DNS-rebinding escapes.
   - Limit total request time, bytes read, header size, and redirect count; strip secrets when the host changes.
   - Record DNS, connection, TLS, first-byte, and total timing where available, leaving unavailable stages null.
   - Categorize target and internal failures without storing response bodies.
+  - Keep HTTP execution behind a database-independent interface so P1-306 can reuse it inside the modular worker without importing API or persistence code.
 
   **Relevant specification:** Sections 8.2–8.3, 12.2–12.3, and 14.1–14.2; risks R-013–R-022.
 
@@ -406,30 +421,36 @@ Turn the first working check into a bounded, restart-safe monitoring engine.
   - Monitor lifecycle, encryption, redaction, request limits, timing, redirect, IPv4, IPv6, metadata, and DNS-rebinding tests pass.
   - Only controlled target APIs are used by network tests.
 
-- [ ] **P1-306 — Complete durable scheduling, SQS workers, and queue controls**
+- [ ] **P1-306 — Complete FIFO scheduling, modular workers, and result processing**
 
   **Combines former tasks:** P1-306 through P1-308.
 
   **Depends on:** P1-301.
 
   **Deliverables:**
-  - Implement the complete PostgreSQL job ledger, `check_dispatch_outbox`, states, indexes, stable IDs, monitor version, receive counts, processing tokens, safe errors, SQS message IDs, and lifecycle timestamps.
-  - Provision separate SQS Standard queues for scheduled and manual checks, with server-side encryption, long polling, explicit retention, visibility timeout, least-privilege policies, DLQs, and redrive policies.
-  - Insert a job, record dispatch intent, and advance `next_check_at` atomically while preventing duplicate or unlimited overdue scheduling.
-  - Publish outbox rows idempotently to SQS and reconcile ambiguous publish outcomes without losing durable jobs or exposing secret monitor data in messages.
-  - Enforce one outstanding scheduled job per monitor and stable schedule spreading.
-  - Long-poll only available worker capacity; record worker identity, SQS receipt metadata, processing token, receive count, and visibility deadline.
-  - Retry only internal failures with bounded visibility changes; recover after visibility expiry; reject stale completion; reconcile exhausted messages from the DLQ to `dead`.
-  - Store target failures once, cancel stale monitor work, and keep manual tests out of uptime and incident calculations.
-  - Delete an SQS message only after the PostgreSQL result transaction commits; safely acknowledge duplicate deliveries for already terminal jobs.
-  - Enforce worker, scheduled-job, manual-job, and database-ledger limits; scheduled/manual queue isolation; cleanup; CloudWatch queue metrics; and operational alerts.
-  - Support a local SQS-compatible test service through Docker Compose; production uses Amazon SQS through the AWS SDK default credential chain.
+  - Implement `worker_pools`, the complete job ledger, and `check_dispatch_outbox` with stable job IDs, monitor version, worker-pool routing, immutable encrypted body, bounded safe attributes, snapshot hash, deduplication/group IDs, publish state, attempts, safe errors, SQS message ID, and lifecycle timestamps.
+  - Define versioned job and result envelopes with strict size/field limits; sign then encrypt each job for its worker pool, sign each result, bind job ID, snapshot hash, audience, expiry, network-policy version, and key IDs, and require exact matches with the immutable safe SQS attributes. Test rotation, mismatch, and tamper rejection.
+  - Provision FIFO job/result queues and their FIFO DLQs with explicit deduplication, server-side encryption, long polling, retention, 90/60-second visibility, 5/10 receive limits, least-privilege policies, and CloudWatch alarms.
+  - Insert the job, exact encrypted outbox message, identifiers, and next schedule atomically while preventing duplicate or unlimited overdue scheduling.
+  - Publish the exact stored message with `MessageDeduplicationId = job_id` and `MessageGroupId = job_id`; make three fast exact-message attempts; preserve ambiguous rows; repair missing confirmation from valid results; refuse automatic job publication after the two-minute expiry; and test forced late duplicates through downstream idempotency.
+  - Enforce one outstanding scheduled job per monitor, stable schedule spreading, global admission limits, strict manual-test limits, a two-minute job-start expiry, and seven-day terminal journal retention. Editing or pausing stops future jobs; already published jobs retain their scheduled version.
+  - Extract the bounded GET/HEAD logic from P1-301 into a database-independent check engine and add `X-WatchTrace-Job-ID`.
+  - Build a modular worker with no PostgreSQL driver or database configuration. Add direct-SQS and HTTPS transport adapters behind one interface, free-capacity long polling, signature/decryption checks, a durable SQLite journal, safe local retention, and identical adapter contract tests.
+  - Add local worker-pool key generation and an operator-only registration/provisioning command that stores only public keys and produces trusted non-database gateway configuration. Do not add a worker-facing PostgreSQL control API.
+  - Build a stateless HTTPS queue gateway with no PostgreSQL access. Use mutual TLS (mTLS) as the default customer authentication and allow an external short-lived pool-token adapter; resolve queue access from trusted non-database configuration; wrap receipt handle, job ID, pool, and trusted expiry in a short-lived authenticated-encrypted lease token; and translate pull, extend, expired acknowledgement, and result operations to SQS. Delete ordinary jobs only after result publication; accept an expired acknowledgement only after gateway time confirms expiry within tolerance.
+  - Package the worker as Linux ARM64/AMD64 binaries and a non-root container with direct-SQS and HTTPS examples, outbound-only networking, health/readiness output, graceful shutdown, persistent-journal instructions, key protection, revocation, and upgrade documentation.
+  - Require UTC clock synchronization, expose clock-offset health, apply a small configured expiry tolerance, and validate remote timestamps without allowing them to reorder newer monitor state.
+  - Publish signed results with the same FIFO identifiers before deleting executed job messages. Limit no-result deletion to signed, valid, unstarted expired jobs. On same-worker redelivery, republish a journaled result instead of repeating the target request.
+  - Build the central result consumer to validate signature, pool, job, snapshot, expiry/time bounds, and sizes; store at most one valid result per job; update state/incidents/notification work transactionally; repair dispatch state; quarantine conflicts; and delete the result message only after commit.
+  - Treat target failures as executed results. If a valid job has not started before expiry, acknowledge it without calling the target or publishing a check result; a central deadline sweep marks result-less jobs expired and unknown. Accept a later valid executed result as correction while protecting newer monitor state. Let only internal failures expire for retry; reconcile job DLQ entries to `dead`/unknown and result DLQ entries to recoverable urgent operations.
+  - Add cleanup, journal/outbox/queue/DLQ/gateway/result-consumer metrics, alerts, and a local SQS-compatible service through Docker Compose. Production uses Amazon SQS through the AWS SDK default credential chain.
 
-  **Relevant specification:** Sections 8.2, 8.4–8.6, 13.1–13.3, and 14.2; risks R-018 and R-060–R-068.
+  **Relevant specification:** Sections 8.2, 8.4–8.6, 12.2–12.3, 13.1–13.3, and 14.1–14.5; risks R-018 and R-060–R-074.
 
   **Package verification:**
-  - Atomic outbox creation, publisher retry, ambiguous publish, duplicate delivery, concurrent receive, visibility expiry, stale completion, retry, DLQ/dead-job reconciliation, scheduled/manual isolation, hard-limit, cleanup, pause, overdue, restart, timeout-storm, SQS-unavailability, and database-slowdown tests pass.
-  - A crash after target response may repeat the request but stores at most one result per job ID.
+  - Atomic immutable-outbox creation, exact publisher retry, accepted-send crash, five-minute deduplication boundary, post-expiry publish refusal, forced late-duplicate handling, envelope security, key rotation, clock skew, queue attributes, transport parity, journal replay/loss, visibility expiry, conflicting results, both DLQs, limits, cleanup, pause/edit, overdue work, restart, timeout storm, SQS outage, and PostgreSQL outage tests pass.
+  - Static and runtime checks prove that the worker and queue gateway operate without PostgreSQL dependencies or network access.
+  - A crash after target response but before journal commit may repeat the GET or HEAD, but one valid result and one set of incident/notification side effects are stored per job ID.
 
 - [ ] **P1-309 — Complete reliability reporting, retention, and engine verification**
 
@@ -439,10 +460,10 @@ Turn the first working check into a bounded, restart-safe monitoring engine.
 
   **Deliverables:**
   - Calculate observed uptime from observed checks and coverage from observed versus expected checks.
-  - Treat missing, skipped, cancelled, and dead scheduled work as unknown coverage rather than success.
+  - Treat missing, skipped, expired, and dead scheduled work as unknown coverage rather than success.
   - Keep raw results for seven days, hourly summaries for 90 days, and daily summaries for one year.
   - Make rollup and retention work repeatable and safe to retry.
-  - Add the full scheduler and checker integration, crash-recovery, safety, and controlled load-test suite.
+  - Add the full scheduler, FIFO publisher, modular-worker, result-consumer, crash-recovery, safety, and controlled load-test suite.
 
   **Relevant specification:** Sections 8.2, 8.6, 8.12–8.13, 13.2, and 14.4–14.5; risks R-011–R-018 and R-035–R-036.
 
@@ -454,12 +475,15 @@ Turn the first working check into a bounded, restart-safe monitoring engine.
 ### Phase 1.2 gate
 
 - [ ] Monitoring survives an application restart without an unlimited replay storm.
-- [ ] Pending jobs survive application and worker restarts.
-- [ ] Expired SQS visibility timeouts are redelivered and stale processing tokens cannot commit over a newer attempt.
-- [ ] Duplicate scheduling and worker recovery cannot create duplicate stored results for one job ID.
-- [ ] DLQ jobs and queue-limit events are visible and lower coverage appropriately.
-- [ ] SQS backlog, in-flight work, DLQs, and the PostgreSQL job ledger stay within configured limits during at least 100 concurrent timeouts.
-- [ ] Direct, DNS, redirect, metadata, private-IP, and DNS-rebinding safety tests pass.
+- [ ] Pending jobs and accepted results survive application and worker restarts in their respective FIFO queues.
+- [ ] A publisher crash after SQS acceptance is recovered with the exact same body and job ID; tests prove in-window deduplication, post-expiry publish refusal, and safe forced-late-duplicate handling.
+- [ ] Direct-SQS and HTTPS workers pass the same behavior suite and run without PostgreSQL dependencies.
+- [ ] Expired visibility timeouts are redelivered; the local journal prevents normal same-worker re-execution and one valid result is stored per job ID.
+- [ ] Duplicate scheduling, publication, worker recovery, and result delivery cannot create duplicate stored results or incident/notification side effects.
+- [ ] Forged, expired, wrong-pool, tampered, oversized, and conflicting envelopes are rejected or quarantined.
+- [ ] Job-DLQ work lowers coverage appropriately; result-DLQ work is visible and recoverable without being mislabeled as target failure.
+- [ ] Job/result backlogs, in-flight work, both DLQs, the worker journal, and PostgreSQL ledger stay within configured limits during at least 100 concurrent timeouts.
+- [ ] Hosted public-address blocking and customer-VPC private-CIDR allowlisting pass direct, DNS, redirect, metadata, alternate-address, and DNS-rebinding tests.
 - [ ] Missing work lowers coverage and is not counted as success.
 - [ ] Stored or logged data never contains plaintext monitor secrets or response bodies.
 - [ ] The system approaches the planned 20 checks/second under the documented controlled test conditions, or the measured safe limit is recorded.
@@ -508,7 +532,7 @@ Detect meaningful outages, avoid alerts from single failures, and deliver recove
   - Notify only verified members who enabled notifications, with tenant and role checks on preferences.
   - Test the complete incident-to-notification flow, provider failure, retry, concurrency, and restart.
 
-  **Relevant specification:** Sections 8.7–8.8 and 12.3; risks R-031–R-034 and R-060–R-065.
+  **Relevant specification:** Sections 8.7–8.8 and 12.3; risks R-031–R-034.
 
   **Package verification:**
   - A temporary provider failure and application restart do not lose pending notification work.
@@ -593,7 +617,7 @@ Finish every backend capability needed by the Phase 1 React application. After t
 
   **Deliverables:**
   - Run the complete public-API system path from account creation through monitoring, incident, notification, reporting, live events, polling, and role restrictions.
-  - Add self-monitoring for scheduler delay, queue state and age, leases, dead jobs, missed checks, database delay, notification age, disk pressure, and retention.
+  - Add self-monitoring for scheduler delay, immutable-outbox age, FIFO job/result state and age, both DLQs, gateway and worker-journal health, dead jobs, missed checks, result-consumer delay, database delay, notification-outbox age, disk pressure, and retention.
   - Complete structured, redacted logging with request and safe record identifiers.
   - Stop new scheduling and claims during graceful shutdown, bound in-flight completion, and report readiness accurately.
   - Automate rollup, deletion, durable-queue, expired-token, and notification cleanup with last-success visibility.
@@ -723,9 +747,9 @@ Package, secure, test, and deploy the completed backend and React frontend to Or
 
 This combines former tasks P1-701 and P1-702. Production deployment must add nightly logical backups, block-volume backups, encrypted Object Storage copies, and a documented clean-environment restore test covering users, monitors, schedules, incidents, and notification state.
 
-### Deferred package P1-703 — Oracle production deployment
+### Deferred package P1-703 — Oracle and AWS production deployment
 
-This combines former tasks P1-703 through P1-706. Production deployment must provide a version-pinned Docker Compose stack, Nginx with HTTPS and correct React/API/SSE routing, persistent PostgreSQL storage, OCI Vault and other approved OCI integrations, and versioned AWS infrastructure for SQS queues, DLQs, encryption, least-privilege workload identity, CloudWatch alarms, budgets, and cross-cloud failure runbooks. Provisioning, deployment, upgrade, rollback, and recovery procedures must cover both providers. Current Oracle and AWS allowances and pricing must be verified at that time.
+This combines former tasks P1-703 through P1-706. Production deployment must provide a version-pinned Docker Compose stack, Nginx with HTTPS and correct React/API/SSE/worker-gateway routing, persistent PostgreSQL and worker-journal storage, OCI Vault and other approved OCI integrations, and versioned AWS infrastructure for FIFO job/result queues, per-pool job routing, FIFO DLQs, encryption, least-privilege workload identity, CloudWatch alarms, budgets, and cross-cloud failure runbooks. Production network policy must prove the worker and queue gateway cannot reach PostgreSQL. Provisioning, deployment, upgrade, key rotation, worker revocation, rollback, and recovery procedures must cover both providers. Current Oracle and AWS allowances and pricing must be verified at that time.
 
 ### Deferred package P1-707 — Release qualification and beta operations
 
@@ -742,7 +766,8 @@ These deferred packages are mandatory before production or a public beta. Deferr
 - [ ] Security tests pass.
 - [ ] Production uses temporary AWS workload credentials; no static AWS secret is stored in source, images, PostgreSQL, SQS messages, or production Compose files.
 - [ ] Disk, memory, queue, scheduler, notification, and backup health are visible.
-- [ ] SQS visible/in-flight depth, oldest-message age, visibility expiry, DLQ jobs, dispatch-outbox backlog, and hard-limit events are visible.
+- [ ] FIFO job/result visible and in-flight depth, oldest-message age, visibility expiry, both DLQs, ambiguous dispatch outbox, result-consumer delay, gateway health, worker-journal health, and hard-limit events are visible.
+- [ ] Production network and dependency checks prove that check workers and the queue gateway cannot access PostgreSQL.
 - [ ] Deployment and rollback have each been tested at least once.
 
 ---
@@ -754,10 +779,11 @@ The active Phase 1 implementation is development-complete only when all of the f
 - [ ] A new user can complete the full flow without manual database changes.
 - [ ] Monitoring survives application and container restarts.
 - [ ] Durable check and notification jobs survive application and worker restarts.
-- [ ] The system demonstrates at-least-once check execution with one stored result per stable job ID.
-- [ ] SQS admission limits, dispatch-outbox and ledger cleanup, DLQ/dead-job handling, and operator alerts pass their tests.
+- [ ] The system demonstrates bounded retry behavior with one accepted result and one set of incident/notification side effects per stable job ID; the rare duplicate GET/HEAD window is documented.
+- [ ] FIFO identifier, five-minute deduplication-boundary, immutable-outbox, worker-journal, result-idempotency, admission-limit, cleanup, both-DLQ, and operator-alert tests pass.
+- [ ] Direct-SQS and HTTPS modes complete the same checks without worker or gateway PostgreSQL access.
 - [ ] Email alerts survive temporary provider failure.
-- [ ] Private IP, metadata, redirect, IPv6, and DNS-rebinding safety tests pass.
+- [ ] Hosted workers block private/special targets, customer workers cannot escape their local CIDR allowlists, and metadata, redirect, IPv6, alternate-address, and DNS-rebinding tests pass.
 - [ ] Cross-organization access tests pass for every tenant-owned resource.
 - [ ] The frozen backend API contract covers every React operation and passes contract tests.
 - [ ] Every customer-facing screen is implemented in React without direct database access.
