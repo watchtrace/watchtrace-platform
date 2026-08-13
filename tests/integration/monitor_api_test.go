@@ -261,7 +261,7 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 	assertPostgreSQLErrorCode(t, err, "23503")
 	_, err = pool.Exec(ctx, `
 		INSERT INTO monitors (organization_id, environment_id, name, target_url, method)
-		VALUES ($1::text::uuid, $2::text::uuid, 'Unsupported method', 'https://example.test/head', 'HEAD')
+		VALUES ($1::text::uuid, $2::text::uuid, 'Unsupported method', 'https://example.test/trace', 'TRACE')
 	`, firstOwnership.Body.Organization.ID, firstOwnership.Body.Environment.ID)
 	assertPostgreSQLErrorCode(t, err, "23514")
 
@@ -336,12 +336,15 @@ func TestMonitorSchemaRollback(t *testing.T) {
 }
 
 type monitorCreateBody struct {
-	Name              string `json:"name"`
-	URL               string `json:"url"`
-	IntervalSeconds   int32  `json:"interval_seconds,omitempty"`
-	TimeoutSeconds    int32  `json:"timeout_seconds,omitempty"`
-	ExpectedStatusMin int16  `json:"expected_status_min,omitempty"`
-	ExpectedStatusMax int16  `json:"expected_status_max,omitempty"`
+	Name              string            `json:"name"`
+	URL               string            `json:"url"`
+	IntervalSeconds   int32             `json:"interval_seconds,omitempty"`
+	TimeoutSeconds    int32             `json:"timeout_seconds,omitempty"`
+	ExpectedStatusMin int16             `json:"expected_status_min,omitempty"`
+	ExpectedStatusMax int16             `json:"expected_status_max,omitempty"`
+	Method            string            `json:"method,omitempty"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	WorkerPoolID      string            `json:"worker_pool_id,omitempty"`
 }
 
 type monitorBody struct {
@@ -357,6 +360,10 @@ type monitorBody struct {
 	ExpectedStatusMax int16     `json:"expected_status_max"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+	Version           int64     `json:"version"`
+	Paused            bool      `json:"paused"`
+	WorkerPoolID      string    `json:"worker_pool_id"`
+	HeaderNames       []string  `json:"header_names"`
 }
 
 type monitorCheckBody struct {

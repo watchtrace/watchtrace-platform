@@ -12,7 +12,8 @@ FOR UPDATE OF organizations;
 -- name: CountOrganizationMonitors :one
 SELECT count(*) AS monitor_count
 FROM monitors
-WHERE organization_id = sqlc.arg(organization_id)::text::uuid;
+WHERE organization_id = sqlc.arg(organization_id)::text::uuid
+  AND deleted_at IS NULL;
 
 -- name: CreateMonitor :one
 INSERT INTO monitors (
@@ -46,6 +47,11 @@ RETURNING
     timeout_seconds,
     expected_status_min,
     expected_status_max,
+    version,
+    paused_at,
+    worker_pool_id,
+    headers_ciphertext,
+    header_key_version,
     created_at,
     updated_at;
 
@@ -71,11 +77,17 @@ SELECT
     timeout_seconds,
     expected_status_min,
     expected_status_max,
+    version,
+    paused_at,
+    worker_pool_id,
+    headers_ciphertext,
+    header_key_version,
     created_at,
     updated_at
 FROM monitors
 WHERE organization_id = sqlc.arg(organization_id)::text::uuid
   AND environment_id = sqlc.arg(environment_id)::text::uuid
+  AND deleted_at IS NULL
 ORDER BY created_at, id;
 
 -- name: GetEnvironmentMonitor :one
@@ -90,12 +102,18 @@ SELECT
     timeout_seconds,
     expected_status_min,
     expected_status_max,
+    version,
+    paused_at,
+    worker_pool_id,
+    headers_ciphertext,
+    header_key_version,
     created_at,
     updated_at
 FROM monitors
 WHERE organization_id = sqlc.arg(organization_id)::text::uuid
   AND environment_id = sqlc.arg(environment_id)::text::uuid
-  AND id = sqlc.arg(monitor_id)::text::uuid;
+  AND id = sqlc.arg(monitor_id)::text::uuid
+  AND deleted_at IS NULL;
 
 -- name: GetLatestScheduledMonitorResult :one
 SELECT succeeded

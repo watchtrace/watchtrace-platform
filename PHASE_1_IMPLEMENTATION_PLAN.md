@@ -413,7 +413,7 @@ Turn the first working check into a bounded, restart-safe monitoring engine.
 
 ### Execution packages
 
-- [ ] **P1-301 — Complete secure monitor management and HTTP execution**
+- [x] **P1-301 — Complete secure monitor management and HTTP execution**
 
   **Combines former tasks:** P1-301 through P1-305.
 

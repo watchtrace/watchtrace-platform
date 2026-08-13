@@ -47,6 +47,8 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	t.Setenv(verificationURLEnvironment, "http://localhost:3001/verify")
 	t.Setenv(passwordResetURLEnvironment, "http://localhost:3001/reset")
 	t.Setenv(invitationURLEnvironment, "http://localhost:3001/invite")
+	t.Setenv(monitorHeaderKeyEnvironment, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv(platformSigningKeyEnvironment, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA7aie8zrakLWKjqNAqbw1zZTIVdx3iQ6Y6wEihi1naKQ==")
 
 	configuration, err := Load()
 	if err != nil {
@@ -204,6 +206,17 @@ func TestDatabaseURLErrorDoesNotExposeSecret(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Fatalf("configuration error exposed the database password: %q", err)
+	}
+}
+
+func TestProductionRequiresExternalMonitoringKeys(t *testing.T) {
+	_, err := load(environment(map[string]string{
+		databaseURLEnvironment:      validDatabaseURL,
+		deploymentEnvironment:       "production",
+		monitorHeaderKeyEnvironment: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	}))
+	if err == nil || err.Error() != "WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY is required in production" {
+		t.Fatalf("production signing-key error = %v", err)
 	}
 }
 

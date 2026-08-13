@@ -106,6 +106,9 @@ func TestBackendMonitoringVerticalSliceWithPostgreSQL(t *testing.T) {
 		t.Fatalf("initial monitor read = status %d state %q checks %d: %s",
 			initial.Status, initial.Body.State, len(initial.Body.RecentChecks), initial.RawBody)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE monitors SET next_check_at=CURRENT_TIMESTAMP WHERE id=$1::uuid`, created.Body.ID); err != nil {
+		t.Fatalf("make spread schedule due for vertical slice: %v", err)
+	}
 
 	createdJobs, err := scheduler.NewService(pool).ScheduleDue(ctx, scheduler.DefaultBatchSize)
 	if err != nil {

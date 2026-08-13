@@ -1,8 +1,8 @@
-# Initial Monitor API
+# Monitor Lifecycle API
 
-P1-104 introduces tenant-scoped storage and create/list APIs for GET monitors.
-P1-108 adds the first monitor detail read, including current state and recent
-body-free check results.
+Phase 1.2 extends the original tenant-scoped API to the complete GET/HEAD
+lifecycle with encrypted custom headers, pause/resume, soft deletion, stable
+versions, and bounded manual tests.
 
 All three endpoints require `Authorization: Bearer <token>` and use the environment
 identifier from the path:
@@ -11,6 +11,11 @@ identifier from the path:
 POST /api/v1/environments/{environmentId}/monitors
 GET  /api/v1/environments/{environmentId}/monitors
 GET  /api/v1/environments/{environmentId}/monitors/{monitorId}
+PUT  /api/v1/environments/{environmentId}/monitors/{monitorId}
+DELETE /api/v1/environments/{environmentId}/monitors/{monitorId}
+POST /api/v1/environments/{environmentId}/monitors/{monitorId}/pause
+POST /api/v1/environments/{environmentId}/monitors/{monitorId}/resume
+POST /api/v1/environments/{environmentId}/monitors/{monitorId}/test
 ```
 
 The server resolves the environment's organization and the caller's current
@@ -31,7 +36,10 @@ initial limit of 100 monitors even when requests arrive concurrently.
   "interval_seconds": 300,
   "timeout_seconds": 5,
   "expected_status_min": 200,
-  "expected_status_max": 299
+  "expected_status_max": 299,
+  "method": "GET",
+  "headers": {"Authorization": "Bearer secret"},
+  "worker_pool_id": "hosted"
 }
 ```
 
@@ -39,7 +47,7 @@ Only `name` and `url` are required. Defaults and accepted values are:
 
 | Field | Default | Accepted values |
 |---|---:|---|
-| Method | `GET` | Server-controlled `GET` only |
+| Method | `GET` | `GET` or `HEAD` |
 | Interval | 300 seconds | 60, 120, 300, 600, or 1,800 seconds |
 | Timeout | 5 seconds | 1–10 seconds |
 | Expected status | 200–299 | Ordered range within 100–599 |
@@ -58,10 +66,10 @@ lookup. Any unsafe answer rejects the whole resolution result. Environment
 HTTP proxy settings are ignored because a proxy would move the actual network
 boundary away from the guarded dialer.
 
-Redirect following is disabled at this stage. P1-303 will add the complete
-bounded redirect policy, including per-hop destination checks and secret
-stripping when the host changes. The checker uses the guarded client and never
-stores response bodies.
+Redirects are limited to three; every hop is revalidated and all custom headers
+are stripped if the hostname changes. Header values are encrypted with a
+versioned key held outside PostgreSQL. Responses return sorted `header_names`
+only, never values. The checker never stores response bodies.
 
 A successful creation returns HTTP 201 with the stored configuration:
 
@@ -78,7 +86,11 @@ A successful creation returns HTTP 201 with the stored configuration:
   "expected_status_min": 200,
   "expected_status_max": 299,
   "created_at": "2026-08-08T12:00:00Z",
-  "updated_at": "2026-08-08T12:00:00Z"
+  "updated_at": "2026-08-08T12:00:00Z",
+  "version": 1,
+  "paused": false,
+  "worker_pool_id": "hosted",
+  "header_names": ["Authorization"]
 }
 ```
 
@@ -93,6 +105,17 @@ is bounded without pagination.
   "monitors": []
 }
 ```
+
+## Update, pause, resume, delete, and test
+
+`PUT` replaces the configurable fields and increments `version`. Pausing or
+editing stops future scheduling but cannot mutate an already encrypted and
+published job snapshot. Resuming returns to the monitor's stable schedule.
+`DELETE` is a soft delete and removes the monitor from list/detail/scheduling.
+
+`POST .../test` creates a `manual_test` job and immutable encrypted outbox row
+in one transaction. Manual jobs share the same two-minute expiry and worker
+protocol but are capped globally and never affect uptime or incident state.
 
 ## Read monitor state and recent checks
 
@@ -157,4 +180,6 @@ organization, and a monitor from a different environment all return the same
 | 404 | `environment_not_found` | Environment is absent or inaccessible. |
 | 404 | `monitor_not_found` | Monitor is absent or outside the authorized environment. |
 | 409 | `monitor_limit_reached` | Organization already has 100 monitors. |
+| 429 | `manual_queue_full` | The bounded manual-test queue is full. |
+| 503 | `monitor_queue_unavailable` | The selected worker pool is not provisioned. |
 | 422 | `validation_failed` | Monitor configuration is invalid. |

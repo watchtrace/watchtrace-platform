@@ -578,6 +578,11 @@ func deleteSchedulerTestData(
 ) {
 	t.Helper()
 	statements := []string{
+		`DELETE FROM monitoring_operational_events WHERE job_id IN (SELECT id FROM check_jobs WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[])))`,
+		`DELETE FROM check_result_conflicts WHERE job_id IN (SELECT id FROM check_jobs WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[])))`,
+		`DELETE FROM monitor_rollups_daily WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
+		`DELETE FROM monitor_rollups_hourly WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
+		`DELETE FROM monitoring_coverage_gaps WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM health_checks WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM check_jobs WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,
 		`DELETE FROM monitors WHERE organization_id IN (SELECT id FROM organizations WHERE slug = ANY($1::text[]))`,

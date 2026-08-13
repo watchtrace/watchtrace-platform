@@ -2,6 +2,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -13,24 +15,29 @@ import (
 )
 
 const (
-	databaseURLEnvironment      = "WATCHTRACE_DATABASE_URL"
-	httpAddressEnvironment      = "WATCHTRACE_HTTP_ADDRESS"
-	shutdownTimeoutEnvironment  = "WATCHTRACE_SHUTDOWN_TIMEOUT"
-	deploymentEnvironment       = "WATCHTRACE_ENVIRONMENT"
-	verificationSMTPEnvironment = "WATCHTRACE_VERIFICATION_SMTP_ADDRESS"
-	verificationFromEnvironment = "WATCHTRACE_VERIFICATION_FROM"
-	verificationURLEnvironment  = "WATCHTRACE_VERIFICATION_URL"
-	passwordResetURLEnvironment = "WATCHTRACE_PASSWORD_RESET_URL"
-	invitationURLEnvironment    = "WATCHTRACE_INVITATION_URL"
+	databaseURLEnvironment             = "WATCHTRACE_DATABASE_URL"
+	httpAddressEnvironment             = "WATCHTRACE_HTTP_ADDRESS"
+	shutdownTimeoutEnvironment         = "WATCHTRACE_SHUTDOWN_TIMEOUT"
+	deploymentEnvironment              = "WATCHTRACE_ENVIRONMENT"
+	verificationSMTPEnvironment        = "WATCHTRACE_VERIFICATION_SMTP_ADDRESS"
+	verificationFromEnvironment        = "WATCHTRACE_VERIFICATION_FROM"
+	verificationURLEnvironment         = "WATCHTRACE_VERIFICATION_URL"
+	passwordResetURLEnvironment        = "WATCHTRACE_PASSWORD_RESET_URL"
+	invitationURLEnvironment           = "WATCHTRACE_INVITATION_URL"
+	monitorHeaderKeyEnvironment        = "WATCHTRACE_MONITOR_HEADER_KEY"
+	monitorHeaderKeyVersionEnvironment = "WATCHTRACE_MONITOR_HEADER_KEY_VERSION"
+	platformSigningKeyEnvironment      = "WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY"
+	platformSigningKeyIDEnvironment    = "WATCHTRACE_PLATFORM_SIGNING_KEY_ID"
 
-	defaultHTTPAddress      = "127.0.0.1:8080"
-	defaultShutdownTimeout  = 10 * time.Second
-	defaultEnvironment      = "development"
-	defaultVerificationSMTP = "127.0.0.1:1025"
-	defaultVerificationFrom = "watchtrace@localhost"
-	defaultVerificationURL  = "http://127.0.0.1:3000/verify-email"
-	defaultPasswordResetURL = "http://127.0.0.1:3000/reset-password"
-	defaultInvitationURL    = "http://127.0.0.1:3000/accept-invitation"
+	defaultHTTPAddress          = "127.0.0.1:8080"
+	defaultShutdownTimeout      = 10 * time.Second
+	defaultEnvironment          = "development"
+	defaultVerificationSMTP     = "127.0.0.1:1025"
+	defaultVerificationFrom     = "watchtrace@localhost"
+	defaultVerificationURL      = "http://127.0.0.1:3000/verify-email"
+	defaultPasswordResetURL     = "http://127.0.0.1:3000/reset-password"
+	defaultInvitationURL        = "http://127.0.0.1:3000/accept-invitation"
+	defaultDevelopmentHeaderKey = "V2F0Y2hUcmFjZS1kZXYtaGVhZGVyLWtleS0wMDAwMSE="
 )
 
 // Config contains the validated settings needed to start the API.
@@ -44,6 +51,10 @@ type Config struct {
 	VerificationURL         string
 	PasswordResetURL        string
 	InvitationURL           string
+	MonitorHeaderKey        []byte
+	MonitorHeaderKeyVersion int32
+	PlatformSigningKey      ed25519.PrivateKey
+	PlatformSigningKeyID    string
 }
 
 // Load reads configuration from the process environment and validates it.
@@ -100,6 +111,38 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	if verificationSMTP == "" || verificationFrom == "" || verificationURL == "" || passwordResetURL == "" || invitationURL == "" {
 		return Config{}, errors.New("email verification settings must not be empty")
 	}
+	headerKeyValue := defaultDevelopmentHeaderKey
+	if value, exists := lookup(monitorHeaderKeyEnvironment); exists {
+		headerKeyValue = strings.TrimSpace(value)
+	} else if environment == "production" {
+		return Config{}, fmt.Errorf("%s is required in production", monitorHeaderKeyEnvironment)
+	}
+	headerKey, decodeErr := base64.StdEncoding.DecodeString(headerKeyValue)
+	if decodeErr != nil || len(headerKey) != 32 {
+		return Config{}, fmt.Errorf("%s must be base64-encoded 32 bytes", monitorHeaderKeyEnvironment)
+	}
+	headerKeyVersion := int32(1)
+	if value, exists := lookup(monitorHeaderKeyVersionEnvironment); exists {
+		parsed, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 32)
+		if parseErr != nil || parsed < 1 {
+			return Config{}, fmt.Errorf("%s must be a positive integer", monitorHeaderKeyVersionEnvironment)
+		}
+		headerKeyVersion = int32(parsed)
+	}
+	signingKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	if value, exists := lookup(platformSigningKeyEnvironment); exists {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+		if decodeErr != nil || len(decoded) != ed25519.PrivateKeySize {
+			return Config{}, fmt.Errorf("%s must be a base64-encoded Ed25519 private key", platformSigningKeyEnvironment)
+		}
+		signingKey = ed25519.PrivateKey(decoded)
+	} else if environment == "production" {
+		return Config{}, fmt.Errorf("%s is required in production", platformSigningKeyEnvironment)
+	}
+	signingKeyID := stringSetting(lookup, platformSigningKeyIDEnvironment, "platform-v1")
+	if signingKeyID == "" || len(signingKeyID) > 64 {
+		return Config{}, fmt.Errorf("%s must be between 1 and 64 bytes", platformSigningKeyIDEnvironment)
+	}
 
 	return Config{
 		DatabaseURL:             databaseURL,
@@ -111,6 +154,10 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		VerificationURL:         verificationURL,
 		PasswordResetURL:        passwordResetURL,
 		InvitationURL:           invitationURL,
+		MonitorHeaderKey:        headerKey,
+		MonitorHeaderKeyVersion: headerKeyVersion,
+		PlatformSigningKey:      signingKey,
+		PlatformSigningKeyID:    signingKeyID,
 	}, nil
 }
 

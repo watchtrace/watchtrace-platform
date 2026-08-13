@@ -16,6 +16,7 @@ import (
 	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/config"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/httpserver"
+	"github.com/watchtrace/watchtrace-platform/internal/secureheaders"
 )
 
 func main() {
@@ -50,7 +51,12 @@ func main() {
 	authService := auth.NewService(databasePool, actionSender)
 	go runSessionCleanup(ctx, authService, logger)
 	ownershipService := ownership.NewService(databasePool, actionSender)
-	monitorService := monitor.NewService(databasePool)
+	headerKeys, err := secureheaders.New(configuration.MonitorHeaderKeyVersion, map[int32][]byte{configuration.MonitorHeaderKeyVersion: configuration.MonitorHeaderKey})
+	if err != nil {
+		logger.Error("configure monitor header encryption")
+		os.Exit(1)
+	}
+	monitorService := monitor.NewServiceWithQueue(databasePool, headerKeys, configuration.PlatformSigningKey, configuration.PlatformSigningKeyID)
 
 	listener, err := net.Listen("tcp", configuration.HTTPAddress)
 	if err != nil {

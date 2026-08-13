@@ -210,6 +210,23 @@ go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f db/sqlc.yaml
 The current account and tenant tables and their isolation constraints are
 documented in [`docs/OWNERSHIP_SCHEMA.md`](docs/OWNERSHIP_SCHEMA.md).
 
+## Reliable Monitoring Engine
+
+Phase 1.2 uses Amazon SQS FIFO job and result queues, each with a FIFO DLQ.
+PostgreSQL atomically stores stable job identity and exact encrypted dispatch
+intent. Database-free workers execute through direct SQS or the stateless mTLS
+HTTPS gateway and journal signed results in SQLite. See
+[`docs/SCHEDULER.md`](docs/SCHEDULER.md),
+[`docs/CHECKER.md`](docs/CHECKER.md),
+[`docs/MODULAR_WORKER.md`](docs/MODULAR_WORKER.md), and
+[`docs/QUEUE_GATEWAY.md`](docs/QUEUE_GATEWAY.md).
+
+Local SQS-compatible testing is provided by the `localstack` Compose service.
+Production omits `WATCHTRACE_SQS_ENDPOINT`, supplies queue URLs, and uses the
+AWS SDK default credential chain with the least-privilege policies in
+the [reviewed SQS runbook](docs/AWS_SQS_RUNBOOK.md) and versioned
+[non-secret manifest example](deploy/aws/phase1-sqs.manifest.example.json).
+
 Run the clean-database migration and PostgreSQL integration suite on macOS or
 Linux with:
 
@@ -266,6 +283,13 @@ Run the local image security, liveness, and graceful-shutdown smoke test with:
 ```sh
 ./tests/integration/backend-image.sh
 ```
+
+Phase 1 monitoring uses Amazon SQS FIFO in production and LocalStack for the
+local recovery suite. See [the Phase 1 SQS runbook](docs/AWS_SQS_RUNBOOK.md),
+the [modular worker guide](docs/MODULAR_WORKER.md), and the independent
+[worker OpenAPI contract](api/worker-v1.openapi.yaml). LocalStack accepts only
+the disposable `test/test` credentials used by tests; real AWS credentials are
+not required for local implementation or validation.
 
 ## Verify
 

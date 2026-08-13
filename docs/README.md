@@ -20,13 +20,19 @@ Current implementation documentation:
   and tenant-ownership tables and their database-enforced isolation rules.
 - [`OWNERSHIP_API.md`](OWNERSHIP_API.md) defines the authenticated, atomic
   organization/project/production-environment creation contract.
-- [`MONITORS.md`](MONITORS.md) defines the initial tenant-scoped GET monitor
-  create/list/detail API, current-state semantics, recent-result bounds, and
-  outbound destination-safety boundary.
-- [`SCHEDULER.md`](SCHEDULER.md) defines the initial durable PostgreSQL
-  scheduler transaction and queue invariants.
-- [`CHECKER.md`](CHECKER.md) defines leased job claiming, guarded HTTP
-  execution, idempotent result storage, and the response-body boundary.
+- [`MONITORS.md`](MONITORS.md) defines the tenant-scoped GET/HEAD lifecycle,
+  encrypted custom headers, current-state semantics, and outbound safety.
+- [`SCHEDULER.md`](SCHEDULER.md) defines atomic FIFO scheduling and immutable
+  publication intent.
+- [`CHECKER.md`](CHECKER.md) defines bounded database-free execution and
+  idempotent result storage.
+- [`MODULAR_WORKER.md`](MODULAR_WORKER.md) documents worker deployment and key
+  protection.
+- [`QUEUE_GATEWAY.md`](QUEUE_GATEWAY.md) documents the stateless mTLS adapter.
+- [`AWS_SQS_RUNBOOK.md`](AWS_SQS_RUNBOOK.md) defines manual Phase 1 queue
+  provisioning, least-privilege roles, manifest verification, and recovery.
+- [`../api/worker-v1.openapi.yaml`](../api/worker-v1.openapi.yaml) is the
+  independent current/previous HTTPS worker protocol contract.
 
 Use this directory for documentation introduced by later tasks, including
 architecture decision records, operations runbooks, API guides, and deployment

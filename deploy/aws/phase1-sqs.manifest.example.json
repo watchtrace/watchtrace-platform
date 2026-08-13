@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "environment": "dev",
+  "aws_region": "ap-south-1",
+  "queues": {
+    "jobs": {
+      "name": "watchtrace-dev-jobs.fifo",
+      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-jobs.fifo",
+      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-jobs.fifo",
+      "visibility_timeout_seconds": 90,
+      "message_retention_seconds": 345600,
+      "receive_wait_time_seconds": 20,
+      "max_receive_count": 5,
+      "dead_letter_queue_arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-jobs-dlq.fifo",
+      "sse": "SSE-SQS",
+      "content_based_deduplication": false
+    },
+    "results": {
+      "name": "watchtrace-dev-results.fifo",
+      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-results.fifo",
+      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-results.fifo",
+      "visibility_timeout_seconds": 60,
+      "message_retention_seconds": 345600,
+      "receive_wait_time_seconds": 20,
+      "max_receive_count": 10,
+      "dead_letter_queue_arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-results-dlq.fifo",
+      "sse": "SSE-SQS",
+      "content_based_deduplication": false
+    },
+    "jobs_dlq": {
+      "name": "watchtrace-dev-jobs-dlq.fifo",
+      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-jobs-dlq.fifo",
+      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-jobs-dlq.fifo",
+      "visibility_timeout_seconds": 0,
+      "message_retention_seconds": 1209600,
+      "receive_wait_time_seconds": 0,
+      "sse": "SSE-SQS",
+      "content_based_deduplication": false
+    },
+    "results_dlq": {
+      "name": "watchtrace-dev-results-dlq.fifo",
+      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-results-dlq.fifo",
+      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-results-dlq.fifo",
+      "visibility_timeout_seconds": 0,
+      "message_retention_seconds": 1209600,
+      "receive_wait_time_seconds": 0,
+      "sse": "SSE-SQS",
+      "content_based_deduplication": false
+    }
+  },
+  "roles": {
+    "job_publisher": {"name": "watchtrace-dev-job-publisher", "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "hosted_worker": {"name": "watchtrace-dev-hosted-worker", "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "queue_gateway": {"name": "watchtrace-dev-queue-gateway", "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "result_consumer": {"name": "watchtrace-dev-result-consumer", "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "dlq_reconciler": {"name": "watchtrace-dev-dlq-reconciler", "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "infrastructure_operator": {"name": "watchtrace-dev-infrastructure-operator", "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"}
+  },
+  "gateway_mappings": {},
+  "tags": {"Application": "WatchTrace", "Environment": "dev", "Phase": "1"}
+}

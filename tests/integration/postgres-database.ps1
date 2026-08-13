@@ -33,6 +33,7 @@ $previousExpectedProductionAuthSchemaAbsent = $env:WATCHTRACE_EXPECT_PRODUCTION_
 $previousExpectedEmailVerificationSchemaAbsent = $env:WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT
 $previousExpectedPasswordResetSchemaAbsent = $env:WATCHTRACE_EXPECT_PASSWORD_RESET_SCHEMA_ABSENT
 $previousExpectedMembershipSchemaAbsent = $env:WATCHTRACE_EXPECT_MEMBERSHIP_SCHEMA_ABSENT
+$previousExpectedReliableEngineSchemaAbsent = $env:WATCHTRACE_EXPECT_RELIABLE_ENGINE_SCHEMA_ABSENT
 
 function Invoke-Compose {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
@@ -80,7 +81,7 @@ try {
 
     Invoke-Go run ./cmd/migrate up
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 10 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 11 (clean)") {
         throw "Unexpected migration version after up: $version"
     }
 
@@ -88,8 +89,17 @@ try {
 
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 9 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 10 (clean)") {
         throw "Unexpected migration version after down: $version"
+    }
+    $env:WATCHTRACE_EXPECT_RELIABLE_ENGINE_SCHEMA_ABSENT = "1"
+    Invoke-Go test ./tests/integration -run '^TestReliableEngineSchemaRollback$' -count=1
+    $env:WATCHTRACE_EXPECT_RELIABLE_ENGINE_SCHEMA_ABSENT = $previousExpectedReliableEngineSchemaAbsent
+
+    Invoke-Go run ./cmd/migrate down
+    $version = (& go run ./cmd/migrate version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 9 (clean)") {
+        throw "Unexpected migration version after second down: $version"
     }
     $env:WATCHTRACE_EXPECT_MEMBERSHIP_SCHEMA_ABSENT = "1"
     Invoke-Go test ./tests/integration -run '^TestMembershipTenantSecuritySchemaRollback$' -count=1
@@ -154,4 +164,5 @@ finally {
     $env:WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT = $previousExpectedEmailVerificationSchemaAbsent
     $env:WATCHTRACE_EXPECT_PASSWORD_RESET_SCHEMA_ABSENT = $previousExpectedPasswordResetSchemaAbsent
     $env:WATCHTRACE_EXPECT_MEMBERSHIP_SCHEMA_ABSENT = $previousExpectedMembershipSchemaAbsent
+    $env:WATCHTRACE_EXPECT_RELIABLE_ENGINE_SCHEMA_ABSENT = $previousExpectedReliableEngineSchemaAbsent
 }

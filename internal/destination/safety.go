@@ -34,6 +34,13 @@ type ContextDialer interface {
 	DialContext(context.Context, string, string) (net.Conn, error)
 }
 
+// Policy selects hosted public-only validation or a protected customer-VPC
+// allowlist. Private destinations are never allowed merely because a job asks.
+type Policy struct {
+	AllowPrivateCIDRs []netip.Prefix
+	MaxRedirects      int
+}
+
 // ValidateURL applies the Phase 1 URL policy without performing DNS. DNS is
 // deliberately validated again by the guarded dialer immediately before a
 // connection, because a hostname's addresses may change after configuration.
@@ -76,6 +83,12 @@ func ValidateURL(rawURL string) error {
 // actual monitor destination. Redirects remain disabled until the complete
 // redirect policy is implemented in P1-303.
 func NewHTTPClient(resolver Resolver, dialer ContextDialer) *http.Client {
+	return NewHTTPClientWithPolicy(resolver, dialer, Policy{MaxRedirects: 3})
+}
+
+// NewHTTPClientWithPolicy validates every connection and redirect. Customer
+// private addresses must be inside the locally configured allowlist.
+func NewHTTPClientWithPolicy(resolver Resolver, dialer ContextDialer, policy Policy) *http.Client {
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
@@ -83,33 +96,69 @@ func NewHTTPClient(resolver Resolver, dialer ContextDialer) *http.Client {
 		dialer = &net.Dialer{}
 	}
 
-	guard := guardedDialer{resolver: resolver, dialer: dialer}
+	guard := guardedDialer{resolver: resolver, dialer: dialer, policy: policy}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DialContext = guard.DialContext
 
-	return &http.Client{
-		Transport: validatingTransport{base: transport},
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
+	transport.MaxResponseHeaderBytes = 32 * 1024
+	client := &http.Client{
+		Transport: validatingTransport{base: transport, policy: policy},
+		CheckRedirect: func(request *http.Request, prior []*http.Request) error {
+			if policy.MaxRedirects < 0 || len(prior) > policy.MaxRedirects {
+				return errors.New("redirect limit exceeded")
+			}
+			if request == nil || request.URL == nil || validateURLForPolicy(request.URL.String(), policy) != nil {
+				return ErrUnsafeTarget
+			}
+			if len(prior) > 0 && !strings.EqualFold(prior[len(prior)-1].URL.Hostname(), request.URL.Hostname()) {
+				userAgent := request.Header.Get("User-Agent")
+				jobID := request.Header.Get("X-WatchTrace-Job-ID")
+				request.Header = make(http.Header)
+				request.Header.Set("User-Agent", userAgent)
+				request.Header.Set("X-WatchTrace-Job-ID", jobID)
+			}
+			return nil
 		},
 	}
+	return client
 }
 
 type validatingTransport struct {
-	base http.RoundTripper
+	base   http.RoundTripper
+	policy Policy
 }
 
 func (transport validatingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request == nil || request.URL == nil || ValidateURL(request.URL.String()) != nil {
+	if request == nil || request.URL == nil || validateURLForPolicy(request.URL.String(), transport.policy) != nil {
 		return nil, ErrUnsafeTarget
 	}
 	return transport.base.RoundTrip(request)
 }
 
+func validateURLForPolicy(raw string, policy Policy) error {
+	err := ValidateURL(raw)
+	if err == nil {
+		return nil
+	}
+	parsed, parseErr := url.Parse(raw)
+	if parseErr != nil {
+		return err
+	}
+	address, addressErr := netip.ParseAddr(parsed.Hostname())
+	if addressErr != nil {
+		return err
+	}
+	if (guardedDialer{policy: policy}).addressAllowed(address) {
+		return nil
+	}
+	return err
+}
+
 type guardedDialer struct {
 	resolver Resolver
 	dialer   ContextDialer
+	policy   Policy
 }
 
 func (guard guardedDialer) DialContext(ctx context.Context, network, endpoint string) (net.Conn, error) {
@@ -153,7 +202,7 @@ func (guard guardedDialer) DialContext(ctx context.Context, network, endpoint st
 func (guard guardedDialer) resolve(ctx context.Context, host string) ([]netip.Addr, error) {
 	if literal, err := netip.ParseAddr(host); err == nil {
 		literal = literal.Unmap()
-		if !isPublicAddress(literal) {
+		if !guard.addressAllowed(literal) {
 			return nil, ErrUnsafeTarget
 		}
 		return []netip.Addr{literal}, nil
@@ -168,7 +217,7 @@ func (guard guardedDialer) resolve(ctx context.Context, host string) ([]netip.Ad
 	seen := make(map[netip.Addr]struct{}, len(addresses))
 	for _, address := range addresses {
 		address = address.Unmap()
-		if !isPublicAddress(address) {
+		if !guard.addressAllowed(address) {
 			return nil, ErrUnsafeTarget
 		}
 		if _, exists := seen[address]; exists {
@@ -181,6 +230,38 @@ func (guard guardedDialer) resolve(ctx context.Context, host string) ([]netip.Ad
 		return nil, ErrResolutionFailed
 	}
 	return validated, nil
+}
+
+func (guard guardedDialer) addressAllowed(address netip.Addr) bool {
+	address = address.Unmap()
+	if isPublicAddress(address) {
+		return true
+	}
+	if !address.IsValid() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() || isMetadataAddress(address) {
+		return false
+	}
+	if !address.IsPrivate() {
+		return false
+	}
+	for _, prefix := range guard.policy.AllowPrivateCIDRs {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMetadataAddress(address netip.Addr) bool {
+	for _, prefix := range metadataPrefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+var metadataPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("169.254.169.254/32"), netip.MustParsePrefix("fd00:ec2::254/128"),
 }
 
 func isPublicAddress(address netip.Addr) bool {

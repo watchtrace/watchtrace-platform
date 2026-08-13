@@ -16,14 +16,25 @@ type MonitorService interface {
 	List(context.Context, string, string) ([]monitor.Monitor, error)
 	Get(context.Context, string, string, string) (monitor.Detail, error)
 }
+type monitorLifecycleService interface {
+	MonitorService
+	Update(context.Context, string, string, string, monitor.UpdateInput) (monitor.Monitor, error)
+	Delete(context.Context, string, string, string) error
+	Pause(context.Context, string, string, string) (monitor.Monitor, error)
+	Resume(context.Context, string, string, string) (monitor.Monitor, error)
+	TestNow(context.Context, string, string, string) (string, error)
+}
 
 type createMonitorRequest struct {
-	Name              string `json:"name" binding:"required,max=120"`
-	URL               string `json:"url" binding:"required,max=2048"`
-	IntervalSeconds   *int32 `json:"interval_seconds" binding:"omitempty,oneof=60 120 300 600 1800"`
-	TimeoutSeconds    *int32 `json:"timeout_seconds" binding:"omitempty,min=1,max=10"`
-	ExpectedStatusMin *int16 `json:"expected_status_min" binding:"omitempty,min=100,max=599"`
-	ExpectedStatusMax *int16 `json:"expected_status_max" binding:"omitempty,min=100,max=599"`
+	Name              string            `json:"name" binding:"required,max=120"`
+	URL               string            `json:"url" binding:"required,max=2048"`
+	IntervalSeconds   *int32            `json:"interval_seconds" binding:"omitempty,oneof=60 120 300 600 1800"`
+	TimeoutSeconds    *int32            `json:"timeout_seconds" binding:"omitempty,min=1,max=10"`
+	ExpectedStatusMin *int16            `json:"expected_status_min" binding:"omitempty,min=100,max=599"`
+	ExpectedStatusMax *int16            `json:"expected_status_max" binding:"omitempty,min=100,max=599"`
+	Method            string            `json:"method" binding:"omitempty,oneof=GET HEAD"`
+	Headers           map[string]string `json:"headers" binding:"omitempty,max=32"`
+	WorkerPoolID      string            `json:"worker_pool_id" binding:"omitempty,max=63"`
 }
 
 type monitorResponse struct {
@@ -39,6 +50,10 @@ type monitorResponse struct {
 	ExpectedStatusMax int16     `json:"expected_status_max"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+	Version           int64     `json:"version"`
+	Paused            bool      `json:"paused"`
+	WorkerPoolID      string    `json:"worker_pool_id"`
+	HeaderNames       []string  `json:"header_names"`
 }
 
 type monitorListResponse struct {
@@ -78,6 +93,13 @@ func registerMonitorRoutes(
 		requireAuthenticatedUser(authenticator),
 		listMonitors(service),
 	)
+	if lifecycle, ok := service.(monitorLifecycleService); ok {
+		router.PUT("/api/v1/environments/:environmentId/monitors/:monitorId", requireAuthenticatedUser(authenticator), updateMonitor(lifecycle))
+		router.DELETE("/api/v1/environments/:environmentId/monitors/:monitorId", requireAuthenticatedUser(authenticator), deleteMonitor(lifecycle))
+		router.POST("/api/v1/environments/:environmentId/monitors/:monitorId/pause", requireAuthenticatedUser(authenticator), pauseMonitor(lifecycle, true))
+		router.POST("/api/v1/environments/:environmentId/monitors/:monitorId/resume", requireAuthenticatedUser(authenticator), pauseMonitor(lifecycle, false))
+		router.POST("/api/v1/environments/:environmentId/monitors/:monitorId/test", requireAuthenticatedUser(authenticator), testMonitor(lifecycle))
+	}
 	router.GET(
 		"/api/v1/environments/:environmentId/monitors/:monitorId",
 		requireAuthenticatedUser(authenticator),
@@ -105,6 +127,7 @@ func createMonitor(service MonitorService) gin.HandlerFunc {
 			TimeoutSeconds:    optionalInt32(request.TimeoutSeconds),
 			ExpectedStatusMin: optionalInt16(request.ExpectedStatusMin),
 			ExpectedStatusMax: optionalInt16(request.ExpectedStatusMax),
+			Method:            request.Method, Headers: request.Headers, WorkerPoolID: request.WorkerPoolID,
 		})
 		if err != nil {
 			respondMonitorError(c, err)
@@ -112,6 +135,76 @@ func createMonitor(service MonitorService) gin.HandlerFunc {
 		}
 
 		c.JSON(http.StatusCreated, monitorToResponse(created))
+	}
+}
+
+func updateMonitor(service monitorLifecycleService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, 500, "internal_error", "an internal error occurred")
+			return
+		}
+		var request createMonitorRequest
+		if !DecodeJSON(c, &request) {
+			return
+		}
+		item, err := service.Update(c.Request.Context(), user.ID, c.Param("environmentId"), c.Param("monitorId"), monitor.UpdateInput{Name: request.Name, TargetURL: request.URL, Method: request.Method, Headers: request.Headers, WorkerPoolID: request.WorkerPoolID, IntervalSeconds: optionalInt32(request.IntervalSeconds), TimeoutSeconds: optionalInt32(request.TimeoutSeconds), ExpectedStatusMin: optionalInt16(request.ExpectedStatusMin), ExpectedStatusMax: optionalInt16(request.ExpectedStatusMax)})
+		if err != nil {
+			respondMonitorError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, monitorToResponse(item))
+	}
+}
+func deleteMonitor(service monitorLifecycleService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, 500, "internal_error", "an internal error occurred")
+			return
+		}
+		if err := service.Delete(c.Request.Context(), user.ID, c.Param("environmentId"), c.Param("monitorId")); err != nil {
+			respondMonitorError(c, err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+}
+func pauseMonitor(service monitorLifecycleService, paused bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, 500, "internal_error", "an internal error occurred")
+			return
+		}
+		var item monitor.Monitor
+		var err error
+		if paused {
+			item, err = service.Pause(c.Request.Context(), user.ID, c.Param("environmentId"), c.Param("monitorId"))
+		} else {
+			item, err = service.Resume(c.Request.Context(), user.ID, c.Param("environmentId"), c.Param("monitorId"))
+		}
+		if err != nil {
+			respondMonitorError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, monitorToResponse(item))
+	}
+}
+func testMonitor(service monitorLifecycleService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, 500, "internal_error", "an internal error occurred")
+			return
+		}
+		id, err := service.TestNow(c.Request.Context(), user.ID, c.Param("environmentId"), c.Param("monitorId"))
+		if err != nil {
+			respondMonitorError(c, err)
+			return
+		}
+		c.JSON(http.StatusAccepted, gin.H{"job_id": id})
 	}
 }
 
@@ -196,6 +289,7 @@ func monitorToResponse(item monitor.Monitor) monitorResponse {
 		ExpectedStatusMax: item.ExpectedStatusMax,
 		CreatedAt:         item.CreatedAt,
 		UpdatedAt:         item.UpdatedAt,
+		Version:           item.Version, Paused: item.Paused, WorkerPoolID: item.WorkerPoolID, HeaderNames: item.HeaderNames,
 	}
 }
 
@@ -223,6 +317,10 @@ func respondMonitorError(c *gin.Context, err error) {
 		RespondError(c, http.StatusNotFound, "monitor_not_found", "monitor not found")
 	case errors.Is(err, monitor.ErrMonitorLimitReached):
 		RespondError(c, http.StatusConflict, "monitor_limit_reached", "organization monitor limit reached")
+	case errors.Is(err, monitor.ErrManualQueueFull):
+		RespondError(c, http.StatusTooManyRequests, "manual_queue_full", "manual check queue is full")
+	case errors.Is(err, monitor.ErrQueueUnavailable):
+		RespondError(c, http.StatusServiceUnavailable, "monitor_queue_unavailable", "monitor queue is unavailable")
 	case errors.Is(err, monitor.ErrForbidden):
 		RespondError(c, http.StatusForbidden, "permission_denied", "permission denied")
 	default:

@@ -175,7 +175,7 @@ func TestHTTPClientRejectsDisallowedPortBeforeDNS(t *testing.T) {
 	}
 }
 
-func TestHTTPClientDoesNotFollowRedirectsBeforeRedirectPolicyExists(t *testing.T) {
+func TestHTTPClientValidatesEveryRedirectDestination(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Location", "http://unsafe.test/latest/meta-data")
 		response.WriteHeader(http.StatusFound)
@@ -190,19 +190,109 @@ func TestHTTPClientDoesNotFollowRedirectsBeforeRedirectPolicyExists(t *testing.T
 	client := NewHTTPClient(resolver, dialer)
 
 	response, err := client.Get("http://safe.test/redirect")
-	if err != nil {
-		t.Fatalf("redirect response: %v", err)
+	if response != nil {
+		response.Body.Close()
 	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusFound {
-		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusFound)
+	if err == nil || !strings.Contains(err.Error(), ErrUnsafeTarget.Error()) {
+		t.Fatalf("redirect error = %v, want unsafe target", err)
 	}
-	if resolver.callsFor("unsafe.test") != 0 || dialer.callCount() != 1 {
+	if resolver.callsFor("unsafe.test") != 1 || dialer.callCount() != 1 {
 		t.Fatalf(
 			"redirect caused network activity: unsafe DNS=%d dial=%d",
 			resolver.callsFor("unsafe.test"),
 			dialer.callCount(),
 		)
+	}
+}
+
+func TestCustomerVPCPolicyAllowsOnlyPrivateAddressesInLocalCIDRs(t *testing.T) {
+	policy := Policy{AllowPrivateCIDRs: []netip.Prefix{
+		netip.MustParsePrefix("10.20.0.0/16"),
+		netip.MustParsePrefix("100.64.0.0/10"),
+	}}
+	guard := guardedDialer{policy: policy}
+	if !guard.addressAllowed(netip.MustParseAddr("10.20.1.10")) {
+		t.Fatal("protected private address was rejected")
+	}
+	for _, raw := range []string{"10.21.1.10", "100.100.100.200", "169.254.169.254", "127.0.0.1", "fd00:ec2::254"} {
+		if guard.addressAllowed(netip.MustParseAddr(raw)) {
+			t.Fatalf("unsafe address %s was allowed", raw)
+		}
+	}
+}
+
+func TestRedirectToDifferentHostStripsCustomSecrets(t *testing.T) {
+	var leaked atomic.Bool
+	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Host == "first.test" {
+			response.Header().Set("Location", "http://second.test/final")
+			response.WriteHeader(http.StatusFound)
+			return
+		}
+		if request.Header.Get("X-Customer-Secret") != "" || request.Header.Get("Authorization") != "" {
+			leaked.Store(true)
+		}
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	resolver := &controlledResolver{answers: map[string][]netip.Addr{
+		"first.test":  {netip.MustParseAddr("8.8.8.8")},
+		"second.test": {netip.MustParseAddr("8.8.4.4")},
+	}}
+	client := NewHTTPClient(resolver, &targetMappingDialer{target: strings.TrimPrefix(target.URL, "http://")})
+	request, _ := http.NewRequest(http.MethodGet, "http://first.test/start", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("X-Customer-Secret", "secret")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if leaked.Load() {
+		t.Fatal("custom monitor secret crossed redirect host boundary")
+	}
+}
+
+func TestHTTPClientRejectsOversizedResponseHeaders(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("X-Oversized", strings.Repeat("x", 33*1024))
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	resolver := &controlledResolver{answers: map[string][]netip.Addr{"headers.test": {netip.MustParseAddr("8.8.8.8")}}}
+	client := NewHTTPClient(resolver, &targetMappingDialer{target: strings.TrimPrefix(target.URL, "http://")})
+	response, err := client.Get("http://headers.test/health")
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("oversized response headers were accepted")
+	}
+}
+
+func TestHTTPClientRejectsDNSRebindingBeforeSecondConnection(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Connection", "close")
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+	resolver := &controlledResolver{answers: map[string][]netip.Addr{"rebind.test": {netip.MustParseAddr("8.8.8.8")}}}
+	dialer := &targetMappingDialer{target: strings.TrimPrefix(target.URL, "http://")}
+	client := NewHTTPClient(resolver, dialer)
+	response, err := client.Get("http://rebind.test/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	resolver.mu.Lock()
+	resolver.answers["rebind.test"] = []netip.Addr{netip.MustParseAddr("127.0.0.1")}
+	resolver.mu.Unlock()
+	response, err = client.Get("http://rebind.test/health")
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil || dialer.callCount() != 1 || resolver.callsFor("rebind.test") != 2 {
+		t.Fatalf("rebind error=%v DNS=%d dial=%d", err, resolver.callsFor("rebind.test"), dialer.callCount())
 	}
 }
 

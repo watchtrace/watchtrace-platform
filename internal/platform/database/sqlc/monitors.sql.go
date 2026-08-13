@@ -15,6 +15,7 @@ const countOrganizationMonitors = `-- name: CountOrganizationMonitors :one
 SELECT count(*) AS monitor_count
 FROM monitors
 WHERE organization_id = $1::text::uuid
+  AND deleted_at IS NULL
 `
 
 func (q *Queries) CountOrganizationMonitors(ctx context.Context, organizationID string) (int64, error) {
@@ -56,6 +57,11 @@ RETURNING
     timeout_seconds,
     expected_status_min,
     expected_status_max,
+    version,
+    paused_at,
+    worker_pool_id,
+    headers_ciphertext,
+    header_key_version,
     created_at,
     updated_at
 `
@@ -82,6 +88,11 @@ type CreateMonitorRow struct {
 	TimeoutSeconds    int32
 	ExpectedStatusMin int16
 	ExpectedStatusMax int16
+	Version           int64
+	PausedAt          pgtype.Timestamptz
+	WorkerPoolID      string
+	HeadersCiphertext []byte
+	HeaderKeyVersion  pgtype.Int4
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
 }
@@ -109,6 +120,11 @@ func (q *Queries) CreateMonitor(ctx context.Context, arg CreateMonitorParams) (C
 		&i.TimeoutSeconds,
 		&i.ExpectedStatusMin,
 		&i.ExpectedStatusMax,
+		&i.Version,
+		&i.PausedAt,
+		&i.WorkerPoolID,
+		&i.HeadersCiphertext,
+		&i.HeaderKeyVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -155,12 +171,18 @@ SELECT
     timeout_seconds,
     expected_status_min,
     expected_status_max,
+    version,
+    paused_at,
+    worker_pool_id,
+    headers_ciphertext,
+    header_key_version,
     created_at,
     updated_at
 FROM monitors
 WHERE organization_id = $1::text::uuid
   AND environment_id = $2::text::uuid
   AND id = $3::text::uuid
+  AND deleted_at IS NULL
 `
 
 type GetEnvironmentMonitorParams struct {
@@ -180,6 +202,11 @@ type GetEnvironmentMonitorRow struct {
 	TimeoutSeconds    int32
 	ExpectedStatusMin int16
 	ExpectedStatusMax int16
+	Version           int64
+	PausedAt          pgtype.Timestamptz
+	WorkerPoolID      string
+	HeadersCiphertext []byte
+	HeaderKeyVersion  pgtype.Int4
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
 }
@@ -198,6 +225,11 @@ func (q *Queries) GetEnvironmentMonitor(ctx context.Context, arg GetEnvironmentM
 		&i.TimeoutSeconds,
 		&i.ExpectedStatusMin,
 		&i.ExpectedStatusMax,
+		&i.Version,
+		&i.PausedAt,
+		&i.WorkerPoolID,
+		&i.HeadersCiphertext,
+		&i.HeaderKeyVersion,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -240,11 +272,17 @@ SELECT
     timeout_seconds,
     expected_status_min,
     expected_status_max,
+    version,
+    paused_at,
+    worker_pool_id,
+    headers_ciphertext,
+    header_key_version,
     created_at,
     updated_at
 FROM monitors
 WHERE organization_id = $1::text::uuid
   AND environment_id = $2::text::uuid
+  AND deleted_at IS NULL
 ORDER BY created_at, id
 `
 
@@ -264,6 +302,11 @@ type ListEnvironmentMonitorsRow struct {
 	TimeoutSeconds    int32
 	ExpectedStatusMin int16
 	ExpectedStatusMax int16
+	Version           int64
+	PausedAt          pgtype.Timestamptz
+	WorkerPoolID      string
+	HeadersCiphertext []byte
+	HeaderKeyVersion  pgtype.Int4
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
 }
@@ -288,6 +331,11 @@ func (q *Queries) ListEnvironmentMonitors(ctx context.Context, arg ListEnvironme
 			&i.TimeoutSeconds,
 			&i.ExpectedStatusMin,
 			&i.ExpectedStatusMax,
+			&i.Version,
+			&i.PausedAt,
+			&i.WorkerPoolID,
+			&i.HeadersCiphertext,
+			&i.HeaderKeyVersion,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
