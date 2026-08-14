@@ -6,6 +6,11 @@ verifies and decrypts the immutable job, executes the shared bounded check
 engine, journals the signed result in SQLite, publishes the result, and only
 then acknowledges the job.
 
+Direct SQS uses base64 text for sealed job and signed result message bodies
+because those envelopes are binary. The transport adapter performs this
+conversion; the worker security and journal layers always operate on the
+original binary envelope.
+
 Generate pool keys locally with `go run ./cmd/worker-pool -mode generate
 -pool customer-a`. Protect the two generated private-key files with mode 0600,
 an encrypted host volume, and the customer's backup policy. Only the generated

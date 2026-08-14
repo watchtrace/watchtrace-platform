@@ -2,6 +2,7 @@ package fifo
 
 import (
 	"context"
+	"encoding/base64"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -32,8 +33,12 @@ func (s ResultSQS) PullResult(ctx context.Context, wait time.Duration) (ResultDe
 	if err != nil || attributes.ResultID == "" {
 		return ResultDelivery{}, envelope.ErrInvalid
 	}
+	body, err := base64.StdEncoding.DecodeString(aws.ToString(m.Body))
+	if err != nil {
+		return ResultDelivery{}, envelope.ErrInvalid
+	}
 	count, _ := strconv.Atoi(m.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)])
-	return ResultDelivery{Body: []byte(aws.ToString(m.Body)), Attributes: attributes, Receipt: aws.ToString(m.ReceiptHandle), ReceiveCount: count}, nil
+	return ResultDelivery{Body: body, Attributes: attributes, Receipt: aws.ToString(m.ReceiptHandle), ReceiveCount: count}, nil
 }
 func (s ResultSQS) AcknowledgeResult(ctx context.Context, d ResultDelivery) error {
 	_, err := s.Client.DeleteMessage(ctx, &sqs.DeleteMessageInput{QueueUrl: aws.String(s.QueueURL), ReceiptHandle: aws.String(d.Receipt)})

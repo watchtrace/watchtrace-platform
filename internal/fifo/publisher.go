@@ -80,9 +80,9 @@ func (p *Publisher) PublishNext(ctx context.Context) (bool, error) {
 		}
 	} else {
 		state := "pending"
-		delay := 5
+		delay := 10
 		if row.Attempts == 2 {
-			delay = 10
+			delay = 20
 		}
 		if row.Attempts >= 3 {
 			state = "ambiguous"

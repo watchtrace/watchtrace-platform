@@ -3,12 +3,16 @@ package deploymentmanifest
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -20,7 +24,7 @@ import (
 const Version = 1
 
 var (
-	environmentPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
+	environmentPattern = regexp.MustCompile(`^(dev|stg|prod)$`)
 	fingerprintPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
@@ -35,16 +39,18 @@ type Manifest struct {
 }
 
 type Queue struct {
-	Name                      string `json:"name"`
-	URL                       string `json:"url"`
-	ARN                       string `json:"arn"`
-	VisibilityTimeoutSeconds  int    `json:"visibility_timeout_seconds"`
-	MessageRetentionSeconds   int    `json:"message_retention_seconds"`
-	ReceiveWaitTimeSeconds    int    `json:"receive_wait_time_seconds"`
-	MaxReceiveCount           int    `json:"max_receive_count,omitempty"`
-	DeadLetterQueueARN        string `json:"dead_letter_queue_arn,omitempty"`
-	SSE                       string `json:"sse"`
-	ContentBasedDeduplication bool   `json:"content_based_deduplication"`
+	Name                      string   `json:"name"`
+	URL                       string   `json:"url"`
+	ARN                       string   `json:"arn"`
+	VisibilityTimeoutSeconds  int      `json:"visibility_timeout_seconds"`
+	MessageRetentionSeconds   int      `json:"message_retention_seconds"`
+	ReceiveWaitTimeSeconds    int      `json:"receive_wait_time_seconds"`
+	MaxReceiveCount           int      `json:"max_receive_count,omitempty"`
+	DeadLetterQueueARN        string   `json:"dead_letter_queue_arn,omitempty"`
+	SSE                       string   `json:"sse"`
+	ContentBasedDeduplication bool     `json:"content_based_deduplication"`
+	PolicyFingerprintSHA256   string   `json:"policy_fingerprint_sha256"`
+	RedriveAllowSourceARNs    []string `json:"redrive_allow_source_arns,omitempty"`
 }
 
 type Role struct {
@@ -56,6 +62,8 @@ type Role struct {
 type SQSAPI interface {
 	GetQueueUrl(context.Context, *sqs.GetQueueUrlInput, ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error)
 	GetQueueAttributes(context.Context, *sqs.GetQueueAttributesInput, ...func(*sqs.Options)) (*sqs.GetQueueAttributesOutput, error)
+	ListQueueTags(context.Context, *sqs.ListQueueTagsInput, ...func(*sqs.Options)) (*sqs.ListQueueTagsOutput, error)
+	ListDeadLetterSourceQueues(context.Context, *sqs.ListDeadLetterSourceQueuesInput, ...func(*sqs.Options)) (*sqs.ListDeadLetterSourceQueuesOutput, error)
 }
 
 func Load(path string) (Manifest, error) {
@@ -80,16 +88,34 @@ func (m Manifest) Validate() error {
 		suffix                                string
 		visibility, retention, wait, receives int
 	}{
-		"jobs": {"jobs.fifo", 90, 345600, 20, 5}, "results": {"results.fifo", 60, 345600, 20, 10},
-		"jobs_dlq": {"jobs-dlq.fifo", 0, 1209600, 0, 0}, "results_dlq": {"results-dlq.fifo", 0, 1209600, 0, 0},
+		"jobs": {"check-jobs-hosted.fifo", 90, 345600, 20, 5}, "results": {"check-results.fifo", 60, 345600, 20, 10},
+		"jobs_dlq": {"check-jobs-hosted-dlq.fifo", 0, 1209600, 0, 0}, "results_dlq": {"check-results-dlq.fifo", 0, 1209600, 0, 0},
 	}
+	accounts := map[string]struct{}{}
 	for key, want := range expected {
 		queue, ok := m.Queues[key]
-		if !ok || queue.Name != "watchtrace-"+m.Environment+"-"+want.suffix || queue.URL == "" || queue.ARN == "" || queue.VisibilityTimeoutSeconds != want.visibility || queue.MessageRetentionSeconds != want.retention || queue.ReceiveWaitTimeSeconds != want.wait || queue.SSE != "SSE-SQS" || queue.ContentBasedDeduplication || queue.MaxReceiveCount != want.receives {
+		if !ok || queue.Name != "watchtrace-"+m.Environment+"-"+want.suffix || queue.URL == "" || queue.ARN == "" || queue.VisibilityTimeoutSeconds != want.visibility || queue.MessageRetentionSeconds != want.retention || queue.ReceiveWaitTimeSeconds != want.wait || queue.SSE != "SSE-SQS" || queue.ContentBasedDeduplication || queue.MaxReceiveCount != want.receives || !fingerprintPattern.MatchString(queue.PolicyFingerprintSHA256) {
 			return fmt.Errorf("invalid queue manifest: %s", key)
 		}
+		parsedURL, err := url.Parse(queue.URL)
+		parts := strings.Split(queue.ARN, ":")
+		if err != nil || parsedURL.Scheme == "" || path.Base(parsedURL.Path) != queue.Name || len(parts) != 6 || parts[0] != "arn" || parts[2] != "sqs" || parts[3] != m.AWSRegion || parts[4] == "" || parts[5] != queue.Name {
+			return fmt.Errorf("invalid queue identity: %s", key)
+		}
+		accounts[parts[4]] = struct{}{}
 		if want.receives > 0 && queue.DeadLetterQueueARN == "" {
 			return fmt.Errorf("missing redrive target: %s", key)
+		}
+		if want.receives == 0 && len(queue.RedriveAllowSourceARNs) != 1 {
+			return fmt.Errorf("invalid redrive allow sources: %s", key)
+		}
+	}
+	if len(accounts) != 1 || m.Queues["jobs"].DeadLetterQueueARN != m.Queues["jobs_dlq"].ARN || m.Queues["results"].DeadLetterQueueARN != m.Queues["results_dlq"].ARN || m.Queues["jobs_dlq"].RedriveAllowSourceARNs[0] != m.Queues["jobs"].ARN || m.Queues["results_dlq"].RedriveAllowSourceARNs[0] != m.Queues["results"].ARN {
+		return errors.New("queue routing inventory is inconsistent")
+	}
+	for key, value := range map[string]string{"Application": "WatchTrace", "Environment": m.Environment, "Phase": "1"} {
+		if m.Tags[key] != value {
+			return fmt.Errorf("invalid deployment tag: %s", key)
 		}
 	}
 	requiredRoles := []string{"job_publisher", "hosted_worker", "queue_gateway", "result_consumer", "dlq_reconciler", "infrastructure_operator"}
@@ -132,6 +158,10 @@ func VerifySQS(ctx context.Context, client SQSAPI, manifest Manifest) error {
 				return fmt.Errorf("queue attribute drift: %s/%s", key, attribute)
 			}
 		}
+		policyFingerprint, err := fingerprintJSON(out.Attributes[string(types.QueueAttributeNamePolicy)])
+		if err != nil || policyFingerprint != queue.PolicyFingerprintSHA256 {
+			return fmt.Errorf("queue policy drift: %s", key)
+		}
 		if queue.MaxReceiveCount > 0 {
 			var redrive struct {
 				DeadLetterTargetARN string          `json:"deadLetterTargetArn"`
@@ -140,9 +170,74 @@ func VerifySQS(ctx context.Context, client SQSAPI, manifest Manifest) error {
 			if json.Unmarshal([]byte(out.Attributes[string(types.QueueAttributeNameRedrivePolicy)]), &redrive) != nil || redrive.DeadLetterTargetARN != queue.DeadLetterQueueARN || strings.Trim(string(redrive.MaxReceiveCount), `"`) != strconv.Itoa(queue.MaxReceiveCount) {
 				return fmt.Errorf("queue redrive drift: %s", key)
 			}
+		} else {
+			var allow struct {
+				RedrivePermission string   `json:"redrivePermission"`
+				SourceQueueARNs   []string `json:"sourceQueueArns"`
+			}
+			if json.Unmarshal([]byte(out.Attributes[string(types.QueueAttributeNameRedriveAllowPolicy)]), &allow) != nil || allow.RedrivePermission != "byQueue" || !sameStrings(allow.SourceQueueARNs, queue.RedriveAllowSourceARNs) {
+				return fmt.Errorf("queue redrive allow drift: %s", key)
+			}
+			sources, sourceErr := client.ListDeadLetterSourceQueues(ctx, &sqs.ListDeadLetterSourceQueuesInput{QueueUrl: url.QueueUrl})
+			if sourceErr != nil || len(sources.QueueUrls) != 1 || path.Base(sources.QueueUrls[0]) != arnResource(queue.RedriveAllowSourceARNs[0]) {
+				return fmt.Errorf("queue redrive source drift: %s", key)
+			}
+		}
+		tags, err := client.ListQueueTags(ctx, &sqs.ListQueueTagsInput{QueueUrl: url.QueueUrl})
+		if err != nil {
+			return fmt.Errorf("read queue tags: %s: %w", key, err)
+		}
+		for tag, want := range manifest.Tags {
+			if tags.Tags[tag] != want {
+				return fmt.Errorf("queue tag drift: %s/%s", key, tag)
+			}
 		}
 	}
 	return nil
+}
+
+func arnResource(value string) string {
+	parts := strings.Split(value, ":")
+	if len(parts) != 6 {
+		return ""
+	}
+	return parts[5]
+}
+
+func fingerprintJSON(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", errors.New("missing JSON policy")
+	}
+	decoded, err := url.QueryUnescape(value)
+	if err != nil {
+		return "", err
+	}
+	var document any
+	if err = json.Unmarshal([]byte(decoded), &document); err != nil {
+		return "", err
+	}
+	canonical, err := json.Marshal(document)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return fmt.Sprintf("%x", sum), nil
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	left = append([]string(nil), left...)
+	right = append([]string(nil), right...)
+	sort.Strings(left)
+	sort.Strings(right)
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 type boundedReader struct {

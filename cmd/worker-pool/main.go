@@ -44,12 +44,15 @@ func main() {
 	actor := flag.String("actor", "", "operator identity")
 	reason := flag.String("reason", "", "audit reason")
 	confirmation := flag.String("confirm", "", "exact deletion confirmation")
+	sourceQueueEmpty := flag.Bool("source-queue-empty", false, "operator verified the source FIFO is empty")
+	dlqEmpty := flag.Bool("dlq-empty", false, "operator verified the FIFO DLQ is empty")
+	gatewayRemoved := flag.Bool("gateway-removed", false, "signed gateway mapping no longer contains the pool")
 	flag.Parse()
 	var err error
 	if *mode == "generate" {
 		err = generate(*pool, *bundle, *prefix)
 	} else {
-		err = operate(context.Background(), *mode, *pool, *poolMode, *queueURL, *queueARN, *dlqURL, *dlqARN, *mtlsFingerprint, *mtlsNotAfter, *bundle, *manifest, *gatewayMapped, *actor, *reason, *confirmation)
+		err = operate(context.Background(), *mode, *pool, *poolMode, *queueURL, *queueARN, *dlqURL, *dlqARN, *mtlsFingerprint, *mtlsNotAfter, *bundle, *manifest, *gatewayMapped, *actor, *reason, *confirmation, workerpool.DeletionReadiness{SourceQueueEmpty: *sourceQueueEmpty, DeadLetterQueueEmpty: *dlqEmpty, GatewayMappingRemoved: *gatewayRemoved})
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "worker-pool operation failed")
@@ -80,7 +83,7 @@ func generate(pool, path, prefix string) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-func operate(ctx context.Context, mode, pool, poolMode, queueURL, queueARN, dlqURL, dlqARN, mtlsFingerprint, mtlsExpiry, bundlePath, manifestPath string, gatewayMapped bool, actor, reason, confirmation string) error {
+func operate(ctx context.Context, mode, pool, poolMode, queueURL, queueARN, dlqURL, dlqARN, mtlsFingerprint, mtlsExpiry, bundlePath, manifestPath string, gatewayMapped bool, actor, reason, confirmation string, deletionReadiness workerpool.DeletionReadiness) error {
 	if pool == "" || strings.TrimSpace(actor) == "" || strings.TrimSpace(reason) == "" {
 		return errors.New("pool, actor, and reason required")
 	}
@@ -136,7 +139,7 @@ func operate(ctx context.Context, mode, pool, poolMode, queueURL, queueARN, dlqU
 	case "fail":
 		return service.Transition(ctx, pool, "failed", actor, reason)
 	case "delete":
-		return service.Delete(ctx, pool, confirmation, actor, reason)
+		return service.Delete(ctx, pool, confirmation, actor, reason, deletionReadiness)
 	default:
 		return errors.New("unknown mode")
 	}

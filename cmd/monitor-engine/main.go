@@ -72,8 +72,8 @@ func main() {
 		}
 	})
 	publisher := fifo.NewPublisher(db, fifo.SQSSender{Client: client})
-	consumer := fifo.NewResultConsumerWithQuarantine(db, fifo.ResultSQS{Client: client, QueueURL: required("WATCHTRACE_RESULT_QUEUE_URL")}, quarantineSealer)
-	dlq := fifo.NewDLQReconciler(db, &fifo.SQSDLQSource{Client: client, JobDLQURL: required("WATCHTRACE_JOB_DLQ_URL"), ResultDLQURL: required("WATCHTRACE_RESULT_DLQ_URL")}, quarantineSealer)
+	consumer := fifo.NewResultConsumerWithQuarantine(db, fifo.ResultSQS{Client: client, QueueURL: required("WATCHTRACE_SQS_RESULT_QUEUE_URL")}, quarantineSealer)
+	dlq := fifo.NewDLQReconciler(db, &fifo.SQSDLQSource{Client: client, JobDLQURL: required("WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL"), ResultDLQURL: required("WATCHTRACE_SQS_RESULT_DLQ_URL")}, quarantineSealer)
 	go runScheduler(ctx, scheduler, logger)
 	go runPublisher(ctx, publisher, logger)
 	go runConsumer(ctx, consumer, logger)

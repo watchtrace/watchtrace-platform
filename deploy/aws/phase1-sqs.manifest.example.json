@@ -4,48 +4,54 @@
   "aws_region": "ap-south-1",
   "queues": {
     "jobs": {
-      "name": "watchtrace-dev-jobs.fifo",
-      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-jobs.fifo",
-      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-jobs.fifo",
+      "name": "watchtrace-dev-check-jobs-hosted.fifo",
+      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-jobs-hosted.fifo",
+      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-check-jobs-hosted.fifo",
       "visibility_timeout_seconds": 90,
       "message_retention_seconds": 345600,
       "receive_wait_time_seconds": 20,
       "max_receive_count": 5,
-      "dead_letter_queue_arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-jobs-dlq.fifo",
+      "dead_letter_queue_arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-check-jobs-hosted-dlq.fifo",
       "sse": "SSE-SQS",
-      "content_based_deduplication": false
+      "content_based_deduplication": false,
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     },
     "results": {
-      "name": "watchtrace-dev-results.fifo",
-      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-results.fifo",
-      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-results.fifo",
+      "name": "watchtrace-dev-check-results.fifo",
+      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-results.fifo",
+      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-check-results.fifo",
       "visibility_timeout_seconds": 60,
       "message_retention_seconds": 345600,
       "receive_wait_time_seconds": 20,
       "max_receive_count": 10,
-      "dead_letter_queue_arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-results-dlq.fifo",
+      "dead_letter_queue_arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-check-results-dlq.fifo",
       "sse": "SSE-SQS",
-      "content_based_deduplication": false
+      "content_based_deduplication": false,
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     },
     "jobs_dlq": {
-      "name": "watchtrace-dev-jobs-dlq.fifo",
-      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-jobs-dlq.fifo",
-      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-jobs-dlq.fifo",
+      "name": "watchtrace-dev-check-jobs-hosted-dlq.fifo",
+      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-jobs-hosted-dlq.fifo",
+      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-check-jobs-hosted-dlq.fifo",
       "visibility_timeout_seconds": 0,
       "message_retention_seconds": 1209600,
       "receive_wait_time_seconds": 0,
       "sse": "SSE-SQS",
-      "content_based_deduplication": false
+      "content_based_deduplication": false,
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "redrive_allow_source_arns": ["arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-check-jobs-hosted.fifo"]
     },
     "results_dlq": {
-      "name": "watchtrace-dev-results-dlq.fifo",
-      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-results-dlq.fifo",
-      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-results-dlq.fifo",
+      "name": "watchtrace-dev-check-results-dlq.fifo",
+      "url": "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-results-dlq.fifo",
+      "arn": "arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-check-results-dlq.fifo",
       "visibility_timeout_seconds": 0,
       "message_retention_seconds": 1209600,
       "receive_wait_time_seconds": 0,
       "sse": "SSE-SQS",
-      "content_based_deduplication": false
+      "content_based_deduplication": false,
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "redrive_allow_source_arns": ["arn:aws:sqs:ap-south-1:123456789012:watchtrace-dev-check-results.fifo"]
     }
   },
   "roles": {

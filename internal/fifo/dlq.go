@@ -2,6 +2,7 @@ package fifo
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"time"
 
@@ -53,9 +54,9 @@ func (r *DLQReconciler) ReconcileNext(ctx context.Context) (bool, error) {
 			return true, r.source.AcknowledgeDLQ(ctx, delivery)
 		}
 		result, peekErr := envelope.PeekResult(delivery.Body)
-		aad := "result-dlq"
+		aad := "result:invalid"
 		if peekErr == nil {
-			aad += ":" + result.ResultID
+			aad = "result:" + result.ResultID
 		}
 		sealed, err := r.sealer.Seal(delivery.Body, []byte(aad))
 		if err != nil {
@@ -117,7 +118,11 @@ func (s *SQSDLQSource) PullDLQ(ctx context.Context, kind string, wait time.Durat
 	if err != nil {
 		return DLQDelivery{}, err
 	}
-	return DLQDelivery{Kind: kind, Body: []byte(aws.ToString(m.Body)), Attributes: attrs, Receipt: aws.ToString(m.ReceiptHandle)}, nil
+	body, err := base64.StdEncoding.DecodeString(aws.ToString(m.Body))
+	if err != nil {
+		return DLQDelivery{}, envelope.ErrInvalid
+	}
+	return DLQDelivery{Kind: kind, Body: body, Attributes: attrs, Receipt: aws.ToString(m.ReceiptHandle)}, nil
 }
 func (s *SQSDLQSource) AcknowledgeDLQ(ctx context.Context, d DLQDelivery) error {
 	url := s.JobDLQURL

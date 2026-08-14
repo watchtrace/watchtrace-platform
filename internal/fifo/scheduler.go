@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"time"
@@ -126,10 +127,11 @@ func (s *Scheduler) ScheduleDue(ctx context.Context, batch int) (int, error) {
 		if schemaVersion < m.SchemaMin || schemaVersion > m.SchemaMax {
 			return 0, errors.New("worker pool has no compatible protocol schema")
 		}
-		body, attrs, err := envelope.SealJob(envelope.Job{SchemaVersion: schemaVersion, JobID: jobID, JobType: "scheduled", WorkerPoolID: m.WorkerPoolID, NetworkPolicyVersion: m.NetworkPolicy, ScheduledAt: scheduledAt, ExpiresAt: expires, TargetURL: m.TargetURL, Method: m.Method, TimeoutSeconds: m.Timeout, ExpectedStatusMin: m.Min, ExpectedStatusMax: m.Max, Headers: headers, Limits: envelope.RequestLimits{MaxResponseBytes: 65536, MaxHeaderBytes: 32768, MaxRedirects: 3}, PlatformKeyID: s.platformKeyID, WorkerEncryptionKeyID: m.EncryptionKeyID}, s.signer, workerPublic)
+		sealed, attrs, err := envelope.SealJob(envelope.Job{SchemaVersion: schemaVersion, JobID: jobID, JobType: "scheduled", WorkerPoolID: m.WorkerPoolID, NetworkPolicyVersion: m.NetworkPolicy, ScheduledAt: scheduledAt, ExpiresAt: expires, TargetURL: m.TargetURL, Method: m.Method, TimeoutSeconds: m.Timeout, ExpectedStatusMin: m.Min, ExpectedStatusMax: m.Max, Headers: headers, Limits: envelope.RequestLimits{MaxResponseBytes: 65536, MaxHeaderBytes: 32768, MaxRedirects: 3}, PlatformKeyID: s.platformKeyID, WorkerEncryptionKeyID: m.EncryptionKeyID}, s.signer, workerPublic)
 		if err != nil {
 			return 0, err
 		}
+		body := []byte(base64.StdEncoding.EncodeToString(sealed))
 		hash, err := hex.DecodeString(attrs.SnapshotHash)
 		if err != nil {
 			return 0, err

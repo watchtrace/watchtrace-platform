@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -83,6 +84,62 @@ func TestLocalSQSHasProductionFIFOAndRedeliverySemantics(t *testing.T) {
 	verifyMovesToDLQ(t, ctx, client, results.url, resultDLQ.url, "poison-result", 10)
 }
 
+func TestAWSSQSFIFOAndDLQRecoverySemantics(t *testing.T) {
+	if os.Getenv("WATCHTRACE_TEST_AWS_SQS") != "1" {
+		t.Skip("real AWS SQS test is disabled")
+	}
+	region := strings.TrimSpace(os.Getenv("AWS_REGION"))
+	if region == "" || strings.TrimSpace(os.Getenv("WATCHTRACE_SQS_ENDPOINT")) != "" {
+		t.Fatal("real AWS SQS test requires AWS_REGION and forbids an endpoint override")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := sqs.NewFromConfig(cfg)
+	prefix := fmt.Sprintf("watchtrace-dev-p1306-%d", time.Now().Unix())
+	jobDLQ := createFIFOQueue(t, ctx, client, prefix+"-jdlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
+	resultDLQ := createFIFOQueue(t, ctx, client, prefix+"-rdlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
+	jobRedrive, _ := json.Marshal(map[string]any{"deadLetterTargetArn": jobDLQ.arn, "maxReceiveCount": 5})
+	resultRedrive, _ := json.Marshal(map[string]any{"deadLetterTargetArn": resultDLQ.arn, "maxReceiveCount": 10})
+	jobs := createFIFOQueue(t, ctx, client, prefix+"-jobs.fifo", map[string]string{"VisibilityTimeout": "90", "ReceiveMessageWaitTimeSeconds": "20", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false", "RedrivePolicy": string(jobRedrive)})
+	results := createFIFOQueue(t, ctx, client, prefix+"-results.fifo", map[string]string{"VisibilityTimeout": "60", "ReceiveMessageWaitTimeSeconds": "20", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false", "RedrivePolicy": string(resultRedrive)})
+	for _, queue := range []queueIdentity{jobs, results, jobDLQ, resultDLQ} {
+		queue := queue
+		t.Cleanup(func() {
+			_, _ = client.DeleteQueue(context.Background(), &sqs.DeleteQueueInput{QueueUrl: aws.String(queue.url)})
+		})
+		if _, err = client.TagQueue(ctx, &sqs.TagQueueInput{QueueUrl: aws.String(queue.url), Tags: map[string]string{"Application": "WatchTrace", "Environment": "dev", "Phase": "1", "Purpose": "P1-306-test"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobAllow, _ := json.Marshal(map[string]any{"redrivePermission": "byQueue", "sourceQueueArns": []string{jobs.arn}})
+	resultAllow, _ := json.Marshal(map[string]any{"redrivePermission": "byQueue", "sourceQueueArns": []string{results.arn}})
+	if _, err = client.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{QueueUrl: aws.String(jobDLQ.url), Attributes: map[string]string{"RedriveAllowPolicy": string(jobAllow)}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{QueueUrl: aws.String(resultDLQ.url), Attributes: map[string]string{"RedriveAllowPolicy": string(resultAllow)}}); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err = client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(jobs.url), MessageBody: aws.String("immutable-real-aws"), MessageDeduplicationId: aws.String("real-dedup"), MessageGroupId: aws.String("real-dedup")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	received, err := client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(jobs.url), MaxNumberOfMessages: 10, WaitTimeSeconds: 2})
+	if err != nil || len(received.Messages) != 1 {
+		t.Fatalf("real AWS deduplicated receives=%d error=%v", len(received.Messages), err)
+	}
+	if _, err = client.DeleteMessage(ctx, &sqs.DeleteMessageInput{QueueUrl: aws.String(jobs.url), ReceiptHandle: received.Messages[0].ReceiptHandle}); err != nil {
+		t.Fatal(err)
+	}
+	verifyMovesToDLQ(t, ctx, client, jobs.url, jobDLQ.url, "real-poison-job", 5)
+	verifyMovesToDLQ(t, ctx, client, results.url, resultDLQ.url, "real-poison-result", 10)
+}
+
 func verifyMovesToDLQ(t *testing.T, ctx context.Context, client *sqs.Client, sourceURL, dlqURL, id string, maxReceives int) {
 	t.Helper()
 	_, err := client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(sourceURL), MessageBody: aws.String(id), MessageDeduplicationId: aws.String(id), MessageGroupId: aws.String(id)})
@@ -107,7 +164,7 @@ func verifyMovesToDLQ(t *testing.T, ctx context.Context, client *sqs.Client, sou
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		received, e := client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(dlqURL), MaxNumberOfMessages: 1, WaitTimeSeconds: 1})
 		if e != nil {
@@ -133,29 +190,66 @@ func TestLocalSQSDeploymentManifestVerification(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := sqs.NewFromConfig(cfg, func(options *sqs.Options) { options.BaseEndpoint = aws.String(endpoint) })
-	environment := "verify-" + strconv.FormatInt(time.Now().Unix()%100000000, 10)
+	environment := "dev"
 	prefix := "watchtrace-" + environment + "-"
-	jobDLQ := createFIFOQueue(t, ctx, client, prefix+"jobs-dlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
-	resultDLQ := createFIFOQueue(t, ctx, client, prefix+"results-dlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
+	jobDLQ := createFIFOQueue(t, ctx, client, prefix+"check-jobs-hosted-dlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
+	resultDLQ := createFIFOQueue(t, ctx, client, prefix+"check-results-dlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
 	jobRedrive, _ := json.Marshal(map[string]any{"deadLetterTargetArn": jobDLQ.arn, "maxReceiveCount": 5})
 	resultRedrive, _ := json.Marshal(map[string]any{"deadLetterTargetArn": resultDLQ.arn, "maxReceiveCount": 10})
-	jobs := createFIFOQueue(t, ctx, client, prefix+"jobs.fifo", map[string]string{"VisibilityTimeout": "90", "ReceiveMessageWaitTimeSeconds": "20", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false", "RedrivePolicy": string(jobRedrive)})
-	results := createFIFOQueue(t, ctx, client, prefix+"results.fifo", map[string]string{"VisibilityTimeout": "60", "ReceiveMessageWaitTimeSeconds": "20", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false", "RedrivePolicy": string(resultRedrive)})
+	jobs := createFIFOQueue(t, ctx, client, prefix+"check-jobs-hosted.fifo", map[string]string{"VisibilityTimeout": "90", "ReceiveMessageWaitTimeSeconds": "20", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false", "RedrivePolicy": string(jobRedrive)})
+	results := createFIFOQueue(t, ctx, client, prefix+"check-results.fifo", map[string]string{"VisibilityTimeout": "60", "ReceiveMessageWaitTimeSeconds": "20", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false", "RedrivePolicy": string(resultRedrive)})
 	for _, queue := range []queueIdentity{jobs, results, jobDLQ, resultDLQ} {
 		q := queue
 		t.Cleanup(func() {
 			_, _ = client.DeleteQueue(context.Background(), &sqs.DeleteQueueInput{QueueUrl: aws.String(q.url)})
 		})
 	}
+	jobAllow, _ := json.Marshal(map[string]any{"redrivePermission": "byQueue", "sourceQueueArns": []string{jobs.arn}})
+	resultAllow, _ := json.Marshal(map[string]any{"redrivePermission": "byQueue", "sourceQueueArns": []string{results.arn}})
+	policyHashes := make(map[string]string)
+	for _, configured := range []struct {
+		queue queueIdentity
+		allow string
+	}{{jobs, ""}, {results, ""}, {jobDLQ, string(jobAllow)}, {resultDLQ, string(resultAllow)}} {
+		policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Sid":"LocalManifestVerification","Effect":"Allow","Principal":{"AWS":"*"},"Action":"sqs:GetQueueAttributes","Resource":%q}]}`, configured.queue.arn)
+		attributes := map[string]string{"Policy": policy}
+		if configured.allow != "" {
+			attributes["RedriveAllowPolicy"] = configured.allow
+		}
+		if _, err = client.SetQueueAttributes(ctx, &sqs.SetQueueAttributesInput{QueueUrl: aws.String(configured.queue.url), Attributes: attributes}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = client.TagQueue(ctx, &sqs.TagQueueInput{QueueUrl: aws.String(configured.queue.url), Tags: map[string]string{"Application": "WatchTrace", "Environment": environment, "Phase": "1"}}); err != nil {
+			t.Fatal(err)
+		}
+		live, readErr := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{QueueUrl: aws.String(configured.queue.url), AttributeNames: []types.QueueAttributeName{types.QueueAttributeNamePolicy}})
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		policyHashes[configured.queue.url] = canonicalPolicyHash(t, live.Attributes[string(types.QueueAttributeNamePolicy)])
+	}
 	role := deploymentmanifest.Role{Name: "local-test-role", PolicyFingerprintSHA256: strings.Repeat("0", 64), TrustFingerprintSHA256: strings.Repeat("1", 64)}
 	manifest := deploymentmanifest.Manifest{Version: 1, Environment: environment, AWSRegion: "ap-south-1", Queues: map[string]deploymentmanifest.Queue{
-		"jobs":        {Name: prefix + "jobs.fifo", URL: jobs.url, ARN: jobs.arn, VisibilityTimeoutSeconds: 90, MessageRetentionSeconds: 345600, ReceiveWaitTimeSeconds: 20, MaxReceiveCount: 5, DeadLetterQueueARN: jobDLQ.arn, SSE: "SSE-SQS"},
-		"results":     {Name: prefix + "results.fifo", URL: results.url, ARN: results.arn, VisibilityTimeoutSeconds: 60, MessageRetentionSeconds: 345600, ReceiveWaitTimeSeconds: 20, MaxReceiveCount: 10, DeadLetterQueueARN: resultDLQ.arn, SSE: "SSE-SQS"},
-		"jobs_dlq":    {Name: prefix + "jobs-dlq.fifo", URL: jobDLQ.url, ARN: jobDLQ.arn, MessageRetentionSeconds: 1209600, SSE: "SSE-SQS"},
-		"results_dlq": {Name: prefix + "results-dlq.fifo", URL: resultDLQ.url, ARN: resultDLQ.arn, MessageRetentionSeconds: 1209600, SSE: "SSE-SQS"}}, Roles: map[string]deploymentmanifest.Role{"job_publisher": role, "hosted_worker": role, "queue_gateway": role, "result_consumer": role, "dlq_reconciler": role, "infrastructure_operator": role}}
+		"jobs":        {Name: prefix + "check-jobs-hosted.fifo", URL: jobs.url, ARN: jobs.arn, VisibilityTimeoutSeconds: 90, MessageRetentionSeconds: 345600, ReceiveWaitTimeSeconds: 20, MaxReceiveCount: 5, DeadLetterQueueARN: jobDLQ.arn, SSE: "SSE-SQS", PolicyFingerprintSHA256: policyHashes[jobs.url]},
+		"results":     {Name: prefix + "check-results.fifo", URL: results.url, ARN: results.arn, VisibilityTimeoutSeconds: 60, MessageRetentionSeconds: 345600, ReceiveWaitTimeSeconds: 20, MaxReceiveCount: 10, DeadLetterQueueARN: resultDLQ.arn, SSE: "SSE-SQS", PolicyFingerprintSHA256: policyHashes[results.url]},
+		"jobs_dlq":    {Name: prefix + "check-jobs-hosted-dlq.fifo", URL: jobDLQ.url, ARN: jobDLQ.arn, MessageRetentionSeconds: 1209600, SSE: "SSE-SQS", PolicyFingerprintSHA256: policyHashes[jobDLQ.url], RedriveAllowSourceARNs: []string{jobs.arn}},
+		"results_dlq": {Name: prefix + "check-results-dlq.fifo", URL: resultDLQ.url, ARN: resultDLQ.arn, MessageRetentionSeconds: 1209600, SSE: "SSE-SQS", PolicyFingerprintSHA256: policyHashes[resultDLQ.url], RedriveAllowSourceARNs: []string{results.arn}}}, Roles: map[string]deploymentmanifest.Role{"job_publisher": role, "hosted_worker": role, "queue_gateway": role, "result_consumer": role, "dlq_reconciler": role, "infrastructure_operator": role}, Tags: map[string]string{"Application": "WatchTrace", "Environment": environment, "Phase": "1"}}
 	if err = deploymentmanifest.VerifySQS(ctx, client, manifest); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func canonicalPolicyHash(t *testing.T, policy string) string {
+	t.Helper()
+	var document any
+	if err := json.Unmarshal([]byte(policy), &document); err != nil {
+		t.Fatalf("parse queue policy: %v", err)
+	}
+	canonical, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("canonicalize queue policy: %v", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(canonical))
 }
 
 func TestLocalSQSFiveMinuteDeduplicationBoundary(t *testing.T) {
@@ -163,17 +257,28 @@ func TestLocalSQSFiveMinuteDeduplicationBoundary(t *testing.T) {
 		t.Skip("slow SQS boundary test is disabled")
 	}
 	endpoint := os.Getenv("WATCHTRACE_TEST_SQS_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("WATCHTRACE_TEST_SQS_ENDPOINT is not set")
+	realAWS := os.Getenv("WATCHTRACE_TEST_AWS_SQS") == "1"
+	if endpoint == "" && !realAWS {
+		t.Skip("an SQS test target is not configured")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion("ap-south-1"), awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	options := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion("ap-south-1")}
+	if endpoint != "" {
+		options = append(options, awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	} else {
+		options[0] = awsconfig.WithRegion(os.Getenv("AWS_REGION"))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, options...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := sqs.NewFromConfig(cfg, func(options *sqs.Options) { options.BaseEndpoint = aws.String(endpoint) })
-	queue := createFIFOQueue(t, ctx, client, "watchtrace-dedup-boundary-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".fifo", map[string]string{"ContentBasedDeduplication": "false", "ReceiveMessageWaitTimeSeconds": "0", "VisibilityTimeout": "30", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true"})
+	client := sqs.NewFromConfig(cfg, func(options *sqs.Options) {
+		if endpoint != "" {
+			options.BaseEndpoint = aws.String(endpoint)
+		}
+	})
+	queue := createFIFOQueue(t, ctx, client, "watchtrace-dev-dedup-boundary-"+strconv.FormatInt(time.Now().Unix(), 10)+".fifo", map[string]string{"ContentBasedDeduplication": "false", "ReceiveMessageWaitTimeSeconds": "0", "VisibilityTimeout": "30", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true"})
 	defer client.DeleteQueue(context.Background(), &sqs.DeleteQueueInput{QueueUrl: aws.String(queue.url)})
 	send := func() {
 		if _, err = client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(queue.url), MessageBody: aws.String("immutable"), MessageDeduplicationId: aws.String("stable-job"), MessageGroupId: aws.String("stable-job")}); err != nil {

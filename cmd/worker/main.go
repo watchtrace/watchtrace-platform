@@ -145,7 +145,7 @@ func build(ctx context.Context) (*modworker.Worker, func(), error) {
 				o.BaseEndpoint = aws.String(endpoint)
 			}
 		})
-		transport = &workqueue.DirectSQS{Client: client, JobQueueURL: required("WATCHTRACE_JOB_QUEUE_URL"), ResultQueueURL: required("WATCHTRACE_RESULT_QUEUE_URL"), WorkerPoolID: pool}
+		transport = &workqueue.DirectSQS{Client: client, JobQueueURL: required("WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL"), ResultQueueURL: required("WATCHTRACE_SQS_RESULT_QUEUE_URL"), WorkerPoolID: pool}
 	} else {
 		client, e := mtlsClient()
 		if e != nil {

@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
@@ -78,7 +79,12 @@ func TestPublisherAcceptedSendRecoveryUsesExactImmutableMessage(t *testing.T) {
 	if worked, err := publisher.PublishNext(ctx); !worked || err != nil {
 		t.Fatalf("retry worked=%t err=%v", worked, err)
 	}
-	if len(sender.inputs) != 2 || !bytes.Equal(sender.inputs[0].Body, sender.inputs[1].Body) || sender.inputs[0].DeduplicationID != sender.inputs[1].DeduplicationID || sender.inputs[0].GroupID != sender.inputs[1].GroupID || sender.inputs[0].Attributes != sender.inputs[1].Attributes {
+	if len(sender.inputs) != 2 {
+		t.Fatalf("publisher attempts=%d, want 2", len(sender.inputs))
+	}
+	first, second := sender.inputs[0], sender.inputs[1]
+	attributesMatch := first.Attributes.SchemaVersion == second.Attributes.SchemaVersion && first.Attributes.JobID == second.Attributes.JobID && first.Attributes.WorkerPoolID == second.Attributes.WorkerPoolID && first.Attributes.SnapshotHash == second.Attributes.SnapshotHash && first.Attributes.ExpiresAt.Equal(second.Attributes.ExpiresAt) && first.Attributes.PlatformKeyID == second.Attributes.PlatformKeyID && first.Attributes.WorkerEncryptionKeyID == second.Attributes.WorkerEncryptionKeyID
+	if !bytes.Equal(first.Body, second.Body) || first.DeduplicationID != second.DeduplicationID || first.GroupID != second.GroupID || !attributesMatch {
 		t.Fatal("publisher recovery changed the immutable FIFO message")
 	}
 }
@@ -196,7 +202,11 @@ func TestReliableFIFOEngineWithPostgreSQL(t *testing.T) {
 	if err != nil || !worked || string(sender.input.Body) != string(storedBody) || sender.input.DeduplicationID != jobID || sender.input.GroupID != jobID {
 		t.Fatalf("publish worked=%t error=%v", worked, err)
 	}
-	loopback := &workerLoopback{delivery: workqueue.Delivery{Body: sender.input.Body, Attributes: sender.input.Attributes, LeaseToken: "job-receipt"}}
+	workerBody, err := base64.StdEncoding.DecodeString(string(sender.input.Body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loopback := &workerLoopback{delivery: workqueue.Delivery{Body: workerBody, Attributes: sender.input.Attributes, LeaseToken: "job-receipt"}}
 	journal, err := workerjournal.Open(filepath.Join(t.TempDir(), "worker.sqlite"))
 	if err != nil {
 		t.Fatal(err)

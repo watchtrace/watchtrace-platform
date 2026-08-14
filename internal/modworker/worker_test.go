@@ -12,17 +12,19 @@ import (
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
 type transport struct {
-	delivery    workqueue.Delivery
-	published   int
-	acked       int
-	pulls       int
-	failPublish bool
+	delivery      workqueue.Delivery
+	published     int
+	publishedBody []byte
+	acked         int
+	pulls         int
+	failPublish   bool
 }
 
 func (t *transport) Pull(context.Context, time.Duration) (workqueue.Delivery, error) {
@@ -30,8 +32,9 @@ func (t *transport) Pull(context.Context, time.Duration) (workqueue.Delivery, er
 	return t.delivery, nil
 }
 func (t *transport) Extend(context.Context, workqueue.Delivery, time.Duration) error { return nil }
-func (t *transport) PublishResultAndAcknowledge(context.Context, workqueue.Delivery, []byte) error {
+func (t *transport) PublishResultAndAcknowledge(_ context.Context, _ workqueue.Delivery, body []byte) error {
 	t.published++
+	t.publishedBody = append([]byte(nil), body...)
 	if t.failPublish {
 		return errors.New("result path unavailable")
 	}
@@ -151,6 +154,111 @@ func TestWorkerJournalPreventsSameWorkerRepeat(t *testing.T) {
 	if calls != 1 || tr.published != 2 {
 		t.Fatalf("calls=%d published=%d", calls, tr.published)
 	}
+}
+
+func TestWorkerRestartReplaysDurableJournalBeforeReceivingNewWork(t *testing.T) {
+	platformPub, platformPriv, _ := ed25519.GenerateKey(rand.Reader)
+	_, resultPriv, _ := ed25519.GenerateKey(rand.Reader)
+	workerKey, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	now := time.Now().UTC()
+	job := envelope.Job{SchemaVersion: 2, JobID: "restart-job", JobType: "scheduled", WorkerPoolID: "hosted", NetworkPolicyVersion: 1, ScheduledAt: now, ExpiresAt: now.Add(time.Minute), TargetURL: "https://example.com", Method: "GET", TimeoutSeconds: 1, ExpectedStatusMin: 200, ExpectedStatusMax: 299, Limits: envelope.RequestLimits{MaxResponseBytes: 64, MaxHeaderBytes: 1024, MaxRedirects: 3}, PlatformKeyID: "p", WorkerEncryptionKeyID: "w"}
+	body, attrs, err := envelope.SealJob(job, platformPriv, workerKey.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(t.TempDir(), "restart.sqlite")
+	journal, err := workerjournal.Open(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	engine := checkengine.NewWithClient(doer(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 204, Body: io.NopCloser(&empty{})}, nil
+	}))
+	config := Config{WorkerID: "worker", WorkerPoolID: "hosted", PlatformKeyID: "p", WorkerEncryptionKeyID: "w", ResultKeyID: "r", WorkerPrivate: workerKey, PlatformPublic: platformPub, ResultPrivate: resultPriv}
+	failed := &transport{delivery: workqueue.Delivery{Body: body, Attributes: attrs}, failPublish: true}
+	worker, err := New(failed, journal, engine, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worker.RunOne(context.Background()); err == nil {
+		t.Fatal("result publication outage was not reported")
+	}
+	if err = journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := workerjournal.Open(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	recovered := &transport{delivery: workqueue.Delivery{Body: body, Attributes: attrs}}
+	worker, err = New(recovered, reopened, engine, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || recovered.published != 1 || recovered.acked != 1 {
+		t.Fatalf("calls=%d published=%d acked=%d", calls, recovered.published, recovered.acked)
+	}
+}
+
+func TestLostJournalDocumentsRareDuplicateRequestWindow(t *testing.T) {
+	platformPub, platformPriv, _ := ed25519.GenerateKey(rand.Reader)
+	_, resultPriv, _ := ed25519.GenerateKey(rand.Reader)
+	workerKey, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	now := time.Now().UTC()
+	job := envelope.Job{SchemaVersion: 2, JobID: "lost-journal-job", JobType: "scheduled", WorkerPoolID: "hosted", NetworkPolicyVersion: 1, ScheduledAt: now, ExpiresAt: now.Add(time.Minute), TargetURL: "https://example.com", Method: "GET", TimeoutSeconds: 1, ExpectedStatusMin: 200, ExpectedStatusMax: 299, Limits: envelope.RequestLimits{MaxResponseBytes: 64, MaxHeaderBytes: 1024, MaxRedirects: 3}, PlatformKeyID: "p", WorkerEncryptionKeyID: "w"}
+	body, attrs, err := envelope.SealJob(job, platformPriv, workerKey.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	engine := checkengine.NewWithClient(doer(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 204, Body: io.NopCloser(&empty{})}, nil
+	}))
+	config := Config{WorkerID: "worker", WorkerPoolID: "hosted", PlatformKeyID: "p", WorkerEncryptionKeyID: "w", ResultKeyID: "r", WorkerPrivate: workerKey, PlatformPublic: platformPub, ResultPrivate: resultPriv}
+	path := filepath.Join(t.TempDir(), "lost.sqlite")
+	firstJournal, _ := workerjournal.Open(path)
+	firstTransport := &transport{delivery: workqueue.Delivery{Body: body, Attributes: attrs}, failPublish: true}
+	first, _ := New(firstTransport, firstJournal, engine, config)
+	if _, err = first.RunOne(context.Background()); err == nil {
+		t.Fatal("ambiguous publication was not reported")
+	}
+	firstResult, err := envelope.PeekResult(first.pending.body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = firstJournal.Close()
+	if err = os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	secondJournal, _ := workerjournal.Open(path)
+	defer secondJournal.Close()
+	secondTransport := &transport{delivery: workqueue.Delivery{Body: body, Attributes: attrs}}
+	second, _ := New(secondTransport, secondJournal, engine, config)
+	if _, err = second.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	secondResult, err := envelope.PeekResult(secondTransport.deliveryResult())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || firstResult.ResultID == secondResult.ResultID || firstResult.AttemptID == secondResult.AttemptID {
+		t.Fatalf("calls=%d first=%s second=%s", calls, firstResult.ResultID, secondResult.ResultID)
+	}
+}
+
+func (t *transport) deliveryResult() []byte {
+	if t.publishedBody == nil {
+		return nil
+	}
+	return t.publishedBody
 }
 
 type empty struct{}

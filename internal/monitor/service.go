@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -568,10 +569,11 @@ func (s *Service) TestNow(ctx context.Context, userID, environmentID, monitorID 
 		return "", err
 	}
 	expiresAt := scheduledAt.Add(2 * time.Minute)
-	body, attrs, err := envelope.SealJob(envelope.Job{SchemaVersion: envelope.SchemaVersion, JobID: id, JobType: "manual_test", WorkerPoolID: row.WorkerPoolID, NetworkPolicyVersion: networkPolicy, ScheduledAt: scheduledAt, ExpiresAt: expiresAt, TargetURL: row.TargetURL, Method: row.Method, TimeoutSeconds: row.Timeout, ExpectedStatusMin: row.Min, ExpectedStatusMax: row.Max, Headers: headers, Limits: envelope.RequestLimits{MaxResponseBytes: 65536, MaxHeaderBytes: 32768, MaxRedirects: 3}, PlatformKeyID: s.signingKeyID, WorkerEncryptionKeyID: encryptionKeyID}, s.signingKey, workerKey)
+	sealed, attrs, err := envelope.SealJob(envelope.Job{SchemaVersion: envelope.SchemaVersion, JobID: id, JobType: "manual_test", WorkerPoolID: row.WorkerPoolID, NetworkPolicyVersion: networkPolicy, ScheduledAt: scheduledAt, ExpiresAt: expiresAt, TargetURL: row.TargetURL, Method: row.Method, TimeoutSeconds: row.Timeout, ExpectedStatusMin: row.Min, ExpectedStatusMax: row.Max, Headers: headers, Limits: envelope.RequestLimits{MaxResponseBytes: 65536, MaxHeaderBytes: 32768, MaxRedirects: 3}, PlatformKeyID: s.signingKeyID, WorkerEncryptionKeyID: encryptionKeyID}, s.signingKey, workerKey)
 	if err != nil {
 		return "", ErrQueueUnavailable
 	}
+	body := []byte(base64.StdEncoding.EncodeToString(sealed))
 	hash, err := hex.DecodeString(attrs.SnapshotHash)
 	if err != nil {
 		return "", err

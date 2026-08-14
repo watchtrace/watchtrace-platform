@@ -56,10 +56,14 @@ func TestWorkerPoolPartialProvisioningLifecycleAndAudit(t *testing.T) {
 	if err = service.Transition(ctx, poolID, "deleting", "operator", "remove failed pool"); err != nil {
 		t.Fatal(err)
 	}
-	if err = service.Delete(ctx, poolID, "wrong", "operator", "remove failed pool"); err == nil {
+	ready := workerpool.DeletionReadiness{SourceQueueEmpty: true, DeadLetterQueueEmpty: true, GatewayMappingRemoved: true}
+	if err = service.Delete(ctx, poolID, "wrong", "operator", "remove failed pool", ready); err == nil {
 		t.Fatal("inexact delete confirmation accepted")
 	}
-	if err = service.Delete(ctx, poolID, "delete:"+poolID, "operator", "remove failed pool"); err != nil {
+	if err = service.Delete(ctx, poolID, "delete:"+poolID, "operator", "remove failed pool", workerpool.DeletionReadiness{}); err == nil {
+		t.Fatal("deletion without drained queues and gateway removal was accepted")
+	}
+	if err = service.Delete(ctx, poolID, "delete:"+poolID, "operator", "remove failed pool", ready); err != nil {
 		t.Fatal(err)
 	}
 	var audits int

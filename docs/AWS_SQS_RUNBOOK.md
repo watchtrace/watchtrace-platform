@@ -10,14 +10,16 @@ Docker Compose starts LocalStack on `http://127.0.0.1:4566`. Set `AWS_ACCESS_KEY
 
 Create the two DLQs first and then the source queues. Every queue is FIFO, uses explicit deduplication, and enables SQS-managed server-side encryption. Configure:
 
+SQS message bodies are UTF-8 text. WatchTrace therefore base64-encodes the sealed binary job envelope and signed binary result envelope at the SQS adapter boundary. The durable outbox stores the exact base64 job body that is retried; workers, result consumers, and DLQ reconciliation decode it before cryptographic validation. Message attributes remain bounded, non-secret routing metadata.
+
 | Queue | Retention | Long poll | Visibility | Redrive |
 | --- | ---: | ---: | ---: | ---: |
-| `watchtrace-{environment}-jobs.fifo` | 4 days | 20 seconds | 90 seconds | job DLQ after 5 receives |
-| `watchtrace-{environment}-results.fifo` | 4 days | 20 seconds | 60 seconds | result DLQ after 10 receives |
-| `watchtrace-{environment}-jobs-dlq.fifo` | 14 days | 0 | 0 | none |
-| `watchtrace-{environment}-results-dlq.fifo` | 14 days | 0 | 0 | none |
+| `watchtrace-{environment}-check-jobs-hosted.fifo` | 4 days | 20 seconds | 90 seconds | job DLQ after 5 receives |
+| `watchtrace-{environment}-check-results.fifo` | 4 days | 20 seconds | 60 seconds | result DLQ after 10 receives |
+| `watchtrace-{environment}-check-jobs-hosted-dlq.fifo` | 14 days | 0 | 0 | none |
+| `watchtrace-{environment}-check-results-dlq.fifo` | 14 days | 0 | 0 | none |
 
-Record the returned URL and ARN, the exact attributes, redrive policy, tags, and role/trust/policy fingerprints in a copy of `deploy/aws/phase1-sqs.manifest.example.json`. Replace every placeholder fingerprint with the SHA-256 of normalized reviewed JSON. The verifier intentionally rejects missing inventory.
+Restrict each DLQ's `RedriveAllowPolicy` to its one source queue. Record the returned URL and ARN, the exact attributes, redrive policy, redrive-allow sources, tags, queue-policy fingerprint, and role/trust/policy fingerprints in a copy of `deploy/aws/phase1-sqs.manifest.example.json`. Replace every placeholder fingerprint with the SHA-256 of normalized reviewed JSON. The verifier intentionally rejects missing inventory and compares SQS and IAM directly.
 
 Run the verifier with the AWS SDK default credential chain:
 

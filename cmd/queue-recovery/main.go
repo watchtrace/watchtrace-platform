@@ -75,7 +75,7 @@ func run(ctx context.Context, id string, execute bool, approver, reason string) 
 	if resultID == "" || jobID == "" {
 		return errors.New("result identity is unavailable")
 	}
-	plain, err := sealer.Open(encrypted, []byte("result-dlq:"+resultID))
+	plain, err := sealer.Open(encrypted, []byte("result:"+resultID))
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func run(ctx context.Context, id string, execute bool, approver, reason string) 
 	if !execute {
 		return nil
 	}
-	queueURL := strings.TrimSpace(os.Getenv("WATCHTRACE_RESULT_QUEUE_URL"))
+	queueURL := strings.TrimSpace(os.Getenv("WATCHTRACE_SQS_RESULT_QUEUE_URL"))
 	if queueURL == "" {
 		return errors.New("result queue URL required")
 	}
@@ -112,7 +112,8 @@ func run(ctx context.Context, id string, execute bool, approver, reason string) 
 		}
 	})
 	attrs := map[string]types.MessageAttributeValue{"schema_version": {DataType: aws.String("Number"), StringValue: aws.String(fmt.Sprint(result.SchemaVersion))}, "job_id": {DataType: aws.String("String"), StringValue: aws.String(jobID)}, "worker_pool_id": {DataType: aws.String("String"), StringValue: aws.String(poolID)}, "snapshot_hash": {DataType: aws.String("String"), StringValue: aws.String(result.SnapshotHash)}, "result_id": {DataType: aws.String("String"), StringValue: aws.String(resultID)}, "result_key_id": {DataType: aws.String("String"), StringValue: aws.String(result.ResultKeyID)}}
-	if _, err = client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(queueURL), MessageBody: aws.String(string(plain)), MessageDeduplicationId: aws.String(resultID), MessageGroupId: aws.String(jobID), MessageAttributes: attrs}); err != nil {
+	wireBody := base64.StdEncoding.EncodeToString(plain)
+	if _, err = client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(queueURL), MessageBody: aws.String(wireBody), MessageDeduplicationId: aws.String(resultID), MessageGroupId: aws.String(jobID), MessageAttributes: attrs}); err != nil {
 		return err
 	}
 	tx, err := db.Begin(ctx)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/watchtrace/watchtrace-platform/internal/deploymentmanifest"
 )
@@ -31,7 +32,7 @@ func main() {
 			options.BaseEndpoint = aws.String(endpoint)
 		}
 	})
-	if deploymentmanifest.VerifySQS(ctx, client, manifest) != nil {
+	if deploymentmanifest.VerifySQS(ctx, client, manifest) != nil || deploymentmanifest.VerifyIAM(ctx, iam.NewFromConfig(cfg), manifest) != nil {
 		fail()
 	}
 	fmt.Println("deployment manifest verified")

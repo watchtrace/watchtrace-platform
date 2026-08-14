@@ -2,6 +2,7 @@ package workqueue
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strconv"
 	"time"
@@ -50,8 +51,12 @@ func (d *DirectSQS) Pull(ctx context.Context, wait time.Duration) (Delivery, err
 	if attrs.WorkerPoolID != d.WorkerPoolID {
 		return Delivery{}, errors.New("wrong worker pool delivery")
 	}
+	body, err := base64.StdEncoding.DecodeString(aws.ToString(m.Body))
+	if err != nil {
+		return Delivery{}, envelope.ErrInvalid
+	}
 	count, _ := strconv.Atoi(m.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)])
-	return Delivery{Body: []byte(aws.ToString(m.Body)), Attributes: attrs, LeaseToken: aws.ToString(m.ReceiptHandle), ReceiveCount: count}, nil
+	return Delivery{Body: body, Attributes: attrs, LeaseToken: aws.ToString(m.ReceiptHandle), ReceiveCount: count}, nil
 }
 func (d *DirectSQS) Extend(ctx context.Context, msg Delivery, duration time.Duration) error {
 	_, err := d.Client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{QueueUrl: aws.String(d.JobQueueURL), ReceiptHandle: aws.String(msg.LeaseToken), VisibilityTimeout: int32(duration / time.Second)})
@@ -63,7 +68,8 @@ func (d *DirectSQS) PublishResultAndAcknowledge(ctx context.Context, msg Deliver
 		return envelope.ErrInvalid
 	}
 	attrs := envelope.ResultAttributes(parsed)
-	if _, err := d.Client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(d.ResultQueueURL), MessageBody: aws.String(string(result)), MessageDeduplicationId: aws.String(parsed.ResultID), MessageGroupId: aws.String(parsed.JobID), MessageAttributes: attributesToSQS(attrs)}); err != nil {
+	wireBody := base64.StdEncoding.EncodeToString(result)
+	if _, err := d.Client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(d.ResultQueueURL), MessageBody: aws.String(wireBody), MessageDeduplicationId: aws.String(parsed.ResultID), MessageGroupId: aws.String(parsed.JobID), MessageAttributes: attributesToSQS(attrs)}); err != nil {
 		return err
 	}
 	_, err = d.Client.DeleteMessage(ctx, &sqs.DeleteMessageInput{QueueUrl: aws.String(d.JobQueueURL), ReceiptHandle: aws.String(msg.LeaseToken)})

@@ -26,6 +26,12 @@ type Registration struct {
 
 type Service struct{ db DB }
 
+type DeletionReadiness struct {
+	SourceQueueEmpty      bool
+	DeadLetterQueueEmpty  bool
+	GatewayMappingRemoved bool
+}
+
 func New(db DB) *Service { return &Service{db: db} }
 
 func (s *Service) Register(ctx context.Context, r Registration, actor, reason string) error {
@@ -114,7 +120,7 @@ func (s *Service) Transition(ctx context.Context, id, target, actor, reason stri
 	if err != nil {
 		return err
 	}
-	if target == "revoked" {
+	if target == "revoked" || target == "deleting" {
 		_, err = tx.Exec(ctx, `UPDATE worker_pool_credentials SET status='revoked',revoked_at=CURRENT_TIMESTAMP WHERE worker_pool_id=$1 AND status IN('pending','active','retired')`, id)
 		if err != nil {
 			return err
@@ -160,8 +166,8 @@ func (s *Service) Reconcile(ctx context.Context, id string, expectedDigest []byt
 	return nil
 }
 
-func (s *Service) Delete(ctx context.Context, id, confirmation, actor, reason string) error {
-	if confirmation != "delete:"+id {
+func (s *Service) Delete(ctx context.Context, id, confirmation, actor, reason string, readiness DeletionReadiness) error {
+	if confirmation != "delete:"+id || !readiness.SourceQueueEmpty || !readiness.DeadLetterQueueEmpty || !readiness.GatewayMappingRemoved {
 		return errors.New("exact deletion confirmation required")
 	}
 	tx, err := s.db.Begin(ctx)
@@ -170,11 +176,11 @@ func (s *Service) Delete(ctx context.Context, id, confirmation, actor, reason st
 	}
 	defer tx.Rollback(context.Background())
 	var state string
-	var jobs int
-	if err = tx.QueryRow(ctx, `SELECT lifecycle_state,(SELECT count(*) FROM check_jobs WHERE worker_pool_id=$1 AND state IN('pending','pending_publish','published','running')) FROM worker_pools WHERE id=$1 FOR UPDATE`, id).Scan(&state, &jobs); err != nil {
+	var jobs, trustedCredentials int
+	if err = tx.QueryRow(ctx, `SELECT lifecycle_state,(SELECT count(*) FROM check_jobs WHERE worker_pool_id=$1 AND state IN('pending','pending_publish','published','running')),(SELECT count(*) FROM worker_pool_credentials WHERE worker_pool_id=$1 AND status<>'revoked' AND (not_after IS NULL OR not_after>CURRENT_TIMESTAMP)) FROM worker_pools WHERE id=$1 FOR UPDATE`, id).Scan(&state, &jobs, &trustedCredentials); err != nil {
 		return err
 	}
-	if state != "deleting" || jobs != 0 {
+	if state != "deleting" || jobs != 0 || trustedCredentials != 0 {
 		return errors.New("pool is not drained and deleting")
 	}
 	if err = audit(ctx, tx, id, "delete_complete", actor, reason); err != nil {
