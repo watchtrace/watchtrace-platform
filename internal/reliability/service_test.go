@@ -28,7 +28,7 @@ func TestReportWithNoExpectedHasNoRatios(t *testing.T) {
 func TestObservedStateThresholdsAndRecovery(t *testing.T) {
 	state, failures, successes := "unknown", 0, 0
 	for _, succeeded := range []bool{false, false, false, true, true} {
-		state, failures, successes = advanceObservedState(state, failures, successes, succeeded)
+		state, failures, successes = advanceObservedState(state, failures, successes, succeeded, 3, 2)
 	}
 	if state != "healthy" || failures != 0 || successes != 0 {
 		t.Fatalf("state=%s failures=%d successes=%d", state, failures, successes)

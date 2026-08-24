@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/envelope"
+	"github.com/watchtrace/watchtrace-platform/internal/incident"
 	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
 	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
@@ -125,12 +126,18 @@ j.state,j.job_type,j.organization_id::text,j.environment_id::text,j.monitor_id::
 		return true, err
 	}
 	if jobType == "scheduled" {
-		corrected, evaluationErr := reliability.EvaluateAcceptedTx(ctx, tx, monitorID, result.JobID, scheduled, expires, c.now().UTC())
+		evaluatedAt := c.now().UTC()
+		corrected, evaluationErr := reliability.EvaluateAcceptedTx(ctx, tx, monitorID, result.JobID, scheduled, expires, evaluatedAt)
 		if evaluationErr != nil {
 			return true, evaluationErr
 		}
+		if !evaluatedAt.After(expires.Add(10 * time.Minute)) {
+			if evaluationErr = incident.ApplyEvaluationTx(ctx, tx, monitorID, result.JobID, corrected, evaluatedAt); evaluationErr != nil {
+				return true, evaluationErr
+			}
+		}
 		reason := "accepted_result"
-		if corrected || c.now().UTC().After(expires.Add(10*time.Minute)) {
+		if corrected || evaluatedAt.After(expires.Add(10*time.Minute)) {
 			reason = "late_result"
 			details := "ordered state and rollup correction"
 			if !corrected {

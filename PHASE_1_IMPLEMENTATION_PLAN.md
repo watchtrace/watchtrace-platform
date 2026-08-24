@@ -532,7 +532,7 @@ Detect meaningful outages, avoid alerts from single failures, and deliver recove
 
 ### Execution packages
 
-- [ ] **P1-401 — Complete the incident lifecycle**
+- [x] **P1-401 — Complete the incident lifecycle**
 
   **Combines former tasks:** P1-401 through P1-403.
 
@@ -550,7 +550,7 @@ Detect meaningful outages, avoid alerts from single failures, and deliver recove
   **Package verification:**
   - State-transition, concurrency, duplicate-open, acknowledge, manual-resolution, and automatic-recovery tests pass.
 
-- [ ] **P1-404 — Complete durable notification delivery and integrated incident verification**
+- [x] **P1-404 — Complete durable notification delivery and integrated incident verification**
 
   **Combines former tasks:** P1-404 through P1-408.
 
@@ -574,11 +574,11 @@ Detect meaningful outages, avoid alerts from single failures, and deliver recove
 
 ### Phase 1.3 gate
 
-- [ ] Three controlled failures open exactly one incident.
-- [ ] Two controlled recovery successes resolve the incident.
-- [ ] Temporary email-provider failure does not lose the notification.
-- [ ] Restarting during pending notification work preserves retry state.
-- [ ] Incident concurrency tests preserve the one-open-incident rule.
+- [x] Three controlled failures open exactly one incident.
+- [x] Two controlled recovery successes resolve the incident.
+- [x] Temporary email-provider failure does not lose the notification.
+- [x] Restarting during pending notification work preserves retry state.
+- [x] Incident concurrency tests preserve the one-open-incident rule.
 
 ---
 

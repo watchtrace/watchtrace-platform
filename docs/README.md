@@ -26,6 +26,9 @@ Current implementation documentation:
   publication intent.
 - [`RELIABILITY_REPORTING.md`](RELIABILITY_REPORTING.md) defines expected slots,
   coverage, ordered state correction, rollups, and retention.
+- [`INCIDENTS_AND_NOTIFICATIONS.md`](INCIDENTS_AND_NOTIFICATIONS.md) defines
+  threshold incidents, timeline actions, durable email retries, and provider
+  configuration.
 - [`CHECKER.md`](CHECKER.md) defines bounded database-free execution and
   idempotent result storage.
 - [`MODULAR_WORKER.md`](MODULAR_WORKER.md) documents worker deployment and key

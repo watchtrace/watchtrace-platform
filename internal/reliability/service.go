@@ -260,6 +260,12 @@ FROM monitor_reliability_states WHERE monitor_id=$1::uuid FOR UPDATE`, monitorID
 	if err != nil {
 		return false, err
 	}
+	failureLimit, recoveryLimit := failureThreshold, recoveryThreshold
+	thresholdErr := tx.QueryRow(ctx, `SELECT failure_threshold,recovery_threshold FROM alert_rules
+WHERE monitor_id=$1::uuid AND rule_key='consecutive_failures' AND enabled`, monitorID).Scan(&failureLimit, &recoveryLimit)
+	if thresholdErr != nil && !errors.Is(thresholdErr, pgx.ErrNoRows) {
+		return false, thresholdErr
+	}
 
 	baseline := current
 	correction := accepted != nil && current.lastObservedAt != nil && current.lastObservedJob != nil &&
@@ -316,7 +322,7 @@ WHERE monitor_id=$1::uuid AND job_type='scheduled'`
 	observed, failures, successes := baseline.observed, baseline.failures, baseline.successes
 	lastObservedAt, lastObservedJob := baseline.lastObservedAt, baseline.lastObservedJob
 	for _, result := range results {
-		observed, failures, successes = advanceObservedState(observed, failures, successes, result.succeeded)
+		observed, failures, successes = advanceObservedState(observed, failures, successes, result.succeeded, failureLimit, recoveryLimit)
 		if _, err = tx.Exec(ctx, `INSERT INTO monitor_result_evaluations(
  monitor_id,job_id,scheduled_at,succeeded,observed_state,consecutive_failures,consecutive_successes)
 VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7)
@@ -387,12 +393,12 @@ VALUES($1::uuid,$2::uuid,$3,$4,$5) ON CONFLICT(monitor_id,accepted_job_id) DO NO
 	return correction, nil
 }
 
-func advanceObservedState(state string, failures, successes int, succeeded bool) (string, int, int) {
+func advanceObservedState(state string, failures, successes int, succeeded bool, failureLimit, recoveryLimit int) (string, int, int) {
 	if succeeded {
 		failures = 0
 		if state == "down" {
 			successes++
-			if successes >= recoveryThreshold {
+			if successes >= recoveryLimit {
 				return "healthy", 0, 0
 			}
 			return "down", 0, successes
@@ -400,11 +406,11 @@ func advanceObservedState(state string, failures, successes int, succeeded bool)
 		return "healthy", 0, 0
 	}
 	successes = 0
-	if failures < failureThreshold {
+	if failures < failureLimit {
 		failures++
 	}
-	if failures >= failureThreshold {
-		return "down", failureThreshold, 0
+	if failures >= failureLimit {
+		return "down", failureLimit, 0
 	}
 	return "degraded", failures, 0
 }
