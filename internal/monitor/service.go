@@ -324,18 +324,34 @@ func (s *Service) Get(ctx context.Context, userID, environmentID, monitorID stri
 	}
 
 	state := StateUnknown
-	latestSucceeded, err := queries.GetLatestScheduledMonitorResult(
-		ctx,
-		database.GetLatestScheduledMonitorResultParams{
-			OrganizationID: organizationID,
-			EnvironmentID:  environmentID,
-			MonitorID:      monitorID,
-		},
-	)
-	if err == nil {
-		state = stateFromLatestScheduledResult(latestSucceeded)
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return Detail{}, fmt.Errorf("get latest scheduled monitor result: %w", err)
+	var durableState string
+	var hasEvaluatedResult bool
+	err = s.db.QueryRow(ctx, `SELECT r.display_state,r.last_observed_scheduled_at IS NOT NULL
+FROM monitor_reliability_states r
+JOIN monitors m ON m.id=r.monitor_id
+WHERE m.organization_id=$1::uuid AND m.environment_id=$2::uuid AND m.id=$3::uuid`,
+		organizationID, environmentID, monitorID).Scan(&durableState, &hasEvaluatedResult)
+	if err == nil && hasEvaluatedResult {
+		state = State(durableState)
+	} else if err == nil || errors.Is(err, pgx.ErrNoRows) {
+		// Compatibility for results created before the ordered evaluator first
+		// runs. Once an evaluation exists, an explicit unknown state caused by
+		// a missing newest slot must not be replaced by the latest observation.
+		latestSucceeded, latestErr := queries.GetLatestScheduledMonitorResult(
+			ctx,
+			database.GetLatestScheduledMonitorResultParams{
+				OrganizationID: organizationID,
+				EnvironmentID:  environmentID,
+				MonitorID:      monitorID,
+			},
+		)
+		if latestErr == nil {
+			state = stateFromLatestScheduledResult(latestSucceeded)
+		} else if !errors.Is(latestErr, pgx.ErrNoRows) {
+			return Detail{}, fmt.Errorf("get latest scheduled monitor result: %w", latestErr)
+		}
+	} else {
+		return Detail{}, fmt.Errorf("get durable monitor state: %w", err)
 	}
 
 	rows, err := queries.ListRecentMonitorResults(ctx, database.ListRecentMonitorResultsParams{

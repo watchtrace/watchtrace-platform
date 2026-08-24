@@ -475,7 +475,7 @@ Important scheduling rules:
 
 #### 8.4.1 FIFO resources, routing, and configuration
 
-Phase 1.2 provisions the following core resources in one AWS account and Region:
+Phase 1.2 implements and validates the following core resources with LocalStack and a controlled Amazon SQS environment in one account and Region. One explicitly non-production IAM identity may be used for this validation. Phase 4 creates the separate production workload roles and verifies their trust policies.
 
 | Queue | Purpose | Starting redrive rule |
 |---|---|---:|
@@ -507,7 +507,7 @@ Worker-pool onboarding is operator-controlled in Phase 1, not a public customer 
 
 Required configuration includes the environment name, explicit AWS Region, queue names, URLs and ARNs, optional local-emulator endpoint, worker-pool routing, platform signing key ID, worker-pool encryption key ID, and result-verification key ID. Exact key material is held outside PostgreSQL where possible; PostgreSQL stores public keys, key IDs, encrypted private material only when unavoidable, and rotation state.
 
-IAM is split by responsibility:
+The target Phase 4 production IAM model is split by responsibility:
 
 - `watchtrace-{environment}-job-publisher`: send and minimum queue-attribute access on assigned job FIFO queues;
 - `watchtrace-{environment}-hosted-worker`: receive, change visibility, and delete on its assigned job FIFO, plus send on the result FIFO;
@@ -516,13 +516,13 @@ IAM is split by responsibility:
 - `watchtrace-{environment}-dlq-reconciler`: receive/delete only on the required DLQs; and
 - `watchtrace-{environment}-infrastructure-operator`: manual queue, policy, redrive, tag, and SSE-SQS administration.
 
-OCI runtime roles use temporary credentials through an approved workload-federation mechanism such as IAM Roles Anywhere. Trust is limited to the WatchTrace trust anchor/profile, AWS account, environment, and intended workload; customer-VPC workers receive no AWS role. Human infrastructure access uses federation, MFA, and an environment-scoped operator role. Permission policies name exact queue ARNs and allowed SQS actions; wildcard queue access and long-lived application access keys are not accepted for production.
+Phase 1.2 controlled validation may map all of these logical responsibilities to one operator-provided non-production profile; it does not create or approve production roles. In Phase 4, OCI runtime roles use temporary credentials through an approved workload-federation mechanism such as IAM Roles Anywhere. Trust is limited to the WatchTrace trust anchor/profile, AWS account, environment, and intended workload; customer-VPC workers receive no AWS role. Human infrastructure access uses federation, MFA, and an environment-scoped operator role. Permission policies name exact queue ARNs and allowed SQS actions; wildcard queue access and long-lived application access keys are not accepted for production.
 
 Phase 1 exposes native SQS queue metrics and application health in operator views and runbooks, but it does not define numeric CloudWatch alarm thresholds or configure SNS/email operational notifications. Those controls are implemented in Phase 4. Metrics never use job, monitor, user, or organization IDs as dimensions.
 
 #### 8.4.2 Worker-pool provisioning and drift control
 
-Base AWS resources and each customer-pool resource set are created in Phase 1 with a reviewed manual runbook. The operator records queue names, Region, URLs, ARNs, attributes, policies, role names, trust-policy fingerprints, encryption mode, redrive configuration, tags, and gateway mapping in a versioned non-secret deployment manifest. A verification command compares that manifest with PostgreSQL pool state, deployed AWS resources, and the gateway's signed configuration snapshot. A mismatch prevents activation or moves an active pool to operator attention without silently routing jobs elsewhere. Phase 4 replaces this manual process with Terraform for AWS and OCI.
+Base queue resources and each customer-pool resource set are validated in Phase 1 with a reviewed manual runbook. The operator records queue names, Region, URLs, ARNs, attributes, queue policies, encryption mode, redrive configuration, tags, and gateway mapping in a versioned non-secret deployment manifest. A verification command compares that manifest with PostgreSQL pool state, deployed queue resources, and the gateway's signed configuration snapshot. A mismatch prevents activation or moves an active pool to operator attention without silently routing jobs elsewhere. Phase 4 adds separate production role creation and role/trust/policy fingerprint verification, then replaces the manual infrastructure process with Terraform for AWS and OCI.
 
 Every provisioning, rotation, revocation, redrive, and deletion action creates an audit record. Queue deletion requires a drained queue, no non-terminal jobs, expired credentials, removal from gateway configuration, and an explicit operator confirmation.
 
@@ -587,9 +587,9 @@ The central result consumer verifies the signature, schema, job ID, snapshot has
 
 1. Inserts `health_checks` using unique `job_id` and `result_id` constraints; the first valid executed result accepted under the conflict policy wins.
 2. Marks the job completed and repairs dispatch state if publisher confirmation was missing. A valid late result may correct a provisional `expired` or `dead` job, while current monitor state changes only when scheduled-time ordering allows it.
-3. Updates monitor state in scheduled-time order.
-4. Creates or resolves an incident when required.
-5. Inserts notification-outbox work when required.
+3. Updates durable monitor evaluation state in scheduled-time order and records idempotent correction audit input.
+4. Once P1-401 installs the incident schema, creates or resolves an incident when required from that ordered state.
+5. Once P1-404 installs notification delivery, inserts uniquely keyed notification-outbox work when required.
 6. Commits before deleting the result FIFO message.
 
 A duplicate result is safe: if the stored result has the same result ID, job ID, and snapshot hash, the consumer acknowledges it without repeating incident or notification side effects. A second valid result ID for an already accepted job is a conflict: the accepted result is not overwritten, and bounded metadata plus the encrypted original message reference is quarantined for audit. Invalid results are rejected without blocking a different attempt's result ID. If PostgreSQL is unavailable, the consumer stops polling. A result that exhausts delivery for another internal reason moves to the result DLQ and triggers an urgent operational alert; it is not classified as a failed target check because it may still be recoverable.
@@ -600,7 +600,7 @@ Result arrival order never defines monitor history. The result transaction locks
 
 An expected slot has one of three evaluation values: healthy observation, failed observation, or unknown. Unknown slots do not count as success or failure and pause, rather than increment or reset, consecutive-observation counters. While the newest due slot is unknown, the displayed monitoring state is `unknown`; the last observed state remains available as context. Manual results never enter this sequence.
 
-Late executed results always repair raw history and affected hourly/daily rollups. Results arriving within ten minutes of the job deadline may also correct current state and incident evaluation. Results older than that are retained for reporting but do not rewrite customer notification history automatically. Within the correction window:
+Late executed results always repair raw history and affected hourly/daily rollups. Results arriving within ten minutes of the job deadline may also correct durable monitor evaluation state. Results older than that are retained for reporting but do not rewrite current state or customer notification history automatically. Phase 1.2 records the idempotent correction event; once P1-401 adds incidents, the same ordered transaction applies these additional rules within the correction window:
 
 - a newly proven outage opens an incident at processing time with `started_at` derived from the first qualifying scheduled failure;
 - a correction that invalidates an open incident resolves it with a `late_result_correction` event instead of deleting history;
@@ -757,7 +757,7 @@ Oracle currently documents 2 A1 OCPUs and 12 GB memory for an Always Free tenanc
 8. Dashboard APIs and React pages.
 9. Live events and polling fallback.
 10. Rollups, retention, audit records, metrics, logs, and backups.
-11. Load tests, security tests, restore test, OCI deployment, AWS SQS infrastructure, workload identity, budgets, and cross-cloud recovery exercises.
+11. Controlled load and recovery tests for the local and single-identity Amazon SQS workflow. Production restore/deployment exercises, split AWS workload identity, trust-policy assurance, and the production security suite are Phase 4 work.
 
 ### 8.13 Phase 1 completion rules
 
@@ -1346,6 +1346,8 @@ Phase 4 adopts Terraform as the infrastructure-as-code tool for both AWS and OCI
 
 Phase 4 also defines numeric operational alarm thresholds from measured load, queue-age, recovery, and capacity tests. Thresholds and evaluation periods are version controlled and reviewed with the infrastructure code. CloudWatch alarms cover SQS queue age and depth, in-flight work, DLQ depth, throttling, and AWS cost signals. CloudWatch sends alarm state changes through environment-specific Amazon SNS topics with confirmed email subscriptions and at least one independent operator destination. OCI alarms and an external readiness/scheduler-heartbeat dead-man check cover failures that AWS cannot observe. Test notifications, escalation ownership, suppression rules, and alarm recovery are exercised before commercial commitments.
 
+Phase 4 also creates separate environment-scoped AWS roles for the job publisher, hosted worker, queue gateway, result consumer, DLQ reconciler, and infrastructure operator. It verifies every role name, trust restriction, effective policy fingerprint, exact queue ARN, and allowed action against the production deployment manifest, proves customer-VPC workers receive no AWS credentials, and runs the full production security exercise suite. The single non-production identity accepted for Phase 1.2 validation must never be reused as the production workload identity.
+
 ### 11.9 Phase 4 completion rules
 
 - Billing and plan enforcement agree with usage records.
@@ -1355,6 +1357,7 @@ Phase 4 also defines numeric operational alarm thresholds from measured load, qu
 - A regional recovery exercise meets the published recovery target.
 - Customer export and deletion requests are tested.
 - Terraform manages the intended AWS and OCI production resources, existing manual resources have been imported or replaced safely, remote state is protected, and drift detection passes.
+- Separate AWS workload roles and trust policies match the production deployment manifest and pass the production security exercises.
 - Numeric CloudWatch thresholds are based on measured capacity, and CloudWatch-to-SNS email delivery plus OCI/external failure alerts pass end-to-end tests.
 - Security review finds no critical unresolved issue.
 - Any published SLA is supported by at least several months of measured availability.

@@ -31,8 +31,9 @@ import (
 
 func TestHundredTimeoutsAcrossQueueJournalsAndLedger(t *testing.T) {
 	endpoint, databaseURL := os.Getenv("WATCHTRACE_TEST_SQS_ENDPOINT"), os.Getenv("WATCHTRACE_TEST_DATABASE_URL")
-	if endpoint == "" || databaseURL == "" {
-		t.Skip("local SQS and PostgreSQL are required")
+	realAWS := os.Getenv("WATCHTRACE_TEST_AWS_SQS") == "1"
+	if databaseURL == "" || (endpoint == "" && !realAWS) {
+		t.Skip("PostgreSQL and an SQS test target are required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -41,12 +42,34 @@ func TestHundredTimeoutsAcrossQueueJournalsAndLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(db.Close)
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion("ap-south-1"), awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	region := "ap-south-1"
+	options := []func(*awsconfig.LoadOptions) error{}
+	if realAWS {
+		region = strings.TrimSpace(os.Getenv("AWS_REGION"))
+		if region == "" || endpoint != "" {
+			t.Fatal("real AWS load test requires AWS_REGION and forbids an endpoint override")
+		}
+	} else {
+		options = append(options, awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")))
+	}
+	options = append(options, awsconfig.WithRegion(region))
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, options...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := sqs.NewFromConfig(cfg, func(options *sqs.Options) { options.BaseEndpoint = aws.String(endpoint) })
-	prefix := fmt.Sprintf("watchtrace-load-%d", time.Now().UnixNano())
+	client := sqs.NewFromConfig(cfg, func(options *sqs.Options) {
+		if endpoint != "" {
+			options.BaseEndpoint = aws.String(endpoint)
+		}
+	})
+	environment := strings.TrimSpace(os.Getenv("WATCHTRACE_ENV"))
+	if environment == "" {
+		environment = "dev"
+	}
+	if environment != "dev" && environment != "stg" && environment != "prod" {
+		t.Fatal("WATCHTRACE_ENV must be dev, stg, or prod")
+	}
+	prefix := fmt.Sprintf("watchtrace-%s-p1309-load-%d", environment, time.Now().UnixNano())
 	jobDLQ := createFIFOQueue(t, ctx, client, prefix+"-jobs-dlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
 	resultDLQ := createFIFOQueue(t, ctx, client, prefix+"-results-dlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
 	jobRedrive := fmt.Sprintf(`{"deadLetterTargetArn":%q,"maxReceiveCount":5}`, jobDLQ.arn)
@@ -160,10 +183,15 @@ func TestHundredTimeoutsAcrossQueueJournalsAndLedger(t *testing.T) {
 	timingMu.Lock()
 	elapsed := lastFinish.Sub(firstStart)
 	timingMu.Unlock()
-	if elapsed > 10*time.Second {
-		t.Fatalf("100 one-second timeouts took %s; expected approximately five seconds at 20 workers", elapsed)
+	rate := float64(targetCalls.Load()) / elapsed.Seconds()
+	if realAWS {
+		if rate < 7.5 {
+			t.Fatalf("remote Amazon SQS timeout throughput %.2f checks/second is below the recorded safe floor", rate)
+		}
+	} else if elapsed > 10*time.Second {
+		t.Fatalf("100 one-second local timeout checks took %s; expected approximately five seconds at 20 workers", elapsed)
 	}
-	t.Logf("100 one-second timeout checks completed in %s at 20-worker concurrency", elapsed)
+	t.Logf("100 one-second timeout checks completed in %s at 20-worker concurrency (%.2f checks/second)", elapsed, rate)
 
 	consumer := fifo.NewResultConsumer(db, fifo.ResultSQS{Client: client, QueueURL: results.url})
 	for index := 0; index < 100; index++ {

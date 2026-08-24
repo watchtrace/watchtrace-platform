@@ -685,7 +685,7 @@ SQLite prevents repeated execution only when the same worker instance retains th
 
 AWS credentials, SQS receipt handles, HTTPS lease tokens, worker credentials, worker private keys, or platform signing keys can allow message theft, forged results, or decryption of targets and headers.
 
-**Control:** Limit direct SQS to WatchTrace-hosted workers using the environment-scoped publisher, hosted-worker, queue-gateway, result-consumer, and DLQ-reconciler roles defined in the design. Use temporary OCI workload credentials with trust restricted to the WatchTrace account, environment, trust anchor/profile, exact queue ARNs, and required actions. Customer-VPC workers use the HTTPS gateway with mTLS and receive no AWS role. Use short-lived authenticated-encrypted lease tokens, separate keys per worker pool and purpose, protected key files, rotation and revocation, secret scanning, and strict redaction. Never expose raw receipt handles or place private keys in logs, PostgreSQL plaintext, images, issues, or chat.
+**Control:** Phase 1.2 local and controlled AWS validation may use one explicitly non-production IAM identity, but it must not carry production data or be presented as production isolation. Customer-VPC workers still use the HTTPS gateway with mTLS and receive no AWS credentials. Short-lived authenticated-encrypted lease tokens, separate keys per worker pool and purpose, protected key files, rotation and revocation, secret scanning, and strict redaction remain Phase 1 controls. Phase 4 creates separate environment-scoped publisher, hosted-worker, queue-gateway, result-consumer, DLQ-reconciler, and infrastructure-operator roles; restricts temporary workload trust to the WatchTrace account, environment, trust anchor/profile, exact queue ARNs, and required actions; verifies role/trust/policy fingerprints; and runs production security exercises. Never expose raw receipt handles or place private keys in logs, PostgreSQL plaintext, images, issues, or chat.
 
 ### R-067: Cross-cloud SQS dependency can stop dispatch or increase cost
 
@@ -775,7 +775,7 @@ If every result uses `MessageDeduplicationId = job_id`, SQS may suppress a valid
 
 Results may arrive out of scheduled order or after a job was provisionally marked expired or dead. Applying only arrival order can create the wrong consecutive-failure count, open or resolve the wrong incident, and leave hourly summaries inconsistent with raw data.
 
-**Control:** Serialize evaluation per monitor, order slots by scheduled time and job ID, persist the last evaluated slot, recompute the bounded threshold window, and invalidate affected rollups. Permit incident corrections only within the documented ten-minute window; record correction events rather than deleting history or silently repeating notifications.
+**Control:** Serialize evaluation per monitor, order slots by scheduled time and job ID, persist the last evaluated slot, recompute the bounded threshold window, and invalidate affected rollups. Phase 1.2 records durable idempotent state-correction events only inside the documented ten-minute window. P1-401 applies those ordered corrections to incidents without deleting history or silently repeating notifications.
 
 ### R-077: A gateway can lose a job by accepting a malformed result
 
@@ -847,7 +847,7 @@ Customer workers may remain offline during upgrades. Publishing a schema they ca
 
 Queue, policy, database, gateway, certificate, and key operations cannot commit as one transaction. A partially created pool can leak resources, route work incorrectly, or appear usable before all controls exist.
 
-**Control:** Use explicit `provisioning`, `active`, `draining`, `revoked`, `deleting`, and `failed` states. In Phases 1–3, follow a reviewed manual runbook, record every cloud resource and security attribute in a versioned non-secret deployment manifest, verify every dependency before activation, compare actual state with the manifest, roll back partial work, audit lifecycle actions, and require drained queues plus explicit confirmation before deletion. Phase 4 imports or replaces these resources under Terraform and enables automated drift detection.
+**Control:** Use explicit `provisioning`, `active`, `draining`, `revoked`, `deleting`, and `failed` states. In Phases 1–3, follow a reviewed manual runbook, record queue resources, policies, routing, keys, and certificates in a versioned non-secret deployment manifest, verify those dependencies before activation, compare actual state with the manifest, roll back partial work, audit lifecycle actions, and require drained queues plus explicit confirmation before deletion. Phase 4 creates and verifies separate production IAM roles and trust policies, imports or replaces resources under Terraform, and enables automated drift detection.
 
 ### R-085: Restoring PostgreSQL alone can conflict with live queues and keys
 
@@ -905,7 +905,6 @@ Older names such as `checker` can hide whether scheduler, publisher, result cons
 - [ ] Cross-organization access tests pass for every resource.
 - [ ] Request, queue, worker, and response-size limits are enforced.
 - [ ] Queue names follow the `watchtrace-{environment}-...fifo` convention, one explicit AWS Region is recorded per environment, and every Phase 1 queue and DLQ uses SSE-SQS.
-- [ ] Environment-scoped IAM role names, trust restrictions, and exact queue/action permissions match the deployment manifest; customer-VPC workers have no AWS role.
 - [ ] Due scheduling, stable job insertion, immutable encrypted outbox creation, and schedule advancement commit atomically.
 - [ ] FIFO job/result queues and FIFO DLQs use explicit attributes, encryption, and least-privilege policies. Job messages use `job_id` for deduplication and grouping; results use `result_id` for deduplication and `job_id` for grouping.
 - [ ] A publisher crash after SQS acceptance is repaired by exact-message retry or result arrival; tests cover in-window suppression, post-expiry publish refusal, and forced late-duplicate handling.
@@ -968,6 +967,7 @@ Older names such as `checker` can hide whether scheduler, publisher, result cons
 - [ ] Export, retention, and deletion requests are tested.
 - [ ] Regional recovery exercises meet documented targets.
 - [ ] Terraform manages intended AWS and OCI production resources; manually created resources have been imported or safely replaced, remote state is protected, reviewed plans are required, and drift checks pass.
+- [ ] Environment-scoped IAM role names, trust restrictions, effective policy fingerprints, and exact queue/action permissions match the production deployment manifest; customer-VPC workers have no AWS role, and the production security exercises pass.
 - [ ] Numeric CloudWatch thresholds and evaluation periods are based on measured capacity and stored with the infrastructure configuration.
 - [ ] CloudWatch alarms deliver through environment-specific SNS topics to confirmed email subscriptions and an independent operator destination; OCI alarms and the external dead-man path also pass end-to-end tests.
 - [ ] Security and legal reviews are complete.
@@ -988,6 +988,7 @@ The initial beta accepts the following limitations:
 - A job already published may run after its monitor is paused or edited; it is bounded by job expiry and recorded against the scheduled monitor version.
 - Customer-VPC workers are trusted execution components with dedicated routing and keys; compromise of a worker can affect checks assigned to its pool.
 - The OCI deployment depends on AWS SQS availability, credentials, quotas, networking, and a controlled AWS budget.
+- Phase 1.2 development and controlled AWS validation may use one non-production IAM identity. Separate workload roles, trust-policy verification, and production security exercises are deferred to Phase 4; the shared validation identity is never an acceptable production configuration.
 - AWS and OCI infrastructure is provisioned through reviewed manual runbooks and a versioned deployment manifest until Terraform is introduced in Phase 4.
 - Numeric CloudWatch alarms, SNS/email infrastructure notifications, OCI alarms, and an external dead-man notification path are not provided until Phase 4; Phase 1–3 operations depend on visible health data and manual review.
 - A check that reaches dead-letter state becomes unknown coverage until an operator resolves the internal failure.

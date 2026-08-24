@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/envelope"
 	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
+	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
 	"time"
 )
@@ -124,25 +125,29 @@ j.state,j.job_type,j.organization_id::text,j.environment_id::text,j.monitor_id::
 		return true, err
 	}
 	if jobType == "scheduled" {
-		if !c.now().UTC().After(expires.Add(10 * time.Minute)) {
-			_, err = tx.Exec(ctx, `INSERT INTO monitor_evaluation_positions(monitor_id,last_scheduled_at,last_job_id,invalidated_from)
-VALUES($1::uuid,$2,$3::uuid,$2)
-ON CONFLICT(monitor_id) DO UPDATE SET
- last_scheduled_at=GREATEST(monitor_evaluation_positions.last_scheduled_at,EXCLUDED.last_scheduled_at),
- last_job_id=CASE WHEN (monitor_evaluation_positions.last_scheduled_at,monitor_evaluation_positions.last_job_id) < (EXCLUDED.last_scheduled_at,EXCLUDED.last_job_id) THEN EXCLUDED.last_job_id ELSE monitor_evaluation_positions.last_job_id END,
-	invalidated_from=LEAST(COALESCE(monitor_evaluation_positions.invalidated_from,EXCLUDED.invalidated_from),EXCLUDED.invalidated_from),updated_at=CURRENT_TIMESTAMP`, monitorID, scheduled, result.JobID)
-			if err != nil {
-				return true, err
+		corrected, evaluationErr := reliability.EvaluateAcceptedTx(ctx, tx, monitorID, result.JobID, scheduled, expires, c.now().UTC())
+		if evaluationErr != nil {
+			return true, evaluationErr
+		}
+		reason := "accepted_result"
+		if corrected || c.now().UTC().After(expires.Add(10*time.Minute)) {
+			reason = "late_result"
+			details := "ordered state and rollup correction"
+			if !corrected {
+				details = "raw and rollup correction only"
 			}
-		} else {
-			if _, err = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('late_correction',$1::uuid,$2,'raw and rollup correction only')`, result.JobID, poolID); err != nil {
+			if _, err = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('late_correction',$1::uuid,$2,$3)`, result.JobID, poolID, details); err != nil {
 				return true, err
 			}
 		}
-		if _, err = tx.Exec(ctx, `DELETE FROM monitor_rollups_hourly WHERE monitor_id=$1::uuid AND bucket_start>=date_trunc('hour',$2::timestamptz)-INTERVAL '10 minutes'`, monitorID, scheduled); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO monitor_rollup_invalidations(monitor_id,bucket_kind,bucket_start,reason)
+VALUES($1::uuid,'hourly',date_trunc('hour',$2::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',$3)
+ON CONFLICT(monitor_id,bucket_kind,bucket_start) DO UPDATE SET reason=EXCLUDED.reason,invalidated_at=CURRENT_TIMESTAMP`, monitorID, scheduled, reason); err != nil {
 			return true, err
 		}
-		if _, err = tx.Exec(ctx, `DELETE FROM monitor_rollups_daily WHERE monitor_id=$1::uuid AND bucket_start>=($2::timestamptz-INTERVAL '10 minutes')::date`, monitorID, scheduled); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO monitor_rollup_invalidations(monitor_id,bucket_kind,bucket_start,reason)
+VALUES($1::uuid,'daily',date_trunc('day',$2::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',$3)
+ON CONFLICT(monitor_id,bucket_kind,bucket_start) DO UPDATE SET reason=EXCLUDED.reason,invalidated_at=CURRENT_TIMESTAMP`, monitorID, scheduled, reason); err != nil {
 			return true, err
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/fifo"
 	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
+	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 	"github.com/watchtrace/watchtrace-platform/internal/secureheaders"
 	"log/slog"
 	"net/http"
@@ -79,7 +80,7 @@ func main() {
 	go runConsumer(ctx, consumer, logger)
 	go runDLQ(ctx, dlq, logger)
 	go runHealth(ctx, db)
-	runMaintenance(ctx, db, consumer)
+	runMaintenance(ctx, db, consumer, reliability.New(db), logger)
 }
 func runHealth(ctx context.Context, db *pgxpool.Pool) {
 	mux := http.NewServeMux()
@@ -161,17 +162,24 @@ func runConsumer(ctx context.Context, consumer *fifo.ResultConsumer, logger *slo
 	}
 }
 
-func runMaintenance(ctx context.Context, db *pgxpool.Pool, consumer *fifo.ResultConsumer) {
+func runMaintenance(ctx context.Context, db *pgxpool.Pool, consumer *fifo.ResultConsumer, reports *reliability.Service, logger *slog.Logger) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
+	maintain := func(now time.Time) {
+		_, _ = fifo.ReclaimPublisherLeases(ctx, db)
+		_, _ = consumer.SweepDeadlines(ctx)
+		_, _ = fifo.CleanupLedger(ctx, db, now)
+		if err := reports.Maintain(ctx, now); err != nil {
+			logger.Warn("reliability maintenance failed")
+		}
+	}
+	maintain(time.Now().UTC())
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			_, _ = fifo.ReclaimPublisherLeases(ctx, db)
-			_, _ = consumer.SweepDeadlines(ctx)
-			_, _ = fifo.CleanupLedger(ctx, db, time.Now())
+		case now := <-ticker.C:
+			maintain(now.UTC())
 		}
 	}
 }

@@ -1,0 +1,5 @@
+DROP TABLE monitoring_rollup_checkpoint;
+DROP TABLE monitor_rollup_invalidations;
+DROP TABLE monitor_state_correction_events;
+DROP TABLE monitor_result_evaluations;
+DROP TABLE monitor_reliability_states;

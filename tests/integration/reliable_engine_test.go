@@ -112,6 +112,35 @@ func TestReliableEngineSchemaRollback(t *testing.T) {
 	}
 }
 
+func TestReliabilityReportingSchemaRollback(t *testing.T) {
+	if os.Getenv("WATCHTRACE_EXPECT_RELIABILITY_REPORTING_SCHEMA_ABSENT") == "" {
+		t.Skip("WATCHTRACE_EXPECT_RELIABILITY_REPORTING_SCHEMA_ABSENT is not set")
+	}
+	ctx, pool := openSchedulerTestPool(t)
+	for _, table := range []string{
+		"monitor_reliability_states",
+		"monitor_result_evaluations",
+		"monitor_state_correction_events",
+		"monitor_rollup_invalidations",
+		"monitoring_rollup_checkpoint",
+	} {
+		var exists bool
+		if err := pool.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists {
+			t.Fatalf("P1-309 table %s survived rollback", table)
+		}
+	}
+	var phaseOneTwoBaseExists bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.monitor_rollups_hourly') IS NOT NULL`).Scan(&phaseOneTwoBaseExists); err != nil {
+		t.Fatal(err)
+	}
+	if !phaseOneTwoBaseExists {
+		t.Fatal("P1-306 reporting foundation was removed by P1-309 rollback")
+	}
+}
+
 type workerLoopback struct {
 	delivery workqueue.Delivery
 	result   []byte
@@ -301,5 +330,59 @@ func TestReliabilityRetentionPreservesRequiredSummaries(t *testing.T) {
 	}
 	if rawAfterRollup != 0 || hourly != 1 {
 		t.Fatalf("retention raw=%d hourly=%d", rawAfterRollup, hourly)
+	}
+
+	protectedScheduled := old.Add(time.Minute)
+	protectedJobID := insertReliabilityResult(t, ctx, pool, organizationID, environmentID, monitorID, "scheduled", protectedScheduled, true)
+	if _, err := service.RollupHour(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO monitor_rollup_invalidations(monitor_id,bucket_kind,bucket_start,reason)
+VALUES($1::uuid,'hourly',$2,'late_result')`, monitorID, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ApplyRetention(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	var protectedBeforeRepair int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM health_checks WHERE job_id=$1::uuid`, protectedJobID).Scan(&protectedBeforeRepair); err != nil || protectedBeforeRepair != 1 {
+		t.Fatalf("invalidated raw result count=%d error=%v", protectedBeforeRepair, err)
+	}
+	if repaired, err := service.RepairInvalidated(ctx, 1); err != nil || repaired != 1 {
+		t.Fatalf("retention repair=%d error=%v", repaired, err)
+	}
+	if _, err := service.ApplyRetention(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	var protectedAfterRepair int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM health_checks WHERE job_id=$1::uuid`, protectedJobID).Scan(&protectedAfterRepair); err != nil || protectedAfterRepair != 0 {
+		t.Fatalf("repaired raw result count=%d error=%v", protectedAfterRepair, err)
+	}
+
+	hourlyOld := now.Add(-91 * 24 * time.Hour)
+	dailyExpired := now.AddDate(-1, 0, -1)
+	if _, err := pool.Exec(ctx, `INSERT INTO monitor_rollups_hourly(
+organization_id,environment_id,monitor_id,bucket_start,expected_checks,observed_checks,successful_checks,unknown_checks,total_duration_microseconds)
+VALUES($1::uuid,$2::uuid,$3::uuid,$4,1,1,1,0,10)`, organizationID, environmentID, monitorID, hourlyOld); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO monitor_rollups_daily(
+organization_id,environment_id,monitor_id,bucket_start,expected_checks,observed_checks,successful_checks,unknown_checks,total_duration_microseconds)
+VALUES($1::uuid,$2::uuid,$3::uuid,$4::date,1,1,1,0,10),
+      ($1::uuid,$2::uuid,$3::uuid,$5::date,1,1,1,0,10)`, organizationID, environmentID, monitorID, hourlyOld, dailyExpired); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ApplyRetention(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	var oldHourly, retainedDaily, expiredDaily int
+	if err := pool.QueryRow(ctx, `SELECT
+(SELECT count(*) FROM monitor_rollups_hourly WHERE monitor_id=$1::uuid AND bucket_start=$2),
+(SELECT count(*) FROM monitor_rollups_daily WHERE monitor_id=$1::uuid AND bucket_start=$2::date),
+(SELECT count(*) FROM monitor_rollups_daily WHERE monitor_id=$1::uuid AND bucket_start=$3::date)`, monitorID, hourlyOld, dailyExpired).Scan(&oldHourly, &retainedDaily, &expiredDaily); err != nil {
+		t.Fatal(err)
+	}
+	if oldHourly != 0 || retainedDaily != 1 || expiredDaily != 0 {
+		t.Fatalf("retention old hourly=%d retained daily=%d expired daily=%d", oldHourly, retainedDaily, expiredDaily)
 	}
 }

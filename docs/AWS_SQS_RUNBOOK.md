@@ -1,6 +1,6 @@
 # Phase 1 SQS provisioning and verification
 
-Phase 1 uses a reviewed manual AWS procedure and a versioned, non-secret deployment manifest. Terraform, numeric CloudWatch alarms, SNS topics, and infrastructure email alerts are deliberately deferred to Phase 4.
+Phase 1.2 uses a reviewed manual AWS procedure and a versioned, non-secret deployment manifest to validate FIFO queue behavior with one operator-provided non-production IAM identity. Separate workload-role creation, trust-policy verification, production security exercises, Terraform, numeric CloudWatch alarms, SNS topics, and infrastructure email alerts are deferred to Phase 4.
 
 Use one explicit Region for an environment (`ap-south-1` is the reference Region). Never place access keys, session tokens, receipt handles, private keys, certificate private material, or decrypted monitor data in the manifest.
 
@@ -19,17 +19,17 @@ SQS message bodies are UTF-8 text. WatchTrace therefore base64-encodes the seale
 | `watchtrace-{environment}-check-jobs-hosted-dlq.fifo` | 14 days | 0 | 0 | none |
 | `watchtrace-{environment}-check-results-dlq.fifo` | 14 days | 0 | 0 | none |
 
-Restrict each DLQ's `RedriveAllowPolicy` to its one source queue. Record the returned URL and ARN, the exact attributes, redrive policy, redrive-allow sources, tags, queue-policy fingerprint, and role/trust/policy fingerprints in a copy of `deploy/aws/phase1-sqs.manifest.example.json`. Replace every placeholder fingerprint with the SHA-256 of normalized reviewed JSON. The verifier intentionally rejects missing inventory and compares SQS and IAM directly.
+Restrict each DLQ's `RedriveAllowPolicy` to its one source queue. For Phase 1.2, record the returned URL and ARN, exact attributes, redrive policy, redrive-allow sources, tags, and queue-policy fingerprint. The controlled AWS FIFO/DLQ integration test verifies those behaviors with the configured non-production profile. The manifest's role/trust/policy fields and the IAM verifier are retained for the Phase 4 production-role rollout; they are not a P1-306 completion requirement.
 
-Run the verifier with the AWS SDK default credential chain:
+During Phase 4 production-role rollout, run the full queue-and-IAM verifier with the AWS SDK default credential chain:
 
 ```text
 go run ./cmd/queue-admin path/to/environment-manifest.json
 ```
 
-For LocalStack only, additionally set `WATCHTRACE_SQS_ENDPOINT`. Production must not set that endpoint and should supply temporary workload-role credentials through the default chain.
+For LocalStack only, additionally set `WATCHTRACE_SQS_ENDPOINT`. Controlled Phase 1.2 Amazon SQS validation uses one non-production profile through the default chain. Production must not set an endpoint override and, beginning in Phase 4, uses separate temporary workload-role credentials.
 
-## Least-privilege roles
+## Phase 4 least-privilege roles
 
 - job publisher: `SendMessage` and the minimum queue-attribute read on assigned job queues;
 - hosted worker: receive/change visibility/delete on its job queue and send on the result queue;

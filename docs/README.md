@@ -24,6 +24,8 @@ Current implementation documentation:
   encrypted custom headers, current-state semantics, and outbound safety.
 - [`SCHEDULER.md`](SCHEDULER.md) defines atomic FIFO scheduling and immutable
   publication intent.
+- [`RELIABILITY_REPORTING.md`](RELIABILITY_REPORTING.md) defines expected slots,
+  coverage, ordered state correction, rollups, and retention.
 - [`CHECKER.md`](CHECKER.md) defines bounded database-free execution and
   idempotent result storage.
 - [`MODULAR_WORKER.md`](MODULAR_WORKER.md) documents worker deployment and key
