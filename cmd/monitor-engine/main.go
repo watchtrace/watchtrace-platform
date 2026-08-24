@@ -5,11 +5,13 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/fifo"
+	"github.com/watchtrace/watchtrace-platform/internal/operations"
 	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
 	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 	"github.com/watchtrace/watchtrace-platform/internal/secureheaders"
@@ -18,6 +20,8 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -75,25 +79,39 @@ func main() {
 	publisher := fifo.NewPublisher(db, fifo.SQSSender{Client: client})
 	consumer := fifo.NewResultConsumerWithQuarantine(db, fifo.ResultSQS{Client: client, QueueURL: required("WATCHTRACE_SQS_RESULT_QUEUE_URL")}, quarantineSealer)
 	dlq := fifo.NewDLQReconciler(db, &fifo.SQSDLQSource{Client: client, JobDLQURL: required("WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL"), ResultDLQURL: required("WATCHTRACE_SQS_RESULT_DLQ_URL")}, quarantineSealer)
-	go runScheduler(ctx, scheduler, logger)
-	go runPublisher(ctx, publisher, logger)
-	go runConsumer(ctx, consumer, logger)
-	go runDLQ(ctx, dlq, logger)
-	go runHealth(ctx, db)
-	runMaintenance(ctx, db, consumer, reliability.New(db), logger)
+	queueURLs := operations.QueueURLs{Jobs: required("WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL"), Results: required("WATCHTRACE_SQS_RESULT_QUEUE_URL"), JobDLQ: required("WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL"), ResultDLQ: required("WATCHTRACE_SQS_RESULT_DLQ_URL")}
+	operationsService := operations.NewWithSQS(db, client, queueURLs)
+	var workers sync.WaitGroup
+	start := func(run func()) { workers.Add(1); go func() { defer workers.Done(); run() }() }
+	start(func() { runScheduler(ctx, scheduler, logger) })
+	start(func() { runPublisher(ctx, publisher, logger) })
+	start(func() { runConsumer(ctx, consumer, logger) })
+	start(func() { runDLQ(ctx, dlq, logger) })
+	start(func() { runHealth(ctx, db, operationsService) })
+	runMaintenance(ctx, db, consumer, reliability.New(db), operationsService, logger)
+	done := make(chan struct{})
+	go func() { workers.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		logger.Warn("monitor engine shutdown deadline reached")
+	}
 }
-func runHealth(ctx context.Context, db *pgxpool.Pool) {
+func runHealth(ctx context.Context, db *pgxpool.Pool, operationsService *operations.Service) {
+	var ready atomic.Bool
+	ready.Store(true)
+	go func() { <-ctx.Done(); ready.Store(false) }()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, r *http.Request) {
-		if db.Ping(r.Context()) != nil {
-			http.Error(w, "database_unavailable", 503)
+		if !ready.Load() || db.Ping(r.Context()) != nil {
+			http.Error(w, "not_ready", 503)
 			return
 		}
 		w.WriteHeader(200)
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		metrics, err := fifo.ReadMetrics(r.Context(), db, time.Now())
+		metrics, err := operationsService.Read(r.Context())
 		if err != nil {
 			http.Error(w, "metrics_unavailable", 503)
 			return
@@ -116,9 +134,9 @@ func runDLQ(ctx context.Context, reconciler *fifo.DLQReconciler, logger *slog.Lo
 		worked, err := reconciler.ReconcileNext(ctx)
 		if err != nil {
 			logger.Warn("DLQ reconciliation failed")
-			time.Sleep(time.Second)
+			wait(ctx, time.Second)
 		} else if !worked {
-			time.Sleep(time.Second)
+			wait(ctx, time.Second)
 		}
 	}
 }
@@ -143,9 +161,9 @@ func runPublisher(ctx context.Context, publisher *fifo.Publisher, logger *slog.L
 		worked, err := publisher.PublishNext(ctx)
 		if err != nil {
 			logger.Warn("publish failed")
-			time.Sleep(time.Second)
+			wait(ctx, time.Second)
 		} else if !worked {
-			time.Sleep(100 * time.Millisecond)
+			wait(ctx, 100*time.Millisecond)
 		}
 	}
 }
@@ -155,22 +173,29 @@ func runConsumer(ctx context.Context, consumer *fifo.ResultConsumer, logger *slo
 		worked, err := consumer.ConsumeNext(ctx)
 		if err != nil {
 			logger.Warn("result consume failed")
-			time.Sleep(time.Second)
+			wait(ctx, time.Second)
 		} else if !worked {
-			time.Sleep(100 * time.Millisecond)
+			wait(ctx, 100*time.Millisecond)
 		}
 	}
 }
 
-func runMaintenance(ctx context.Context, db *pgxpool.Pool, consumer *fifo.ResultConsumer, reports *reliability.Service, logger *slog.Logger) {
+func runMaintenance(ctx context.Context, db *pgxpool.Pool, consumer *fifo.ResultConsumer, reports *reliability.Service, operationsService *operations.Service, logger *slog.Logger) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	maintain := func(now time.Time) {
-		_, _ = fifo.ReclaimPublisherLeases(ctx, db)
-		_, _ = consumer.SweepDeadlines(ctx)
-		_, _ = fifo.CleanupLedger(ctx, db, now)
+		started := time.Now().UTC()
+		leased, firstErr := fifo.ReclaimPublisherLeases(ctx, db)
+		expired, secondErr := consumer.SweepDeadlines(ctx)
+		deleted, thirdErr := fifo.CleanupLedger(ctx, db, now)
+		queueErr := errors.Join(firstErr, secondErr, thirdErr)
+		_ = operationsService.Record(context.Background(), "queue_maintenance", started, leased+expired+deleted, queueErr)
+		started = time.Now().UTC()
 		if err := reports.Maintain(ctx, now); err != nil {
 			logger.Warn("reliability maintenance failed")
+			_ = operationsService.Record(context.Background(), "rollup_retention", started, 0, err)
+		} else {
+			_ = operationsService.Record(context.Background(), "rollup_retention", started, 0, nil)
 		}
 	}
 	maintain(time.Now().UTC())
@@ -181,6 +206,15 @@ func runMaintenance(ctx context.Context, db *pgxpool.Pool, consumer *fifo.Result
 		case now := <-ticker.C:
 			maintain(now.UTC())
 		}
+	}
+}
+
+func wait(ctx context.Context, duration time.Duration) {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
 func readKey(path string) ([]byte, error) {

@@ -284,6 +284,7 @@ WHERE organization_id = $1::text::uuid
   AND environment_id = $2::text::uuid
   AND deleted_at IS NULL
 ORDER BY created_at, id
+LIMIT 100
 `
 
 type ListEnvironmentMonitorsParams struct {

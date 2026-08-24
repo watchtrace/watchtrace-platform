@@ -49,3 +49,18 @@ func TestJournalRejectsJobIDSnapshotConflictBeforeExecution(t *testing.T) {
 		t.Fatal("conflicting snapshot was accepted")
 	}
 }
+
+func TestJournalMetricsExposePendingReplayHealth(t *testing.T) {
+	j, err := Open(filepath.Join(t.TempDir(), "journal.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	if err = j.Accept(context.Background(), "pending-job", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := j.Metrics(context.Background())
+	if err != nil || metrics.Accepted != 1 || metrics.Completed != 0 || metrics.OldestAcceptedAgeSeconds < 0 {
+		t.Fatalf("metrics=%+v err=%v", metrics, err)
+	}
+}

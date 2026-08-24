@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -23,8 +24,9 @@ const (
 type requestIDContextKey struct{}
 
 var (
-	requestIDPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
-	fallbackIDCounter atomic.Uint64
+	requestIDPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	safeRecordIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+	fallbackIDCounter   atomic.Uint64
 )
 
 func requestIDMiddleware() gin.HandlerFunc {
@@ -91,14 +93,21 @@ func accessLogMiddleware(logger *slog.Logger) gin.HandlerFunc {
 			level = slog.LevelWarn
 		}
 
-		logger.Log(c.Request.Context(), level, "request completed",
+		attributes := []any{
 			"component", "http",
 			"request_id", RequestID(c),
 			"method", c.Request.Method,
 			"route", route,
 			"status", c.Writer.Status(),
 			"duration_ms", time.Since(startedAt).Milliseconds(),
-		)
+		}
+		keys := map[string]string{"orgId": "organization_id", "projectId": "project_id", "environmentId": "environment_id", "monitorId": "monitor_id", "incidentId": "incident_id", "memberId": "member_id"}
+		for _, parameter := range c.Params {
+			if key := keys[parameter.Key]; key != "" && safeRecordIDPattern.MatchString(parameter.Value) {
+				attributes = append(attributes, key, strings.ToLower(parameter.Value))
+			}
+		}
+		logger.Log(c.Request.Context(), level, "request completed", attributes...)
 	}
 }
 

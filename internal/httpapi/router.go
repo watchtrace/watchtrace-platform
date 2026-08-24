@@ -10,13 +10,17 @@ import (
 
 // Options contains the dependencies used by the HTTP router.
 type Options struct {
-	Logger           *slog.Logger
-	ReadinessCheck   func(context.Context) error
-	AuthService      AuthenticationService
-	Authenticator    SessionAuthenticator
-	OwnershipService OwnershipService
-	MonitorService   MonitorService
-	SecureCookies    bool
+	Logger            *slog.Logger
+	ReadinessCheck    func(context.Context) error
+	AuthService       AuthenticationService
+	Authenticator     SessionAuthenticator
+	OwnershipService  OwnershipService
+	MonitorService    MonitorService
+	BackendService    BackendViewService
+	RealtimeService   RealtimeService
+	OperationsService OperationsService
+	SecureCookies     bool
+	RateLimiter       *RateLimiter
 }
 
 // NewRouter assembles the HTTP routes owned by the API command.
@@ -35,6 +39,11 @@ func NewRouter(options Options) *gin.Engine {
 		accessLogMiddleware(logger),
 		recoveryMiddleware(logger),
 	)
+	limiter := options.RateLimiter
+	if limiter == nil {
+		limiter = NewRateLimiter(RateLimits{})
+	}
+	router.Use(limiter.Middleware())
 
 	liveness := func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
@@ -55,11 +64,26 @@ func NewRouter(options Options) *gin.Engine {
 	if options.AuthService != nil {
 		registerAuthRoutes(router, options.AuthService, options.SecureCookies)
 	}
+	if options.Authenticator != nil {
+		registerCurrentUserRoute(router, options.Authenticator)
+	}
 	if options.Authenticator != nil && options.OwnershipService != nil {
 		registerOwnershipRoutes(router, options.Authenticator, options.OwnershipService)
+		if management, ok := options.OwnershipService.(OwnershipManagementService); ok {
+			registerTenantManagementRoutes(router, options.Authenticator, management)
+		}
 	}
 	if options.Authenticator != nil && options.MonitorService != nil {
 		registerMonitorRoutes(router, options.Authenticator, options.MonitorService)
+	}
+	if options.Authenticator != nil && options.BackendService != nil {
+		registerBackendViewRoutes(router, options.Authenticator, options.BackendService)
+	}
+	if options.Authenticator != nil && options.RealtimeService != nil {
+		registerEventRoutes(router, options.Authenticator, options.RealtimeService)
+	}
+	if options.OperationsService != nil {
+		registerOperationsRoute(router, options.OperationsService)
 	}
 
 	router.NoRoute(func(c *gin.Context) {

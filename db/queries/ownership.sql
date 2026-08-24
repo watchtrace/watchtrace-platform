@@ -41,7 +41,8 @@ SELECT users.id::text AS user_id, users.email, org_members.role,
 FROM org_members
 JOIN users ON users.id = org_members.user_id
 WHERE org_members.organization_id = sqlc.arg(organization_id)::text::uuid
-ORDER BY org_members.created_at, users.id;
+ORDER BY org_members.created_at, users.id
+LIMIT 100;
 
 -- name: ExistingOrganizationMemberByEmail :one
 SELECT EXISTS (

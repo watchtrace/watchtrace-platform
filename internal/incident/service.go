@@ -25,19 +25,19 @@ type DB interface {
 }
 
 type Incident struct {
-	ID                   string
-	OrganizationID       string
-	EnvironmentID        string
-	MonitorID            string
-	Status               string
-	StartedAt            time.Time
-	OpenedAt             time.Time
-	AcknowledgedAt       *time.Time
-	AcknowledgedByUserID *string
-	ResolvedAt           *time.Time
-	ResolvedByUserID     *string
-	ResolutionKind       *string
-	ResolutionReason     *string
+	ID                   string     `json:"id"`
+	OrganizationID       string     `json:"organization_id"`
+	EnvironmentID        string     `json:"environment_id"`
+	MonitorID            string     `json:"monitor_id"`
+	Status               string     `json:"status"`
+	StartedAt            time.Time  `json:"started_at"`
+	OpenedAt             time.Time  `json:"opened_at"`
+	AcknowledgedAt       *time.Time `json:"acknowledged_at"`
+	AcknowledgedByUserID *string    `json:"acknowledged_by_user_id"`
+	ResolvedAt           *time.Time `json:"resolved_at"`
+	ResolvedByUserID     *string    `json:"resolved_by_user_id"`
+	ResolutionKind       *string    `json:"resolution_kind"`
+	ResolutionReason     *string    `json:"resolution_reason"`
 }
 
 type Service struct {
@@ -181,6 +181,10 @@ VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::uuid,$7::uuid,$8,$9)
 ON CONFLICT(incident_id,event_key) DO UPDATE SET event_key=EXCLUDED.event_key
 RETURNING id::text`, organizationID, environmentID, incidentID, eventKey, eventType,
 		actorUserID, source, nullableReason(reason), now).Scan(&eventID)
+	if err != nil {
+		return "", err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO api_refresh_events(organization_id,environment_id,event_type,resource_type,resource_id) VALUES($1::uuid,$2::uuid,'incident.changed','incident',$3::uuid)`, organizationID, environmentID, incidentID)
 	return eventID, err
 }
 

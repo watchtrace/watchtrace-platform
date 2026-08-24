@@ -243,6 +243,7 @@ FROM org_members
 JOIN users ON users.id = org_members.user_id
 WHERE org_members.organization_id = $1::text::uuid
 ORDER BY org_members.created_at, users.id
+LIMIT 100
 `
 
 type ListOrganizationMembersRow struct {

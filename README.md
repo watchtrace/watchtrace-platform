@@ -129,6 +129,12 @@ project, and production environment atomically with `POST
 /api/v1/organizations`; see
 [`docs/OWNERSHIP_API.md`](docs/OWNERSHIP_API.md).
 
+All Phase 1 account, tenant, monitoring, reporting, incident, notification,
+and live-refresh APIs are documented in the validated
+[`customer-v1` OpenAPI contract](api/customer-v1.openapi.yaml). Operational
+bounds, polling recovery, maintenance, and shutdown behavior are summarized in
+[`docs/BACKEND_CONTRACT.md`](docs/BACKEND_CONTRACT.md).
+
 Authenticated monitor creation, listing, and bounded state/result reads are
 available under `/api/v1/environments/{environmentId}/monitors`. See
 [`docs/MONITORS.md`](docs/MONITORS.md) for defaults, limits, tenant rules,

@@ -43,9 +43,11 @@ type defaultOwnershipResponse struct {
 }
 
 type organizationResponse struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Slug string `json:"slug"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Slug           string   `json:"slug"`
+	Role           string   `json:"role"`
+	AllowedActions []string `json:"allowed_actions"`
 }
 
 type membershipResponse struct {
@@ -55,18 +57,22 @@ type membershipResponse struct {
 }
 
 type projectResponse struct {
-	ID             string `json:"id"`
-	OrganizationID string `json:"organization_id"`
-	Name           string `json:"name"`
-	Description    string `json:"description"`
+	ID             string   `json:"id"`
+	OrganizationID string   `json:"organization_id"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	Role           string   `json:"role"`
+	AllowedActions []string `json:"allowed_actions"`
 }
 
 type environmentResponse struct {
-	ID             string `json:"id"`
-	OrganizationID string `json:"organization_id"`
-	ProjectID      string `json:"project_id"`
-	Name           string `json:"name"`
-	Type           string `json:"type"`
+	ID             string   `json:"id"`
+	OrganizationID string   `json:"organization_id"`
+	ProjectID      string   `json:"project_id"`
+	Name           string   `json:"name"`
+	Type           string   `json:"type"`
+	Role           string   `json:"role"`
+	AllowedActions []string `json:"allowed_actions"`
 }
 
 type invitationRequest struct {
@@ -195,6 +201,7 @@ func createDefaultOwnership(service OwnershipService) gin.HandlerFunc {
 		c.JSON(http.StatusCreated, defaultOwnershipResponse{
 			Organization: organizationResponse{
 				ID: result.Organization.ID, Name: result.Organization.Name, Slug: result.Organization.Slug,
+				Role: result.Membership.Role, AllowedActions: authorization.AllowedActions(authorization.Role(result.Membership.Role)),
 			},
 			Membership: membershipResponse{
 				OrganizationID: result.Membership.OrganizationID,
@@ -206,6 +213,8 @@ func createDefaultOwnership(service OwnershipService) gin.HandlerFunc {
 				OrganizationID: result.Project.OrganizationID,
 				Name:           result.Project.Name,
 				Description:    result.Project.Description,
+				Role:           result.Membership.Role,
+				AllowedActions: authorization.AllowedActions(authorization.Role(result.Membership.Role)),
 			},
 			Environment: environmentResponse{
 				ID:             result.Environment.ID,
@@ -213,6 +222,8 @@ func createDefaultOwnership(service OwnershipService) gin.HandlerFunc {
 				ProjectID:      result.Environment.ProjectID,
 				Name:           result.Environment.Name,
 				Type:           result.Environment.EnvironmentType,
+				Role:           result.Membership.Role,
+				AllowedActions: authorization.AllowedActions(authorization.Role(result.Membership.Role)),
 			},
 		})
 	}
@@ -234,6 +245,14 @@ func respondOwnershipError(c *gin.Context, err error) {
 		RespondError(c, http.StatusBadRequest, "invalid_invitation", "a valid unused invitation is required")
 	case errors.Is(err, ownership.ErrEmailNotVerified):
 		RespondError(c, http.StatusForbidden, "email_not_verified", "verify your email before accepting invitations")
+	case errors.Is(err, ownership.ErrProjectNotFound):
+		RespondError(c, http.StatusNotFound, "project_not_found", "project not found")
+	case errors.Is(err, ownership.ErrEnvironmentNotFound):
+		RespondError(c, http.StatusNotFound, "environment_not_found", "environment not found")
+	case errors.Is(err, ownership.ErrMemberNotFound):
+		RespondError(c, http.StatusNotFound, "member_not_found", "member not found")
+	case errors.Is(err, ownership.ErrDeleteConflict):
+		RespondError(c, http.StatusConflict, "resource_not_empty", "resource must be empty before deletion")
 	default:
 		RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 	}

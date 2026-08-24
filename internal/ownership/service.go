@@ -224,6 +224,11 @@ func (s *Service) AcceptInvitation(ctx context.Context, user auth.User, token st
 	if err != nil {
 		return Membership{}, fmt.Errorf("accept organization invitation: %w", err)
 	}
+	if created == 1 {
+		if err = recordTenantChange(ctx, tx, stored.OrganizationID, nil, user.ID, "membership.created", "membership", user.ID); err != nil {
+			return Membership{}, fmt.Errorf("record invitation acceptance: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Membership{}, fmt.Errorf("commit invitation acceptance: %w", err)
 	}
@@ -311,6 +316,9 @@ func (s *Service) CreateDefault(
 	})
 	if err != nil {
 		return DefaultResult{}, fmt.Errorf("create production environment: %w", err)
+	}
+	if err = recordTenantChange(ctx, tx, organization.ID, &environment.ID, userID, "environment.created", "environment", environment.ID); err != nil {
+		return DefaultResult{}, fmt.Errorf("record ownership creation: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

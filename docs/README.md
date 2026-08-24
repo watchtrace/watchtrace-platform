@@ -16,6 +16,8 @@ Current implementation documentation:
   and short-lived local-development bearer session contract.
 - [`API_CONVENTIONS.md`](API_CONVENTIONS.md) defines request IDs, error
   envelopes, JSON validation, health endpoints, and safe request logging.
+- [`BACKEND_CONTRACT.md`](BACKEND_CONTRACT.md) maps the frozen Phase 1 customer
+  contract, bounds, SSE recovery, health, maintenance, and shutdown behavior.
 - [`OWNERSHIP_SCHEMA.md`](OWNERSHIP_SCHEMA.md) documents the Phase 1 account
   and tenant-ownership tables and their database-enforced isolation rules.
 - [`OWNERSHIP_API.md`](OWNERSHIP_API.md) defines the authenticated, atomic
@@ -38,6 +40,8 @@ Current implementation documentation:
   provisioning, least-privilege roles, manifest verification, and recovery.
 - [`../api/worker-v1.openapi.yaml`](../api/worker-v1.openapi.yaml) is the
   independent current/previous HTTPS worker protocol contract.
+- [`../api/customer-v1.openapi.yaml`](../api/customer-v1.openapi.yaml) is the
+  validated Phase 1 customer API and SSE contract consumed by the React app.
 
 Use this directory for documentation introduced by later tasks, including
 architecture decision records, operations runbooks, API guides, and deployment

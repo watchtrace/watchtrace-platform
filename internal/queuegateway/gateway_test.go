@@ -10,9 +10,11 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,10 +26,11 @@ type fakeTransport struct {
 	delivery  workqueue.Delivery
 	published []byte
 	acked     bool
+	pullErr   error
 }
 
 func (f *fakeTransport) Pull(context.Context, time.Duration) (workqueue.Delivery, error) {
-	return f.delivery, nil
+	return f.delivery, f.pullErr
 }
 func (f *fakeTransport) Extend(context.Context, workqueue.Delivery, time.Duration) error { return nil }
 func (f *fakeTransport) PublishResultAndAcknowledge(_ context.Context, _ workqueue.Delivery, result []byte) error {
@@ -83,6 +86,46 @@ func TestGatewayAuthenticatesLeaseAndPublishesBeforeAcknowledging(t *testing.T) 
 	handler.ServeHTTP(tamperedResponse, tampered)
 	if tamperedResponse.Code < 400 {
 		t.Fatal("tampered lease request was accepted")
+	}
+}
+
+func TestGatewayExposesSafeReadinessAndHealth(t *testing.T) {
+	public, _, _ := ed25519.GenerateKey(rand.Reader)
+	transport := &fakeTransport{}
+	gateway, err := New([]Pool{{ID: "pool-a", ResultKeyID: "result-v1", Transport: transport, ResultPublic: public}}, bytes.Repeat([]byte{1}, 32), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/health/live", "/health/ready"} {
+		response := httptest.NewRecorder()
+		gateway.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d", path, response.Code)
+		}
+	}
+	response := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/json" || !strings.Contains(response.Body.String(), `"configured_pools":1`) {
+		t.Fatalf("metrics status=%d body=%s", response.Code, response.Body.String())
+	}
+	now := time.Now().UTC()
+	gateway.now = func() time.Time { return now }
+	transport.pullErr = errors.New("queue unavailable")
+	failed := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(failed, authenticatedRequest(http.MethodPost, "/v1/jobs/pull", nil, "pool-a"))
+	if failed.Code != http.StatusServiceUnavailable {
+		t.Fatalf("failed pull status=%d", failed.Code)
+	}
+	notReady := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(notReady, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
+	if notReady.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status=%d", notReady.Code)
+	}
+	now = now.Add(6 * time.Second)
+	retryReady := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(retryReady, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
+	if retryReady.Code != http.StatusOK {
+		t.Fatalf("retry readiness status=%d", retryReady.Code)
 	}
 }
 

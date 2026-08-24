@@ -158,6 +158,9 @@ ON CONFLICT(monitor_id,bucket_kind,bucket_start) DO UPDATE SET reason=EXCLUDED.r
 			return true, err
 		}
 	}
+	if _, err = tx.Exec(ctx, `INSERT INTO api_refresh_events(organization_id,environment_id,event_type,resource_type,resource_id) VALUES($1::uuid,$2::uuid,'check.accepted','check',$3::uuid)`, organizationID, environmentID, result.JobID); err != nil {
+		return true, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return true, err
 	}

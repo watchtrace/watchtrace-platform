@@ -79,6 +79,19 @@ func TestAccessLogDoesNotExposeRequestSecrets(t *testing.T) {
 	}
 }
 
+func TestAccessLogIncludesOnlyValidatedRecordIdentifiers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var logs bytes.Buffer
+	router := NewRouter(Options{Logger: testLogger(&logs)})
+	router.GET("/records/:environmentId/:monitorId", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	request := httptest.NewRequest(http.MethodGet, "/records/550e8400-e29b-41d4-a716-446655440000/not-a-record-secret", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if output := logs.String(); !strings.Contains(output, `"environment_id":"550e8400-e29b-41d4-a716-446655440000"`) || strings.Contains(output, "not-a-record-secret") {
+		t.Fatalf("unsafe record logging: %s", output)
+	}
+}
+
 func TestPanicRecoveryDoesNotExposePanicValue(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const panicSecret = "panic-secret-must-not-escape"

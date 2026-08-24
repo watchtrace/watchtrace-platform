@@ -36,6 +36,7 @@ $previousExpectedMembershipSchemaAbsent = $env:WATCHTRACE_EXPECT_MEMBERSHIP_SCHE
 $previousExpectedReliableEngineSchemaAbsent = $env:WATCHTRACE_EXPECT_RELIABLE_ENGINE_SCHEMA_ABSENT
 $previousExpectedReliabilityReportingSchemaAbsent = $env:WATCHTRACE_EXPECT_RELIABILITY_REPORTING_SCHEMA_ABSENT
 $previousExpectedIncidentNotificationSchemaAbsent = $env:WATCHTRACE_EXPECT_INCIDENT_NOTIFICATION_SCHEMA_ABSENT
+$previousExpectedBackendPhase14SchemaAbsent = $env:WATCHTRACE_EXPECT_BACKEND_PHASE14_SCHEMA_ABSENT
 
 function Invoke-Compose {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
@@ -83,7 +84,7 @@ try {
 
     Invoke-Go run ./cmd/migrate up
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 13 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 14 (clean)") {
         throw "Unexpected migration version after up: $version"
     }
 
@@ -91,8 +92,17 @@ try {
 
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 12 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 13 (clean)") {
         throw "Unexpected migration version after down: $version"
+    }
+    $env:WATCHTRACE_EXPECT_BACKEND_PHASE14_SCHEMA_ABSENT = "1"
+    Invoke-Go test ./tests/integration -run '^TestBackendPhase14SchemaRollback$' -count=1
+    $env:WATCHTRACE_EXPECT_BACKEND_PHASE14_SCHEMA_ABSENT = $previousExpectedBackendPhase14SchemaAbsent
+
+    Invoke-Go run ./cmd/migrate down
+    $version = (& go run ./cmd/migrate version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 12 (clean)") {
+        throw "Unexpected migration version after second down: $version"
     }
     $env:WATCHTRACE_EXPECT_INCIDENT_NOTIFICATION_SCHEMA_ABSENT = "1"
     Invoke-Go test ./tests/integration -run '^TestIncidentNotificationSchemaRollback$' -count=1
@@ -187,4 +197,5 @@ finally {
     $env:WATCHTRACE_EXPECT_RELIABLE_ENGINE_SCHEMA_ABSENT = $previousExpectedReliableEngineSchemaAbsent
 	$env:WATCHTRACE_EXPECT_RELIABILITY_REPORTING_SCHEMA_ABSENT = $previousExpectedReliabilityReportingSchemaAbsent
 	$env:WATCHTRACE_EXPECT_INCIDENT_NOTIFICATION_SCHEMA_ABSENT = $previousExpectedIncidentNotificationSchemaAbsent
+	$env:WATCHTRACE_EXPECT_BACKEND_PHASE14_SCHEMA_ABSENT = $previousExpectedBackendPhase14SchemaAbsent
 }

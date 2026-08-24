@@ -44,10 +44,18 @@ func main() {
 		worked, err := worker.RunOne(ctx)
 		if err != nil && ctx.Err() == nil {
 			logger.Warn("worker attempt failed", "category", "internal")
-			time.Sleep(time.Second)
+			waitFor(ctx, time.Second)
 		} else if !worked {
-			time.Sleep(100 * time.Millisecond)
+			waitFor(ctx, 100*time.Millisecond)
 		}
+	}
+}
+func waitFor(ctx context.Context, duration time.Duration) {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
 func maintain(ctx context.Context, worker *modworker.Worker) {

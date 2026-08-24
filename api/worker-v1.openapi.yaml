@@ -1,0 +1,94 @@
+openapi: 3.1.0
+info:
+  title: WatchTrace worker gateway
+  version: 1.0.0
+  description: Database-free outbound worker protocol. The current and immediately previous envelope schemas are 2 and 1.
+servers:
+  - url: https://queue-gateway.example.invalid
+security:
+  - mutualTLS: []
+paths:
+  /v1/jobs/pull:
+    post:
+      summary: Long-poll one compatible job for up to 20 seconds
+      responses:
+        "200": {description: Encrypted job and a short-lived authenticated lease, content: {application/json: {schema: {$ref: "#/components/schemas/PullResponse"}}}}
+        "204": {description: No job is available}
+        "401": {$ref: "#/components/responses/Terminal"}
+        "429": {$ref: "#/components/responses/Retryable"}
+        "503": {$ref: "#/components/responses/Retryable"}
+  /v1/jobs/extend:
+    post:
+      summary: Extend a valid lease by at most 90 seconds
+      requestBody: {$ref: "#/components/requestBodies/Action"}
+      responses:
+        "204": {description: Visibility extended}
+        "401": {$ref: "#/components/responses/Terminal"}
+        "422": {$ref: "#/components/responses/Terminal"}
+        "429": {$ref: "#/components/responses/Retryable"}
+        "503": {$ref: "#/components/responses/Retryable"}
+  /v1/jobs/result:
+    post:
+      summary: Idempotently publish a signed result before acknowledging its job
+      description: Retries preserve result_id. Different execution attempts use a different result_id. A malformed result never deletes the job.
+      requestBody: {$ref: "#/components/requestBodies/Action"}
+      responses:
+        "204": {description: Result durably accepted and job acknowledged}
+        "401": {$ref: "#/components/responses/Terminal"}
+        "422": {$ref: "#/components/responses/Terminal"}
+        "429": {$ref: "#/components/responses/Retryable"}
+        "503": {$ref: "#/components/responses/Retryable"}
+  /v1/jobs/expired:
+    post:
+      summary: Acknowledge a signed valid job that was unstarted at trusted expiry
+      requestBody: {$ref: "#/components/requestBodies/Action"}
+      responses:
+        "204": {description: Expired job acknowledged without target execution or check result}
+        "401": {$ref: "#/components/responses/Terminal"}
+        "422": {$ref: "#/components/responses/Terminal"}
+        "429": {$ref: "#/components/responses/Retryable"}
+        "503": {$ref: "#/components/responses/Retryable"}
+components:
+  securitySchemes:
+    mutualTLS: {type: mutualTLS, description: 30-day pool certificate issued by the WatchTrace offline root}
+  headers:
+    RetryAfter: {description: Bounded retry delay in seconds, schema: {type: integer, minimum: 1, maximum: 60}}
+  responses:
+    Retryable:
+      description: Dependency unavailable or the isolated pool limit was reached
+      headers: {Retry-After: {$ref: "#/components/headers/RetryAfter"}}
+    Terminal: {description: The request, identity, lease, envelope, or schema is invalid and must not be retried unchanged}
+  requestBodies:
+    Action:
+      required: true
+      content: {application/json: {schema: {$ref: "#/components/schemas/Action"}}}
+  schemas:
+    Action:
+      type: object
+      additionalProperties: false
+      required: [lease_token]
+      properties:
+        lease_token: {type: string, minLength: 20, maxLength: 8192}
+        body: {type: string, contentEncoding: base64, maxLength: 90000}
+        seconds: {type: integer, minimum: 1, maximum: 90}
+    Attributes:
+      type: object
+      additionalProperties: false
+      required: [schema_version, job_id, worker_pool_id, snapshot_hash, expires_at, platform_key_id, worker_encryption_key_id]
+      properties:
+        schema_version: {type: integer, enum: [1, 2]}
+        job_id: {type: string, format: uuid}
+        worker_pool_id: {type: string, pattern: "^[a-z0-9][a-z0-9_-]{0,62}$"}
+        snapshot_hash: {type: string, pattern: "^[a-f0-9]{64}$"}
+        expires_at: {type: string, format: date-time}
+        platform_key_id: {type: string, minLength: 1, maxLength: 64}
+        worker_encryption_key_id: {type: string, minLength: 1, maxLength: 64}
+    PullResponse:
+      type: object
+      additionalProperties: false
+      required: [body, attributes, lease_token, receive_count]
+      properties:
+        body: {type: string, contentEncoding: base64, maxLength: 90000}
+        attributes: {$ref: "#/components/schemas/Attributes"}
+        lease_token: {type: string, maxLength: 8192}
+        receive_count: {type: integer, minimum: 1}

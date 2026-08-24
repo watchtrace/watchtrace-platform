@@ -76,6 +76,17 @@ func registerAuthRoutes(router *gin.Engine, service AuthenticationService, secur
 	router.POST("/api/v1/auth/reset-password", resetPasswordAuth(service, secureCookies))
 }
 
+func registerCurrentUserRoute(router *gin.Engine, authenticator SessionAuthenticator) {
+	router.GET("/api/v1/auth/me", requireAuthenticatedUser(authenticator), func(c *gin.Context) {
+		user, ok := authenticatedUser(c)
+		if !ok {
+			RespondError(c, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+			return
+		}
+		c.JSON(http.StatusOK, verifyEmailResponse{User: authUserResponse{ID: user.ID, Email: user.Email, EmailVerified: user.EmailVerified}})
+	})
+}
+
 func forgotPasswordAuth(service AuthenticationService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")

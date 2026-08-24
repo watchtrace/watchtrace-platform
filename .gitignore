@@ -8,6 +8,9 @@
 *.so
 *.dylib
 /api
+!/api/
+!/api/*.openapi.yaml
+!/api/*_test.go
 /watchtrace-api
 /bin/
 /build/

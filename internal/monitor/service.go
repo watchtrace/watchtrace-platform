@@ -226,6 +226,9 @@ WHERE id=$5::uuid`, normalized.Method,
 SELECT organization_id,environment_id,id,version,interval_seconds,worker_pool_id,CURRENT_TIMESTAMP,next_check_at FROM monitors WHERE id=$1::uuid`, created.ID); err != nil {
 		return Monitor{}, fmt.Errorf("record monitor schedule period: %w", err)
 	}
+	if err = recordRefresh(ctx, tx, organizationID, environmentID, "monitor.changed", "monitor", created.ID); err != nil {
+		return Monitor{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Monitor{}, fmt.Errorf("commit monitor transaction: %w", err)
 	}
@@ -466,6 +469,9 @@ SELECT organization_id,environment_id,id,version,interval_seconds,worker_pool_id
 			return Monitor{}, fmt.Errorf("record monitor schedule period: %w", err)
 		}
 	}
+	if err = recordRefresh(ctx, tx, result.OrganizationID, result.EnvironmentID, "monitor.changed", "monitor", result.ID); err != nil {
+		return Monitor{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return Monitor{}, fmt.Errorf("commit monitor update: %w", err)
 	}
@@ -508,6 +514,9 @@ SELECT organization_id,environment_id,id,version,interval_seconds,worker_pool_id
 			return Monitor{}, fmt.Errorf("record monitor schedule period: %w", err)
 		}
 	}
+	if err = recordRefresh(ctx, tx, result.OrganizationID, result.EnvironmentID, "monitor.changed", "monitor", result.ID); err != nil {
+		return Monitor{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return Monitor{}, fmt.Errorf("commit monitor state: %w", err)
 	}
@@ -529,6 +538,9 @@ func (s *Service) Delete(ctx context.Context, userID, environmentID, monitorID s
 	}
 	if _, err = tx.Exec(ctx, `UPDATE monitor_schedule_periods SET ends_at=CURRENT_TIMESTAMP WHERE monitor_id=$1::uuid AND ends_at IS NULL`, row.ID); err != nil {
 		return fmt.Errorf("close monitor schedule period: %w", err)
+	}
+	if err = recordRefresh(ctx, tx, row.OrganizationID, row.EnvironmentID, "monitor.changed", "monitor", row.ID); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -601,10 +613,18 @@ func (s *Service) TestNow(ctx context.Context, userID, environmentID, monitorID 
 	if _, err = tx.Exec(ctx, `INSERT INTO check_dispatch_outbox(job_id,worker_pool_id,queue_url,message_body,schema_version,platform_key_id,worker_encryption_key_id,snapshot_hash,message_deduplication_id,message_group_id,expires_at) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8,$1,$1,$9)`, id, row.WorkerPoolID, queueURL, body, envelope.SchemaVersion, s.signingKeyID, encryptionKeyID, hash, expiresAt); err != nil {
 		return "", fmt.Errorf("create manual dispatch: %w", err)
 	}
+	if err = recordRefresh(ctx, tx, row.OrganizationID, row.EnvironmentID, "monitor.changed", "monitor", row.ID); err != nil {
+		return "", err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return "", err
 	}
 	return id, nil
+}
+
+func recordRefresh(ctx context.Context, tx pgx.Tx, organizationID, environmentID, eventType, resourceType, resourceID string) error {
+	_, err := tx.Exec(ctx, `INSERT INTO api_refresh_events(organization_id,environment_id,event_type,resource_type,resource_id) VALUES($1::uuid,$2::uuid,$3,$4,$5::uuid)`, organizationID, environmentID, eventType, resourceType, resourceID)
+	return err
 }
 
 type managedMonitor struct {

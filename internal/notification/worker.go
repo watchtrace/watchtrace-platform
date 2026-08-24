@@ -106,12 +106,14 @@ ON CONFLICT(incident_event_id,recipient_user_id,channel) DO NOTHING`, eventID, t
 }
 
 type claimedDelivery struct {
-	deliveryID string
-	incidentID string
-	recipient  string
-	transition string
-	leaseToken string
-	attempt    int
+	deliveryID     string
+	incidentID     string
+	organizationID string
+	environmentID  string
+	recipient      string
+	transition     string
+	leaseToken     string
+	attempt        int
 }
 
 // DeliverNext reclaims expired work, leases one due row with SKIP LOCKED,
@@ -178,9 +180,9 @@ func (worker *Worker) claim(ctx context.Context, now time.Time) (claimedDelivery
 UPDATE notification_outbox o SET state='leased',lease_owner=$2,lease_token=gen_random_uuid(),
  lease_expires_at=$3,updated_at=$1
 FROM candidate c WHERE o.delivery_id=c.delivery_id
-RETURNING o.delivery_id::text,o.incident_id::text,o.recipient_email,o.transition,
+RETURNING o.delivery_id::text,o.incident_id::text,o.organization_id::text,(SELECT environment_id::text FROM incidents WHERE id=o.incident_id),o.recipient_email,o.transition,
  o.lease_token::text,o.attempt_count+1`, now, worker.workerID, now.Add(worker.lease)).Scan(
-		&delivery.deliveryID, &delivery.incidentID, &delivery.recipient, &delivery.transition,
+		&delivery.deliveryID, &delivery.incidentID, &delivery.organizationID, &delivery.environmentID, &delivery.recipient, &delivery.transition,
 		&delivery.leaseToken, &delivery.attempt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return claimedDelivery{}, false, nil
@@ -218,6 +220,9 @@ WHERE delivery_id=$1::uuid AND state='leased' AND lease_token=$2::uuid`,
 VALUES($1::uuid,$2,'accepted',$3,$4)`, delivery.deliveryID, delivery.attempt, status, attemptedAt); err != nil {
 		return err
 	}
+	if err = insertRefreshEvent(ctx, tx, delivery); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -251,7 +256,15 @@ WHERE delivery_id=$1::uuid AND state='leased' AND lease_token=$2::uuid`,
 VALUES($1::uuid,$2,$3,$4,$5)`, delivery.deliveryID, delivery.attempt, outcome, status, attemptedAt); err != nil {
 		return err
 	}
+	if err = insertRefreshEvent(ctx, tx, delivery); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
+}
+
+func insertRefreshEvent(ctx context.Context, tx pgx.Tx, delivery claimedDelivery) error {
+	_, err := tx.Exec(ctx, `INSERT INTO api_refresh_events(organization_id,environment_id,event_type,resource_type,resource_id) VALUES($1::uuid,$2::uuid,'notification.changed','notification',$3::uuid)`, delivery.organizationID, delivery.environmentID, delivery.deliveryID)
+	return err
 }
 
 func retryDelay(completedAttempt int) time.Duration {

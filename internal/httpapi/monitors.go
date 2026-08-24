@@ -294,9 +294,13 @@ func monitorToResponse(item monitor.Monitor) monitorResponse {
 }
 
 func monitorCheckToResponse(result monitor.CheckResult) monitorCheckResponse {
+	jobType := result.JobType
+	if jobType == "manual_test" {
+		jobType = "manual"
+	}
 	return monitorCheckResponse{
 		JobID:                     result.JobID,
-		JobType:                   result.JobType,
+		JobType:                   jobType,
 		ScheduledAt:               result.ScheduledAt,
 		StartedAt:                 result.StartedAt,
 		CompletedAt:               result.CompletedAt,

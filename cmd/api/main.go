@@ -11,11 +11,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
+	"github.com/watchtrace/watchtrace-platform/internal/backendapi"
 	"github.com/watchtrace/watchtrace-platform/internal/httpapi"
 	"github.com/watchtrace/watchtrace-platform/internal/monitor"
+	"github.com/watchtrace/watchtrace-platform/internal/operations"
 	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/config"
 	"github.com/watchtrace/watchtrace-platform/internal/platform/httpserver"
+	"github.com/watchtrace/watchtrace-platform/internal/realtime"
 	"github.com/watchtrace/watchtrace-platform/internal/secureheaders"
 )
 
@@ -49,7 +52,8 @@ func main() {
 		os.Exit(1)
 	}
 	authService := auth.NewService(databasePool, actionSender)
-	go runSessionCleanup(ctx, authService, logger)
+	operationsService := operations.New(databasePool)
+	go runSessionCleanup(ctx, authService, operationsService, logger)
 	ownershipService := ownership.NewService(databasePool, actionSender)
 	headerKeys, err := secureheaders.New(configuration.MonitorHeaderKeyVersion, map[int32][]byte{configuration.MonitorHeaderKeyVersion: configuration.MonitorHeaderKey})
 	if err != nil {
@@ -67,13 +71,16 @@ func main() {
 	logger.Info("API server listening", "address", listener.Addr())
 
 	server := httpserver.New(httpapi.NewRouter(httpapi.Options{
-		Logger:           logger,
-		ReadinessCheck:   databasePool.Ping,
-		AuthService:      authService,
-		Authenticator:    authService,
-		OwnershipService: ownershipService,
-		MonitorService:   monitorService,
-		SecureCookies:    configuration.Production,
+		Logger:            logger,
+		ReadinessCheck:    databasePool.Ping,
+		AuthService:       authService,
+		Authenticator:     authService,
+		OwnershipService:  ownershipService,
+		MonitorService:    monitorService,
+		BackendService:    backendapi.New(databasePool),
+		RealtimeService:   realtime.New(databasePool),
+		OperationsService: operationsService,
+		SecureCookies:     configuration.Production,
 	}), configuration.ShutdownTimeout)
 	if err := server.Serve(ctx, listener); err != nil {
 		logger.Error("API server stopped", "error", err)
@@ -81,9 +88,14 @@ func main() {
 	}
 }
 
-func runSessionCleanup(ctx context.Context, service *auth.Service, logger *slog.Logger) {
+func runSessionCleanup(ctx context.Context, service *auth.Service, operationsService *operations.Service, logger *slog.Logger) {
 	cleanup := func() {
-		if _, err := service.CleanupSessions(ctx); err != nil && ctx.Err() == nil {
+		started := time.Now().UTC()
+		count, err := service.CleanupSessions(ctx)
+		_ = operationsService.Record(context.Background(), "session_cleanup", started, count, err)
+		cleanupCount, cleanupErr := operationsService.CleanupExpired(ctx, started)
+		_ = operationsService.Record(context.Background(), "notification_cleanup", started, cleanupCount, cleanupErr)
+		if err != nil && ctx.Err() == nil {
 			logger.Error("session cleanup failed")
 		}
 	}

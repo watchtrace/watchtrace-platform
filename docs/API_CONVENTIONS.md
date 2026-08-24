@@ -1,7 +1,8 @@
 # API Conventions
 
 These conventions apply to every WatchTrace HTTP API endpoint. The versioned
-OpenAPI contract will reference them when it is introduced by P1-508.
+OpenAPI contract references them from
+[`../api/customer-v1.openapi.yaml`](../api/customer-v1.openapi.yaml).
 
 ## Request IDs
 
@@ -48,7 +49,10 @@ The initial standard codes are:
 | 409 | `monitor_limit_reached` |
 | 415 | `unsupported_media_type` |
 | 422 | `validation_failed` |
+| 429 | `rate_limited` |
 | 500 | `internal_error` |
+
+Rate-limited responses include `Retry-After` as a positive number of seconds.
 
 ## JSON requests
 
@@ -67,11 +71,12 @@ JSON endpoints use `Content-Type: application/json`. The shared decoder:
 | `GET /health` | Backward-compatible liveness alias | 200 | Process unavailable |
 | `GET /health/live` | Process is running and serving HTTP | 200 | Process unavailable |
 | `GET /health/ready` | Registered readiness checks pass | 200 | 503 |
+| `GET /health/operations` | Bounded operational and maintenance state | 200 | 503 |
 
 Health responses set `Cache-Control: no-store`. A failed readiness check returns
 `{"status":"not_ready"}` without exposing its internal error. The API command
-registers a PostgreSQL connectivity check. P1-513 will add essential-worker
-checks and complete shutdown-aware readiness.
+registers a PostgreSQL connectivity check. The engine, worker, and queue
+gateway expose their own liveness, readiness, and safe metrics endpoints.
 
 ## Safe request logging
 
@@ -79,7 +84,8 @@ Request logs include the request ID, HTTP method, matched route template,
 status, duration, and component. They deliberately exclude raw URLs, query
 strings, request and response bodies, client IP addresses, authorization
 headers, cookies, and arbitrary headers. Panic logs include a stack trace but
-never include the recovered panic value.
+never include the recovered panic value. Matched tenant/resource path values
+are logged only under fixed field names and only when they are valid UUIDs.
 
 Authentication-specific request and response shapes are documented in
 [`AUTHENTICATION.md`](AUTHENTICATION.md).

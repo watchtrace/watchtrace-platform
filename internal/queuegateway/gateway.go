@@ -34,13 +34,14 @@ type Pool struct {
 }
 type TokenValidator func(context.Context, string) (string, bool)
 type Gateway struct {
-	pools     map[string]Pool
-	aead      cipher.AEAD
-	now       func() time.Time
-	tolerance time.Duration
-	tokens    TokenValidator
-	limits    map[string]*poolLimit
-	mu        sync.Mutex
+	pools                      map[string]Pool
+	aead                       cipher.AEAD
+	now                        func() time.Time
+	tolerance                  time.Duration
+	tokens                     TokenValidator
+	limits                     map[string]*poolLimit
+	dependencyUnavailableUntil time.Time
+	mu                         sync.Mutex
 }
 type poolLimit struct {
 	window              time.Time
@@ -113,7 +114,42 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/result", g.result)
 	mux.HandleFunc("POST /v1/jobs/expired", g.expired)
 	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("GET /health/ready", g.ready)
+	mux.HandleFunc("GET /metrics", g.metrics)
 	return http.MaxBytesHandler(mux, maxRequestBytes)
+}
+
+func (g *Gateway) metrics(w http.ResponseWriter, _ *http.Request) {
+	g.mu.Lock()
+	active := int64(0)
+	for _, limit := range g.limits {
+		active += limit.activePull
+	}
+	healthy := !g.now().UTC().Before(g.dependencyUnavailableUntil)
+	g.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"configured_pools": int64(len(g.pools)), "active_pulls": active, "queue_dependency_healthy": healthy})
+}
+
+func (g *Gateway) ready(w http.ResponseWriter, _ *http.Request) {
+	g.mu.Lock()
+	healthy := !g.now().UTC().Before(g.dependencyUnavailableUntil)
+	g.mu.Unlock()
+	if !healthy {
+		http.Error(w, "queue_unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (g *Gateway) recordDependency(err error) {
+	g.mu.Lock()
+	if err == nil || errors.Is(err, workqueue.ErrNoMessage) {
+		g.dependencyUnavailableUntil = time.Time{}
+	} else {
+		g.dependencyUnavailableUntil = g.now().UTC().Add(5 * time.Second)
+	}
+	g.mu.Unlock()
 }
 func (g *Gateway) pool(r *http.Request) (Pool, bool) {
 	id := ""
@@ -148,6 +184,7 @@ func (g *Gateway) pull(w http.ResponseWriter, r *http.Request) {
 	}
 	defer g.releasePull(p.ID)
 	msg, err := p.Transport.Pull(r.Context(), 20*time.Second)
+	g.recordDependency(err)
 	if errors.Is(err, workqueue.ErrNoMessage) {
 		w.WriteHeader(204)
 		return
@@ -181,9 +218,11 @@ func (g *Gateway) extend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.Transport.Extend(r.Context(), msg, time.Duration(request.Seconds)*time.Second); err != nil {
+		g.recordDependency(err)
 		unavailable(w)
 		return
 	}
+	g.recordDependency(nil)
 	w.WriteHeader(204)
 }
 func (g *Gateway) result(w http.ResponseWriter, r *http.Request) {
@@ -207,9 +246,11 @@ func (g *Gateway) result(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err = p.Transport.PublishResultAndAcknowledge(r.Context(), msg, body); err != nil {
+		g.recordDependency(err)
 		unavailable(w)
 		return
 	}
+	g.recordDependency(nil)
 	w.WriteHeader(204)
 }
 func (g *Gateway) expired(w http.ResponseWriter, r *http.Request) {
@@ -228,9 +269,11 @@ func (g *Gateway) expired(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err = p.Transport.AcknowledgeExpired(r.Context(), msg, body); err != nil {
+		g.recordDependency(err)
 		unavailable(w)
 		return
 	}
+	g.recordDependency(nil)
 	w.WriteHeader(204)
 }
 func (g *Gateway) action(w http.ResponseWriter, r *http.Request) (Pool, workqueue.Delivery, actionRequest, bool) {

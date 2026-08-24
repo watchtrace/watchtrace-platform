@@ -12,8 +12,9 @@ import (
 
 type Journal struct{ db *sql.DB }
 type Metrics struct {
-	Accepted  int64 `json:"accepted"`
-	Completed int64 `json:"completed"`
+	Accepted                 int64 `json:"accepted"`
+	Completed                int64 `json:"completed"`
+	OldestAcceptedAgeSeconds int64 `json:"oldest_accepted_age_seconds"`
 }
 
 func Open(path string) (*Journal, error) {
@@ -68,6 +69,13 @@ func (j *Journal) Cleanup(ctx context.Context, before time.Time) (int64, error) 
 }
 func (j *Journal) Metrics(ctx context.Context) (Metrics, error) {
 	var metrics Metrics
-	err := j.db.QueryRowContext(ctx, `SELECT count(*) FILTER(WHERE state='accepted'),count(*) FILTER(WHERE state='completed') FROM worker_jobs`).Scan(&metrics.Accepted, &metrics.Completed)
+	var oldest sql.NullInt64
+	err := j.db.QueryRowContext(ctx, `SELECT count(*) FILTER(WHERE state='accepted'),count(*) FILTER(WHERE state='completed'),min(updated_at) FILTER(WHERE state='accepted') FROM worker_jobs`).Scan(&metrics.Accepted, &metrics.Completed, &oldest)
+	if err == nil && oldest.Valid {
+		metrics.OldestAcceptedAgeSeconds = time.Now().UTC().Unix() - oldest.Int64
+		if metrics.OldestAcceptedAgeSeconds < 0 {
+			metrics.OldestAcceptedAgeSeconds = 0
+		}
+	}
 	return metrics, err
 }

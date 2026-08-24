@@ -117,7 +117,7 @@ func TestGetMonitorReturnsStateAndRecentChecks(t *testing.T) {
 		State: monitor.StateDegraded,
 		RecentResults: []monitor.CheckResult{{
 			JobID:                     "job-id",
-			JobType:                   "scheduled",
+			JobType:                   "manual_test",
 			ScheduledAt:               checkedAt.Add(-time.Second),
 			StartedAt:                 checkedAt.Add(-500 * time.Millisecond),
 			CompletedAt:               checkedAt,
@@ -148,6 +148,9 @@ func TestGetMonitorReturnsStateAndRecentChecks(t *testing.T) {
 	if service.userID != monitorTestUserID || service.environmentID != monitorTestEnvironmentID ||
 		service.monitorID != monitorTestMonitorID {
 		t.Fatalf("service scope = user %q environment %q monitor %q", service.userID, service.environmentID, service.monitorID)
+	}
+	if !strings.Contains(response.Body.String(), `"job_type":"manual"`) || strings.Contains(response.Body.String(), "manual_test") {
+		t.Fatalf("recent check must use the public manual job type: %s", response.Body.String())
 	}
 	var body monitorDetailResponse
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {

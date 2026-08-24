@@ -590,7 +590,7 @@ Finish every backend capability needed by the Phase 1 React application. After t
 
 ### Execution packages
 
-- [ ] **P1-501 — Complete account and tenant APIs**
+- [x] **P1-501 — Complete account and tenant APIs**
 
   **Combines former tasks:** P1-501 and P1-502.
 
@@ -606,7 +606,7 @@ Finish every backend capability needed by the Phase 1 React application. After t
   **Package verification:**
   - Account, membership, role, organization, project, and environment API contract and authorization tests pass.
 
-- [ ] **P1-503 — Complete monitoring, reporting, incident, and notification APIs**
+- [x] **P1-503 — Complete monitoring, reporting, incident, and notification APIs**
 
   **Combines former tasks:** P1-503 through P1-505.
 
@@ -624,7 +624,7 @@ Finish every backend capability needed by the Phase 1 React application. After t
   **Package verification:**
   - Monitoring, reporting, incident, notification, pagination, time-range, role, and tenant tests pass against known data.
 
-- [ ] **P1-506 — Complete realtime delivery and consistent API behavior**
+- [x] **P1-506 — Complete realtime delivery and consistent API behavior**
 
   **Combines former tasks:** P1-506 through P1-509.
 
@@ -643,7 +643,7 @@ Finish every backend capability needed by the Phase 1 React application. After t
   **Package verification:**
   - OpenAPI validation, SSE authorization, cross-tenant event, reconnect, polling, rate-limit, pagination, and error-contract tests pass.
 
-- [ ] **P1-510 — Complete backend hardening and final verification**
+- [x] **P1-510 — Complete backend hardening and final verification**
 
   **Combines former tasks:** P1-510 through P1-514.
 
@@ -665,14 +665,14 @@ Finish every backend capability needed by the Phase 1 React application. After t
 
 ### Phase 1.4 backend completion gate
 
-- [ ] Every Phase 1 user action required by the React application has a documented API.
-- [ ] OpenAPI validation and backend unit, database, integration, security, and system tests pass.
-- [ ] Pagination, time ranges, rate limits, and response sizes are bounded.
-- [ ] SSE authorization and cross-organization isolation tests pass.
-- [ ] Polling can reconstruct current state after missed or disconnected live events.
-- [ ] Uptime, coverage, latency, incident, and notification responses are verified against known test data.
-- [ ] Backend health, queue health, retention jobs, logs, readiness, and graceful shutdown are tested.
-- [ ] The frontend can be built without direct database access or new backend business rules.
+- [x] Every Phase 1 user action required by the React application has a documented API.
+- [x] OpenAPI validation and backend unit, database, integration, security, and system tests pass.
+- [x] Pagination, time ranges, rate limits, and response sizes are bounded.
+- [x] SSE authorization and cross-organization isolation tests pass.
+- [x] Polling can reconstruct current state after missed or disconnected live events.
+- [x] Uptime, coverage, latency, incident, and notification responses are verified against known test data.
+- [x] Backend health, queue health, retention jobs, logs, readiness, and graceful shutdown are tested.
+- [x] The frontend can be built without direct database access or new backend business rules.
 
 Do not begin Phase 1.5 until this gate passes. If frontend development later exposes missing backend behavior, reopen the applicable Phase 1.4 package, implement and verify the change, update the API contract, and then resume frontend work.
 

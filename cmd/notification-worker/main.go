@@ -43,10 +43,19 @@ func main() {
 		worked, deliveryErr := worker.DeliverNext(ctx)
 		if deliveryErr != nil {
 			logger.Warn("notification delivery cycle failed")
-			time.Sleep(time.Second)
+			waitFor(ctx, time.Second)
 		} else if !worked {
-			time.Sleep(500 * time.Millisecond)
+			waitFor(ctx, 500*time.Millisecond)
 		}
+	}
+}
+
+func waitFor(ctx context.Context, duration time.Duration) {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
 
