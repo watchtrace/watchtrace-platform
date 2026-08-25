@@ -686,7 +686,7 @@ Build the entire customer-facing Phase 1 application in React and TypeScript usi
 
 ### Execution packages
 
-- [ ] **P1-601 — Create the frontend foundation and typed API client**
+- [x] **P1-601 — Create the frontend foundation and typed API client**
 
   **Combines former tasks:** P1-601 and P1-602.
 
@@ -704,7 +704,7 @@ Build the entire customer-facing Phase 1 application in React and TypeScript usi
   **Package verification:**
   - The frontend repository independently installs, lints, type-checks, tests, and builds against the frozen API contract.
 
-- [ ] **P1-603 — Complete authentication, account, and tenant navigation**
+- [x] **P1-603 — Complete authentication, account, and tenant navigation**
 
   **Combines former tasks:** P1-603 through P1-605.
 
@@ -721,7 +721,7 @@ Build the entire customer-facing Phase 1 application in React and TypeScript usi
   **Package verification:**
   - Authentication, session-expiry, protected-route, membership, role, and tenant-navigation browser tests pass.
 
-- [ ] **P1-606 — Complete monitoring and incident experience**
+- [x] **P1-606 — Complete monitoring and incident experience**
 
   **Combines former tasks:** P1-606 through P1-609.
 
@@ -739,7 +739,7 @@ Build the entire customer-facing Phase 1 application in React and TypeScript usi
   **Package verification:**
   - Dashboard, monitor lifecycle, reporting, chart, incident, role, empty-state, and error-state browser tests pass against the real backend.
 
-- [ ] **P1-610 — Complete realtime behavior, accessibility, and frontend verification**
+- [x] **P1-610 — Complete realtime behavior, accessibility, and frontend verification**
 
   **Combines former tasks:** P1-610 through P1-612.
 
@@ -760,14 +760,14 @@ Build the entire customer-facing Phase 1 application in React and TypeScript usi
 
 ### Phase 1.5 frontend completion gate
 
-- [ ] A beta user can complete the full Phase 1 flow without database edits or command-line tools.
-- [ ] Every customer-facing screen is implemented in React and uses the documented API.
-- [ ] The frontend repository builds and tests independently against the versioned backend API contract.
-- [ ] The dashboard distinguishes unknown coverage from healthy uptime.
-- [ ] Live updates work and polling restores state when the event stream is interrupted.
-- [ ] Critical browser flows, accessibility checks, type checks, and production builds pass.
-- [ ] Viewer and member restrictions are enforced by the backend and represented clearly in the UI.
-- [ ] No business-critical state exists only inside the browser.
+- [x] A beta user can complete the full Phase 1 flow without database edits or command-line tools.
+- [x] Every customer-facing screen is implemented in React and uses the documented API.
+- [x] The frontend repository builds and tests independently against the versioned backend API contract.
+- [x] The dashboard distinguishes unknown coverage from healthy uptime.
+- [x] Live updates work and polling restores state when the event stream is interrupted.
+- [x] Critical browser flows, accessibility checks, type checks, and production builds pass.
+- [x] Viewer and member restrictions are enforced by the backend and represented clearly in the UI.
+- [x] No business-critical state exists only inside the browser.
 
 ---
 
