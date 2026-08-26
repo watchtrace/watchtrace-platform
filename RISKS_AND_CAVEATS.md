@@ -2,7 +2,7 @@
 
 - **Companion to:** `DESIGN_SPECIFICATION.md`
 - **Purpose:** Record what can go wrong, what the product cannot promise yet, and what must be tested before each release
-- **Last updated:** 2026-08-13
+- **Last updated:** 2026-08-27
 
 ---
 
@@ -34,7 +34,7 @@ Every major risk should have:
 
 These are the issues most likely to affect the project.
 
-1. Oracle Free Tier is suitable for development and a small beta, not startup-scale production.
+1. Oracle Free Tier is suitable for private personal development, not a public beta or startup-scale production.
 2. A single VM and database are a single point of failure.
 3. Monitoring results can be wrong or incomplete if our own scheduler is unhealthy.
 4. User-provided URLs create serious server-side request forgery and abuse risks.
@@ -47,7 +47,7 @@ These are the issues most likely to affect the project.
 11. Splitting into microservices adds network failures and data-consistency problems.
 12. A technically successful product may still have poor business economics because telemetry storage and support are expensive.
 13. Result publication must deduplicate by result attempt, not only by job, or one bad attempt can hide a later valid result.
-14. Late results, database outages, partial worker-pool provisioning, and stale backups require explicit reconciliation rather than ad-hoc repair.
+14. Late results, database outages, and partial worker-pool provisioning require explicit reconciliation; stale-backup reconciliation becomes mandatory with P4-701 in Phase 4.
 
 ---
 
@@ -69,7 +69,7 @@ Uptime monitoring, distributed tracing, metrics, logs, status pages, incident re
 
 Security, UI work, deployment, testing, and operational tools often take longer than the main feature code.
 
-**Control:** Plan work in small vertical slices. Review scope every two weeks. Cut optional features before reducing security or recovery work.
+**Control:** Plan work in small vertical slices. Review scope every two weeks. Cut optional features before reducing security or any work required by the current phase gate. Do not admit external clients before Phase 4 security and recovery work passes.
 
 ### R-003: Premature infrastructure can replace product progress
 
@@ -109,7 +109,7 @@ Oracle currently documents a total Always Free Ampere allowance of 2 OCPUs and 1
 
 Always Free capacity may be temporarily unavailable during provisioning. Oracle also documents conditions under which idle free compute may be reclaimed. [OCI Always Free resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)
 
-**Control:** Keep infrastructure instructions and backups ready so the service can be recreated. Do not offer an availability agreement from this deployment.
+**Control:** Keep reproducible infrastructure and deployment instructions so the disposable environment can be recreated. Accept total test-data loss, store no external-client or irreplaceable data, and do not offer an availability agreement from this deployment. P4-701 backups are required before customer use.
 
 ### R-007: One VM is one failure point
 
@@ -118,7 +118,7 @@ Always Free capacity may be temporarily unavailable during provisioning. Oracle 
 
 VM failure, operating-system failure, full disk, Docker failure, PostgreSQL failure, or maintenance can stop the API, scheduling, hosted workers, traces, and notifications together. SQS retains published jobs and results independently. A database-free worker may continue executing queued jobs during a database outage, while the result FIFO safely buffers its results until the central consumer recovers.
 
-**Control:** Use readiness monitoring, external health checks, automatic container restart, block-volume backups, and a tested manual restore. Accept best-effort beta availability until paid infrastructure is introduced.
+**Control:** Use readiness monitoring, external health checks, and automatic container restart. During Phases 1–3, accept total data loss and a full rebuild/reset because the environment is private and disposable. Phase 4 must add verified backups, restore procedures, and appropriate high availability before external clients are admitted.
 
 ### R-008: ARM64 compatibility can cause deployment problems
 
@@ -239,7 +239,7 @@ An attacker may try to use the checker to call localhost, private networks, OCI 
 ### R-020: The platform can be used to attack third parties
 
 - **Level:** Critical
-- **Affects:** Public beta onward
+- **Affects:** Phase 4 external-client use onward
 
 An attacker could create many monitors targeting a victim, turning the platform into a traffic source.
 
@@ -404,11 +404,11 @@ If retention removes raw rows before rollups complete, long-term uptime and late
 ### R-037: Backups do not provide high availability
 
 - **Level:** High
-- **Affects:** All phases
+- **Affects:** Phase 4 customer production
 
-A backup helps recover data, but restoration takes time and recent data after the backup may be lost.
+Phases 1 through 3 deliberately provide no backup or recovery promise: their data is disposable and no external clients may use them. In Phase 4, a backup helps recover data, but restoration still takes time and recent data after the recovery point may be lost.
 
-**Control:** Publish recovery point and recovery time targets separately from availability. Run restore tests. Add replication and continuous backup only when paid infrastructure begins.
+**Control:** Implement P4-701 before external-client use. Publish recovery-point and recovery-time targets separately from availability, automate and alert on backups, run clean-environment and older-database/newer-queue restore tests, and add replication or continuous backup where the measured target requires it. Optional earlier snapshots do not satisfy this control.
 
 ### R-038: Schema changes can interrupt ingestion
 
@@ -549,9 +549,9 @@ Monitoring infrastructure that a user does not own or operate may violate agreem
 ### R-052: Data location promises may be impossible initially
 
 - **Level:** Medium
-- **Affects:** Phases 1–3
+- **Affects:** Phase 4 customer production
 
-The free deployment uses one OCI home region. Customers cannot choose where data is stored.
+The private Phases 1–3 deployment uses one OCI home region and admits no external clients. Phase 4 customers cannot be given a data-location promise until the production storage, deletion, and backup locations are known and tested.
 
 **Control:** State the storage region clearly. Offer data-region selection only after regional infrastructure and deletion/backup behavior are proven.
 
@@ -571,7 +571,7 @@ Dependencies, container images, UI packages, and databases have licenses and not
 
 Passing one security review does not make the product permanently secure.
 
-**Control:** Patch dependencies and operating systems, rotate secrets, scan images, review access, test backups, handle vulnerability reports, and maintain an incident-response process.
+**Control:** Patch dependencies and operating systems, rotate secrets, scan images, review access, handle vulnerability reports, and maintain an incident-response process. Begin mandatory backup and restore testing with P4-701 in Phase 4 before external-client use.
 
 ---
 
@@ -748,7 +748,7 @@ One dedicated FIFO job queue per customer worker pool gives strong routing isola
 
 Because a worker does not query PostgreSQL, pausing, deleting, or editing a monitor cannot synchronously cancel an encrypted job already accepted by SQS. A job may run with the configuration version valid when it was scheduled.
 
-**Control:** Keep only one outstanding scheduled job per monitor, use a two-minute job-start expiry, stop future publication immediately, and record the monitor version and snapshot hash. A valid unstarted expired job is acknowledged without calling the target; the control plane marks a result-less job unknown by deadline. A valid late executed result may correct provisional expiry but must not overwrite newer monitor state. Provide queue purge/revocation only for exceptional security events, and explain this bounded behavior in the UI and beta terms.
+**Control:** Keep only one outstanding scheduled job per monitor, use a two-minute job-start expiry, stop future publication immediately, and record the monitor version and snapshot hash. A valid unstarted expired job is acknowledged without calling the target; the control plane marks a result-less job unknown by deadline. A valid late executed result may correct provisional expiry but must not overwrite newer monitor state. Provide queue purge/revocation only for exceptional security events, and explain this bounded behavior in the UI and Phase 4 customer terms.
 
 ### R-074: Customer worker clocks can be wrong
 
@@ -852,11 +852,11 @@ Queue, policy, database, gateway, certificate, and key operations cannot commit 
 ### R-085: Restoring PostgreSQL alone can conflict with live queues and keys
 
 - **Level:** Critical
-- **Affects:** Phase 1 onward
+- **Affects:** Phase 4 customer production
 
-A restored database may be older than SQS messages, gateway mappings, worker journals, or current keys. Starting publishers immediately can replay stale outbox rows; missing historical keys can make queued work unverifiable or unreadable.
+A restored database may be older than SQS messages, gateway mappings, worker journals, or current keys. Starting publishers immediately can replay stale outbox rows; missing historical keys can make queued work unverifiable or unreadable. Phases 1–3 do not promise recovery: after material loss, operators may discard queues and rebuild the disposable environment.
 
-**Control:** Back up the Phase 1–3 deployment manifest, exported queue/policy/role attributes, signed gateway configuration, CA records, and active/retired key history with PostgreSQL; add protected Terraform state in Phase 4. Restore into isolation; keep schedulers and consumers stopped; inventory queues; quarantine unknown identities; reconcile outboxes and accepted results; never republish expired jobs; replay valid results idempotently; and start components in the documented order. Test an older database backup beside newer queue data.
+**Control:** P4-701 backs up PostgreSQL together with the production deployment manifest, protected Terraform state, exported queue/policy/role attributes, signed gateway configuration, CA records, and active/retired key history. Restore into isolation; keep schedulers and consumers stopped; inventory queues; quarantine unknown identities; reconcile outboxes and accepted results; never republish expired jobs; replay valid results idempotently; and start components in the documented order. Test an older database backup beside newer queue data before admitting external clients.
 
 ### R-086: Uptime formulas have undefined boundary cases
 
@@ -898,7 +898,7 @@ Older names such as `checker` can hide whether scheduler, publisher, result cons
 
 ## 15. Release Gates by Phase
 
-### 15.1 Before a public Phase 1 beta
+### 15.1 Phase 1 private engineering qualification (not a public beta)
 
 - [ ] URL, redirect, IPv4, IPv6, metadata, and DNS-rebinding tests pass.
 - [ ] Hosted pools block private/special destinations and customer pools cannot escape their protected local CIDR allowlists.
@@ -928,12 +928,12 @@ Older names such as `checker` can hide whether scheduler, publisher, result cons
 - [ ] Incident and notification creation is transactional and idempotent.
 - [ ] Email domain, SPF, DKIM, retries, quota alerts, and suppressions are tested.
 - [ ] Secrets do not appear in logs, database plaintext, or API responses.
-- [ ] Disk, scheduler, database, notification-outbox, queue, DLQ, and backup-age health can be inspected through metrics, health endpoints, logs, or dashboards.
-- [ ] An isolated restore of an older database alongside newer queues, gateway configuration, certificates, and retained keys has reconciled state without republishing expired work.
+- [ ] Disk, scheduler, database, notification-outbox, queue, and DLQ health can be inspected through metrics, health endpoints, logs, or dashboards.
+- [ ] The deployment is access-controlled for owner-only testing, contains no external-client or irreplaceable data, and documents that total loss causes a rebuild/reset with no recovery promise.
 - [ ] The deployed topology preserves documented control-plane, publisher, worker/gateway, result-consumer, notifier, and telemetry ownership and network boundaries.
-- [ ] Terms of use, privacy notice, and abuse contact exist before accepting unknown public users.
+- [ ] Any public signup or unknown-user access remains disabled; terms, privacy, and abuse controls are deferred to the Phase 4 external-client gate.
 
-### 15.2 Before a public Phase 2 tracing beta
+### 15.2 Phase 2 private tracing qualification (not a public beta)
 
 - [ ] API-key creation, rotation, expiry, and revocation are tested.
 - [ ] Duplicate, late, and out-of-order spans are handled.
@@ -944,8 +944,9 @@ Older names such as `checker` can hide whether scheduler, publisher, result cons
 - [ ] Telemetry is rejected before it threatens control or uptime storage.
 - [ ] Project usage and rejected-data counts are visible.
 - [ ] Trace deletion and retention jobs are tested.
+- [ ] External-client access remains disabled and all stored traces are disposable owner-controlled test data.
 
-### 15.3 Before Phase 3 paid scale
+### 15.3 Before Phase 3 internal paid-scale validation
 
 - [ ] Free-tier bottlenecks and paid capacity requirements are measured.
 - [ ] Every service and dataset has one clear owner.
@@ -954,11 +955,12 @@ Older names such as `checker` can hide whether scheduler, publisher, result cons
 - [ ] PostgreSQL check-job IDs and result idempotency survive migration to the external broker.
 - [ ] PostgreSQL-to-ClickHouse migration has count and query comparison tests.
 - [ ] Broker backlog, database outage, and regional-worker failure are tested.
-- [ ] Highly available PostgreSQL and restore procedures meet their targets.
+- [ ] PostgreSQL failure modes and the proposed high-availability topology have been measured without claiming durability or restore guarantees.
 - [ ] Costs per monitoring and telemetry unit are measured.
-- [ ] Plan quotas protect the platform during one customer’s traffic spike.
+- [ ] Plan quotas protect the platform during one simulated tenant’s traffic spike.
+- [ ] External-client access remains disabled and loss of the environment is still handled as a rebuild/reset.
 
-### 15.4 Before Phase 4 commercial commitments
+### 15.4 Before Phase 4 external-client access or commercial commitments
 
 - [ ] Usage and billing reconcile for several complete billing cycles.
 - [ ] Enterprise user creation and removal are tested.
@@ -966,24 +968,32 @@ Older names such as `checker` can hide whether scheduler, publisher, result cons
 - [ ] Private agents cannot receive another tenant’s jobs.
 - [ ] Export, retention, and deletion requests are tested.
 - [ ] Regional recovery exercises meet documented targets.
+- [ ] P4-701 nightly logical, continuous PostgreSQL, volume/database snapshot, and required analytics backups run automatically and meet the approved retention policy.
+- [ ] Backup copies and separately encrypted secret/key recovery material exist in the required independent region or failure domain, and access is audited.
+- [ ] Backup-age, failed-backup, storage-capacity, and recovery-test alerts reach an independent operator destination.
+- [ ] A clean-environment restore of the complete recovery set passes using the documented component start order.
+- [ ] An older PostgreSQL backup is reconciled safely with newer queues, configurations, certificates, and retained keys without executing expired jobs.
+- [ ] Measured recovery-point and recovery-time results meet the targets approved for customer launch.
 - [ ] Terraform manages intended AWS and OCI production resources; manually created resources have been imported or safely replaced, remote state is protected, reviewed plans are required, and drift checks pass.
 - [ ] Environment-scoped IAM role names, trust restrictions, effective policy fingerprints, and exact queue/action permissions match the production deployment manifest; customer-VPC workers have no AWS role, and the production security exercises pass.
 - [ ] Numeric CloudWatch thresholds and evaluation periods are based on measured capacity and stored with the infrastructure configuration.
 - [ ] CloudWatch alarms deliver through environment-specific SNS topics to confirmed email subscriptions and an independent operator destination; OCI alarms and the external dead-man path also pass end-to-end tests.
+- [ ] Terms of use, privacy notice, abuse contact, and public-signup controls are complete before external-client access is enabled.
 - [ ] Security and legal reviews are complete.
 - [ ] Any SLA is supported by measured availability and a support process.
 
 ---
 
-## 16. Risks We Explicitly Accept During the Free Beta
+## 16. Risks We Explicitly Accept During Private Personal Phases 1–3
 
-The initial beta accepts the following limitations:
+The owner-only engineering deployments accept the following limitations:
 
 - One OCI region and one main VM.
 - Best-effort availability with no SLA.
 - Monitoring from one network location.
-- Manual recovery within the documented target.
-- Published check jobs and results survive application restarts in SQS, and committed immutable dispatch intent survives in PostgreSQL; PostgreSQL failure stops new scheduling but result messages can wait durably for recovery.
+- No scheduled backups, tested restore, recovery-point target, or recovery-time target; database, telemetry, queue, certificate, and key loss may require a complete rebuild/reset.
+- No external-client or irreplaceable data is stored. Optional manual snapshots are a convenience only and create no recovery promise.
+- Published check jobs and results survive ordinary application restarts in SQS, and committed immutable dispatch intent survives in PostgreSQL; this restart resilience is not disaster recovery, and operators may discard state after material loss.
 - FIFO suppresses same-job publication retries only within five minutes. Worker crashes, lost journals, visibility expiry, or later retries may still cause a rare duplicate GET or HEAD.
 - A job already published may run after its monitor is paused or edited; it is bounded by job expiry and recorded against the scheduled monitor version.
 - Customer-VPC workers are trusted execution components with dedicated routing and keys; compromise of a worker can affect checks assigned to its pool.
@@ -998,7 +1008,7 @@ The initial beta accepts the following limitations:
 - PostgreSQL trace storage intended only for a small pilot.
 - No guarantee that email reaches a recipient’s inbox.
 
-These limitations must be visible in beta documentation. They must not be hidden behind the word “production-grade.”
+These limitations must be visible in private deployment documentation. The environments must not be described as a beta, customer-ready, production-grade, durable, or recoverable. P4-701 and every Phase 4 commercial gate must pass before external clients are admitted.
 
 ---
 

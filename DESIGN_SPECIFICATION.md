@@ -6,7 +6,7 @@
 - **Project type:** Personal project designed to grow into a startup
 - **Initial hosting:** Oracle Cloud Infrastructure Always Free for compute/database plus managed Amazon SQS in one AWS Region
 - **Growth plan:** Buy infrastructure when real usage requires it
-- **Last updated:** 2026-08-13
+- **Last updated:** 2026-08-27
 
 Companion document: [Risks, Caveats, and Constraints](./RISKS_AND_CAVEATS.md)
 
@@ -16,7 +16,7 @@ Companion document: [Risks, Caveats, and Constraints](./RISKS_AND_CAVEATS.md)
 
 This document explains what we are building, how the main parts work, and the order in which we will build them.
 
-The product will begin as a small monitoring platform running primarily on Oracle Cloud Free Tier, with Amazon SQS providing managed durable delivery. It will later grow into a scalable startup product without requiring a complete rewrite.
+The product will begin as a private personal monitoring platform running primarily on Oracle Cloud Free Tier, with Amazon SQS providing managed durable delivery. Phases 1 through 3 are owner-only engineering environments with disposable data and no external client use. It will later grow into a customer-ready startup product without requiring a complete rewrite.
 
 The work is divided into four phases:
 
@@ -25,7 +25,7 @@ The work is divided into four phases:
 3. **Startup scale:** Add paid infrastructure, multiple checking locations, high-volume data storage, logs, metrics, and integrations.
 4. **Mature SaaS product:** Add billing, enterprise security, on-call tools, stronger availability, and advanced analysis.
 
-Each phase must produce a useful working product. We will not build Phase 3 infrastructure before Phase 1 and Phase 2 have real users and measured limits.
+Each phase must produce useful engineering results. We will not build Phase 3 infrastructure before Phase 1 and Phase 2 have validated the product internally and measured its limits. Customer-facing production, including backup and recovery guarantees, begins only after the Phase 4 gate passes.
 
 ---
 
@@ -152,10 +152,10 @@ Monitors, API keys, services, and traces belong to an environment. This separati
 
 | Phase | Working result | Hosting plan |
 |---|---|---|
-| Phase 1 | Uptime checks, incidents, email alerts, and live dashboard | Oracle Always Free |
-| Phase 2 | Distributed traces, service map, slow request search, and traffic alerts | Oracle Always Free with strict limits |
-| Phase 3 | Multi-region checks, high-volume traces, metrics, logs, integrations, and status pages | Paid infrastructure starts |
-| Phase 4 | Billing, enterprise login, on-call schedules, Terraform-managed AWS/OCI infrastructure, CloudWatch/SNS operational alerting, strong availability, and advanced analysis | Multi-region paid platform |
+| Phase 1 | Private owner-only uptime checks, incidents, email alerts, and live dashboard with disposable data | Oracle Always Free |
+| Phase 2 | Private owner-only distributed traces, service map, slow request search, and traffic alerts | Oracle Always Free with strict limits |
+| Phase 3 | Internal scale and production-preparation validation for multi-region checks, high-volume traces, metrics, logs, integrations, and status pages; still no external clients | Paid infrastructure only when internal tests require it |
+| Phase 4 | Customer-ready billing, enterprise login, on-call schedules, Terraform-managed AWS/OCI infrastructure, verified backup/recovery, operational alerting, strong availability, and advanced analysis | Multi-region paid platform |
 
 ### 4.1 Quality targets
 
@@ -167,9 +167,9 @@ These are engineering targets, not customer promises until production measuremen
 | Dashboard query time | p95 below 700 ms | p95 below 500 ms | p95 below 500 ms |
 | Alert evaluation | Within 5 seconds after qualifying data is stored | Within 5 seconds | Within 5 seconds |
 | First notification attempt | Within 30 seconds | Within 30 seconds | Based on escalation policy |
-| Backup recovery point | 24 hours or better | 15 minutes or better | 5 minutes or better |
-| Recovery time | 4 hours or better | 1 hour or better | 30 minutes or better |
-| Availability | Best-effort beta | Internal 99.9% goal | Possible 99.9–99.95% SLA after proof |
+| Backup recovery point | No promise; data is disposable | No promise; pre-production rebuild is acceptable | Defined and measured before customer launch; 5-minute direction |
+| Recovery time | No promise; rebuild/reset is acceptable | No promise; pre-production rebuild is acceptable | Defined and measured before customer launch; 30-minute direction |
+| Availability | Best-effort private engineering use | Internal scale-validation goal | Possible 99.9–99.95% SLA after proof |
 
 Phase 2 additionally targets trace-batch acceptance below one second and recent trace searches below two seconds at the stated pilot load.
 
@@ -389,7 +389,7 @@ These limits are starting safety settings. Load tests decide whether they can be
 
 | Item | Starting limit |
 |---|---:|
-| Organizations | Small beta |
+| Organizations | Owner-only test organizations |
 | Monitors per organization | 100 |
 | Total active monitors | 1,000 |
 | Smallest normal interval | 60 seconds |
@@ -399,7 +399,7 @@ These limits are starting safety settings. Load tests decide whether they can be
 | Outstanding scheduled jobs per monitor | 1 |
 | Global non-terminal scheduled jobs | At most 1,000 |
 | Manual test jobs waiting | At most 10 platform-wide and at most 10% of worker execution slots |
-| Approved customer-VPC worker pools | At most 5 during the private beta |
+| Approved customer-VPC worker pools | At most 5 during private owner testing |
 | Job FIFO visibility timeout | 90 seconds, configurable and safely above request timeout |
 | Result FIFO visibility timeout | 60 seconds |
 | Job start expiry | 2 minutes after scheduled time |
@@ -540,7 +540,7 @@ The worker has no PostgreSQL driver, connection string, SQL package, or control-
 
 Before publishing a result or deleting an executed job, the gateway verifies the mTLS pool identity, lease token, bounded schema, job and pool match, snapshot hash, result ID, execution-attempt ID, timestamps, and worker signature. It applies per-pool request, byte, concurrent-pull, and result-publication limits. Only then does it publish the result to the result FIFO and delete the job after SQS accepts the result. The central consumer independently repeats authoritative validation against PostgreSQL. A malformed or unverifiable result never causes job deletion.
 
-The Phase 1 worker is shipped as a versioned Linux ARM64/AMD64 container and binary with safe configuration examples, local key generation, readiness/health output, graceful shutdown, journal backup rules, and upgrade instructions. Releases include checksums, a software bill of materials, and signed artifacts or images. The worker accepts no inbound connection.
+The Phase 1 worker is shipped as a versioned Linux ARM64/AMD64 container and binary with safe configuration examples, local key generation, readiness/health output, graceful shutdown, local journal retention/reset rules, and upgrade instructions. Phase 4 adds journal-aware backup and recovery procedures where required. Releases include checksums, a software bill of materials, and signed artifacts or images. The worker accepts no inbound connection.
 
 For direct SQS, the worker follows the same rule: publish the result to the result FIFO first, then delete the job from the job FIFO. The worker never marks a database row and never treats an HTTP call to the monitored target as a database transaction.
 
@@ -573,7 +573,7 @@ The worker wire protocol is specified and versioned independently of internal Go
 
 Normal key rotation uses an overlap period long enough to cover source retention, DLQ retention, controlled redrive, and clock tolerance. Retired decryption and verification keys remain available for at least 21 days. Emergency compromise revocation has no automatic grace period: new pulls and publication stop immediately, affected in-flight work becomes unknown unless an operator explicitly validates and recovers it, and an audit event records the decision.
 
-Phase 1 uses an offline private root CA and a restricted operator issuing command for customer-worker mTLS certificates. Certificates last 30 days, workers renew before ten days remain, and a signed revocation/configuration snapshot reaches every gateway within five minutes. Loss of the CA, platform signing keys, gateway lease-token keys, or active worker-pool public-key history is included in backup and recovery tests.
+Phase 1 uses an offline private root CA and a restricted operator issuing command for customer-worker mTLS certificates. Certificates last 30 days, workers renew before ten days remain, and a signed revocation/configuration snapshot reaches every gateway within five minutes. During Phases 1 through 3, loss of the CA, platform signing keys, gateway lease-token keys, or active worker-pool public-key history may require resetting the disposable environment. Phase 4 includes those assets in backup and recovery tests before external clients are admitted.
 
 The control plane supports the current and immediately previous envelope schema. Each worker pool records worker version, minimum and maximum job schema, maximum result schema, and enabled capabilities. The publisher selects the highest compatible schema; if no intersection exists, it does not publish and raises an operator-visible incompatibility that becomes unknown coverage at the deadline. Rolling upgrades update consumers first, then gateways and workers, then publishers. Downgrade and rollback tests preserve acceptance of already-issued jobs and results.
 
@@ -729,9 +729,9 @@ These endpoints authenticate a worker pool, translate only to SQS receive/visibi
 
 The worker protocol has its own checked-in OpenAPI contract and compatibility tests. Pull uses at most 20-second long polling and returns one leased job per available worker slot. Every response defines retryable versus terminal errors, `Retry-After`, maximum body size, request ID, supported schema range, and safe clock information. Lease extension is bounded by job expiry and cannot change pool or job identity. Result submission is idempotent by `result_id`; retrying the same result returns the same accepted outcome even if deleting the old receipt handle is no longer possible.
 
-### 8.11 Oracle Free Tier deployment
+### 8.11 Oracle Free Tier private deployment
 
-Initial production containers:
+Initial private personal deployment containers:
 
 ```text
 nginx
@@ -741,7 +741,7 @@ queue-gateway        # optional; required only for HTTPS-mode workers
 postgres
 ```
 
-Use one ARM64 Ampere A1 VM with the current free allocation. Keep PostgreSQL data on a separate block volume. Use OCI Vault, Object Storage, Monitoring, Logging, Bastion, and Email Delivery where suitable. The VM must also reach the selected regional Amazon SQS endpoint over HTTPS. SQS requests and data transfer are budgeted AWS dependencies and are not assumed to be permanently free. Phase 4 additionally budgets CloudWatch alarms, SNS notifications, and optional customer-managed KMS use.
+Use one ARM64 Ampere A1 VM with the current free allocation. Keep PostgreSQL data on a separate block volume. Use OCI Vault, Monitoring, Logging, Bastion, and Email Delivery where suitable. Object Storage is optional during the disposable private phases and is not a backup gate. The VM must also reach the selected regional Amazon SQS endpoint over HTTPS. SQS requests and data transfer are budgeted AWS dependencies and are not assumed to be permanently free. Phase 4 additionally budgets durable backup storage, CloudWatch alarms, SNS notifications, and optional customer-managed KMS use.
 
 Oracle currently documents 2 A1 OCPUs and 12 GB memory for an Always Free tenancy. These limits can change, so verify them before deployment: [OCI Free Tier](https://docs.oracle.com/iaas/Content/FreeTier/freetier.htm).
 
@@ -756,8 +756,8 @@ Oracle currently documents 2 A1 OCPUs and 12 GB memory for an Always Free tenanc
 7. Result state, incidents, PostgreSQL notification outbox, and OCI Email Delivery.
 8. Dashboard APIs and React pages.
 9. Live events and polling fallback.
-10. Rollups, retention, audit records, metrics, logs, and backups.
-11. Controlled load and recovery tests for the local and single-identity Amazon SQS workflow. Production restore/deployment exercises, split AWS workload identity, trust-policy assurance, and the production security suite are Phase 4 work.
+10. Rollups, retention, audit records, metrics, logs, and disposable-environment reset procedures.
+11. Controlled load, restart, and queue-recovery tests for the local and single-identity Amazon SQS workflow. Backup restore exercises, split AWS workload identity, trust-policy assurance, and the production security suite are Phase 4 work.
 
 ### 8.13 Phase 1 completion rules
 
@@ -782,7 +782,7 @@ Phase 1 is complete when:
 - Hosted workers block private/special destinations, and customer-VPC workers cannot escape their explicit local CIDR allowlists; metadata, redirect, and DNS-rebinding tests pass in both modes.
 - Cross-organization access tests pass for every resource.
 - The system sustains its stated check rate in an ARM64 load test.
-- A cross-system restore reconciles PostgreSQL, live queues, infrastructure configuration, certificates, and retained keys without republishing expired work.
+- The deployment is explicitly private and owner-only, contains no external-client or irreplaceable data, and can be rebuilt or reset after total database or key loss; cross-system backup restore is a Phase 4 gate.
 - Missing checks appear as unknown, not healthy; reporting boundaries, zero denominators, out-of-order results, and late correction are deterministic.
 - Quarantine and redrive are bounded, audited, secret-safe, and cannot execute expired jobs or create an infinite loop.
 - Phase 1 operators can inspect queue, scheduler, database, worker, and DLQ health without database changes; automated threshold alarms and independent SNS/email delivery are Phase 4 requirements.
@@ -793,7 +793,7 @@ Phase 1 is complete when:
 
 ### 9.1 Goal
 
-Add distributed tracing as a core product feature while staying on Oracle Free Tier for personal use and a small closed beta.
+Add distributed tracing as a core product feature while staying on Oracle Free Tier for private owner-only validation. Phase 2 is not a closed or public beta and admits no external clients.
 
 At the end of Phase 2, a developer can:
 
@@ -872,7 +872,7 @@ Tracing creates much more data than uptime checks. Phase 2 therefore has strict 
 | Maximum attributes per span | 64 |
 | Maximum stored attribute value | 2 KB |
 
-These values are configuration, not permanent product promises. Load and disk tests determine final free-beta limits.
+These values are configuration, not permanent product promises. Load and disk tests determine final private-validation limits.
 
 Customers must enable sampling. For example, they may keep 10% of normal requests while keeping more errors in a local Collector. The platform also rejects data after project limits are reached instead of allowing the VM to run out of disk.
 
@@ -1024,25 +1024,25 @@ Phase 2 is complete when:
 
 ---
 
-## 10. Phase 3 — Startup Scale and Full Observability
+## 10. Phase 3 — Internal Scale and Production Preparation
 
 ### 10.1 When Phase 3 begins
 
-We start paying for infrastructure when one or more of these conditions is true:
+We start paying for internal test infrastructure when one or more of these conditions is true:
 
 - Free VM CPU remains above 70% during ordinary traffic.
 - PostgreSQL storage remains above 70% after retention cleanup.
 - Check scheduler delay repeatedly breaks its target.
-- Trace ingestion regularly rejects valid customer traffic.
-- A VM restart causes unacceptable customer impact.
-- Customers require monitoring from more than one location.
-- A growing number of paying beta customers need predictable availability.
+- Trace ingestion regularly rejects valid synthetic or owner-generated traffic.
+- A VM restart prevents meaningful internal validation.
+- Multi-region behavior must be validated before customer launch.
+- Phase 4 capacity and reliability gates cannot be proven on the free environment.
 
-We scale before the free environment becomes an emergency.
+We scale to learn and prepare; Phase 3 still admits no external clients and makes no durability or availability promise.
 
 ### 10.2 Goal
 
-Turn the working product into a scalable startup platform.
+Turn the working product into an internally validated candidate for a scalable startup platform. All status pages, integrations, plans, and high-availability work remain private until the Phase 4 customer-production gate passes.
 
 Phase 3 adds:
 
@@ -1183,7 +1183,7 @@ Capacity is increased in tested steps.
 
 | Milestone | Monitors | Trace ingestion | Meaning |
 |---|---:|---:|---|
-| Phase 3A | 10,000 at 60 seconds | 1,000 spans/second | First paid startup architecture |
+| Phase 3A | 10,000 at 60 seconds | 1,000 spans/second | First internally tested paid architecture |
 | Phase 3B | 100,000 at 60 seconds | 10,000 spans/second | Proven horizontal scaling |
 | Phase 3C | Selected 30-second plans | Based on demand | Requires another capacity test |
 
@@ -1208,7 +1208,7 @@ Final commercial plans are a business decision and can change without changing t
 ### 10.12 Phase 3 build order
 
 1. Measure Phase 2 bottlenecks and define paid capacity needs.
-2. Move PostgreSQL to a highly available setup with tested backups.
+2. Measure PostgreSQL failure modes and prototype the intended highly available topology without treating it as a durability guarantee.
 3. Introduce ClickHouse and copy telemetry with a verified migration pipeline.
 4. Keep Amazon SQS or migrate to a measured higher-volume broker with the same transactional outbox, replay tests, and rollback contract.
 5. Split and scale checker and ingestion programs.
@@ -1218,7 +1218,7 @@ Final commercial plans are a business decision and can change without changing t
 9. Add Slack and signed webhooks.
 10. Add public status pages.
 11. Add daily usage measurement and enforced plan limits.
-12. Run regional failure, broker outage, database failure, and restore exercises.
+12. Run controlled regional failure, broker outage, and database failure tests. Backup restore and disaster-recovery qualification are Phase 4 work.
 
 ### 10.13 Phase 3 completion rules
 
@@ -1229,7 +1229,8 @@ Final commercial plans are a business decision and can change without changing t
 - ClickHouse retention removes old data automatically.
 - Cross-tenant tests cover every telemetry signal.
 - Usage totals match stored and rejected data closely enough for future billing.
-- The platform meets the Phase 3A load target before accepting corresponding customers.
+- The platform meets the Phase 3A load target before entering the Phase 4 customer-production gate.
+- No external client data or irreplaceable data is stored; losing the Phase 3 environment may require a full rebuild and data reset.
 
 ---
 
@@ -1340,7 +1341,31 @@ Phase 4 removes major single points of failure:
 
 An availability SLA such as 99.9% or 99.95% is offered only after monitoring proves the platform can meet it and legal/business review defines credits and exclusions.
 
-#### 11.8.1 Infrastructure automation and operational alert delivery
+#### 11.8.1 Backup, restore, and recovery qualification
+
+Phase 4 implements package P4-701 before any external client or irreplaceable data is admitted:
+
+- nightly logical backups of important control, incident, identity, and configuration data;
+- continuous PostgreSQL backup or point-in-time recovery appropriate to the selected production service;
+- database/volume snapshots and ClickHouse backups according to the selected retention policy;
+- encrypted backup copies in durable object storage, including a copy in another region or failure domain;
+- backup-age, failed-backup, storage-capacity, and recovery-test alerts delivered independently of the application notification path; and
+- documented recovery-point and recovery-time targets measured by successful exercises rather than inferred from configuration.
+
+The recovery set includes PostgreSQL, ClickHouse data required by the selected plan, the versioned cloud-resource deployment manifest, protected Terraform state and provider configuration, exported queue/policy/role attributes, signed gateway pool configuration, the offline mTLS CA and issuing records, active and retired platform signing/decryption/lease-token keys, public worker-key history, and versioned application configuration. Secrets and private CA/key backups are separately encrypted and access-audited. SQS and customer-worker journals are reconciliation inputs, not database backups.
+
+A restore uses an isolated recovery deployment and this order:
+
+1. Restore keys, CA material, Terraform state, deployment manifests, and trusted configuration.
+2. Restore PostgreSQL and required analytics data without starting schedulers, publishers, workers, or consumers.
+3. Snapshot queue attributes and quarantine messages whose job, result, pool, or key ID is unknown to the restored database.
+4. Reconcile restored outbox rows against current queue messages and accepted results; never republish work past its job-start expiry.
+5. Replay valid result messages idempotently, repair rollups, and classify unrecoverable scheduled slots as unknown.
+6. Enable result consumers, then publishers and schedulers, and finally workers and the public API.
+
+At least monthly before and during customer operation, an isolated exercise restores a database backup older than live queue data and verifies retained-key decryption, unknown-message quarantine, ambiguous outbox recovery, safe component start order, and rollback to the pre-restore environment.
+
+#### 11.8.2 Infrastructure automation and operational alert delivery
 
 Phase 4 adopts Terraform as the infrastructure-as-code tool for both AWS and OCI. Before Terraform becomes authoritative, every manually created Phase 1–3 resource is inventoried and either imported into Terraform state or deliberately replaced through a tested migration. Terraform configuration, reviewed plans, pinned providers, environment separation, encrypted remote state, state locking, drift detection, and rollback procedures are mandatory. Routine production resources are no longer created only through cloud consoles.
 
@@ -1355,12 +1380,14 @@ Phase 4 also creates separate environment-scoped AWS roles for the job publisher
 - An on-call escalation works from incident creation through acknowledgement.
 - A private agent cannot receive another customer’s work.
 - A regional recovery exercise meets the published recovery target.
+- P4-701 automated backups, cross-region/failure-domain copies, backup alerts, a clean-environment restore, and an older-database/newer-queue reconciliation exercise all pass before external clients are admitted.
 - Customer export and deletion requests are tested.
 - Terraform manages the intended AWS and OCI production resources, existing manual resources have been imported or replaced safely, remote state is protected, and drift detection passes.
 - Separate AWS workload roles and trust policies match the production deployment manifest and pass the production security exercises.
 - Numeric CloudWatch thresholds are based on measured capacity, and CloudWatch-to-SNS email delivery plus OCI/external failure alerts pass end-to-end tests.
 - Security review finds no critical unresolved issue.
 - Any published SLA is supported by at least several months of measured availability.
+- No external client is admitted until every Phase 4 completion and release-gate condition passes.
 
 ---
 
@@ -1464,32 +1491,9 @@ A valid late result changes one slot from unknown to observed. The result transa
 
 ### 13.4 Backups
 
-Phase 1 and Phase 2:
+Phases 1 through 3 are private personal engineering environments. They have no scheduled backup, restore, recovery-point, or recovery-time requirement. Their databases and generated monitoring/telemetry data are disposable, no external client or irreplaceable data may be stored, and total loss is handled by rebuilding the deployment and resetting test data. Source code and non-secret deployment manifests remain version controlled; secrets remain outside Git. Optional manual snapshots may be used for convenience, but they are not completion evidence and create no recovery promise.
 
-- Nightly logical backup of important control and incident data.
-- OCI block-volume backups for full database recovery.
-- Encrypted copy in OCI Object Storage within current free limits.
-- Monthly restore exercise.
-
-The Phase 1–3 recovery set includes PostgreSQL, the versioned cloud-resource deployment manifest, exported queue/policy/role attributes, signed gateway pool configuration, the offline mTLS CA and issuing records, active and retired platform signing/decryption/lease-token keys, public worker-key history, and versioned application configuration. Phase 4 additionally includes protected Terraform state and provider configuration. Secrets and private CA/key backups are separately encrypted and access-audited. SQS and customer worker journals are not treated as database backups.
-
-A restore uses an isolated recovery deployment and this order:
-
-1. Restore keys, CA material, the Phase 1–3 deployment manifest or Phase 4 Terraform state, and trusted configuration.
-2. Restore PostgreSQL without starting schedulers, publishers, workers, or consumers.
-3. Snapshot queue attributes and quarantine messages whose job, result, pool, or key ID is unknown to the restored database.
-4. Reconcile restored outbox rows against current FIFO messages and accepted results; never republish work past its job-start expiry.
-5. Replay valid result messages idempotently, repair rollups, and classify unrecoverable scheduled slots as unknown.
-6. Enable result consumers, then publishers and schedulers, and finally workers and the public API.
-
-The monthly exercise tests a database backup older than live queue data, retained-key decryption, unknown-message quarantine, ambiguous outbox recovery, and rollback to the pre-restore environment.
-
-Phase 3 and Phase 4:
-
-- Automated PostgreSQL continuous backup.
-- ClickHouse backup according to customer retention.
-- Cross-region copies.
-- Written and tested recovery procedures.
+Phase 4 implements P4-701 before external clients are admitted. The required automated backup set, encryption, cross-region/failure-domain copies, alerts, restore order, clean-environment exercise, older-database/newer-queue reconciliation test, and measured recovery targets are defined in Section 11.8.1.
 
 ### 13.5 Self-monitoring
 
@@ -1501,13 +1505,13 @@ The platform records:
 - database connection and query delay;
 - notification-outbox age;
 - disk, memory, and CPU pressure;
-- last successful backup;
+- last successful backup in Phase 4;
 - data-retention job status; and
 - live endpoint readiness.
 
 Successful checks and spans are data records, not a reason to produce one application log line each.
 
-In Phases 1–3, these signals are available through health endpoints, logs, SQS metrics, and operator dashboards, and the runbook requires manual review during the private/personal deployment. Numeric threshold alarms and automated infrastructure notification delivery are not Phase 1 requirements. Phase 4 creates AWS CloudWatch alarms, sends them through Amazon SNS to confirmed email and independent operator destinations, adds OCI-native alarms and an external dead-man check, and records the owner, threshold, evaluation period, suppression rule, test cadence, and last successful notification test.
+In Phases 1–3, runtime signals other than backup age are available through health endpoints, logs, SQS metrics, and operator dashboards, and the runbook requires manual review during the private/personal deployment. Those phases do not require a successful-backup signal because they make no recovery promise. Numeric threshold alarms and automated infrastructure notification delivery are not Phase 1 requirements. Phase 4 adds backup-age and backup-failure signals, creates AWS CloudWatch alarms, sends them through Amazon SNS to confirmed email and independent operator destinations, adds OCI-native alarms and an external dead-man check, and records the owner, threshold, evaluation period, suppression rule, test cadence, and last successful notification test.
 
 ### 13.6 Quarantine and controlled redrive
 
@@ -1575,7 +1579,7 @@ Test:
 
 ### 14.5 Recovery and security tests
 
-- Restore the database to a clean environment.
+- In Phase 4, restore the database and complete recovery set to a clean environment.
 - Stop the email provider and verify later retry.
 - Stop one worker region and verify recovery.
 - Crash the publisher after SQS accepts a job but before PostgreSQL records success; verify same-ID retry and later ledger repair.
@@ -1587,7 +1591,7 @@ Test:
 - Publish an invalid result attempt followed by a valid attempt for the same job inside five minutes; verify the valid result is delivered because result IDs differ.
 - Submit a malformed gateway result and verify the job message is not deleted.
 - Flood one customer gateway identity and verify per-pool limits protect other pools and the shared result FIFO.
-- Restore an older PostgreSQL backup beside newer queues and verify key restoration, quarantine, reconciliation, result replay, and safe component start order.
+- In Phase 4, restore an older PostgreSQL backup beside newer queues and verify key restoration, quarantine, reconciliation, result replay, and safe component start order.
 - Exercise mTLS renewal/revocation, emergency key revocation, incompatible worker schema, partial pool provisioning, and gateway configuration drift.
 - In Phase 4, test CloudWatch alarm thresholds, SNS email delivery, the independent scheduler dead-man check, and OCI alarm paths without using the application notification outbox.
 - Attempt private-IP, metadata, and customer-allowlist escapes through direct URLs, DNS, alternate address forms, and redirects in both hosted and VPC modes.
@@ -1703,7 +1707,7 @@ Rules:
 7. **The modular check worker and stateless HTTPS queue gateway never connect to PostgreSQL.** Direct SQS is limited to WatchTrace-hosted workers; customer-VPC workers use the rate-limited HTTPS/mTLS gateway. Both are adapters around the same worker engine, and each customer-VPC pool has isolated job routing and keys.
 8. **GET and HEAD are the only Phase 1 check methods.** Side-effecting synthetic workflows require a later safety design.
 9. **Missing checks are unknown, not healthy.** Coverage is shown with uptime.
-10. **The free deployment is a beta, not a 99.9% SLA.** A commercial SLA comes only after paid high-availability infrastructure is proven.
+10. **The Phase 1–3 deployments are private personal engineering environments, not betas or production.** They admit no external clients, their data is disposable, and they make no backup, recovery, availability, or durability promise. Customer production and any commercial SLA begin only after the Phase 4 gates are proven.
 11. **All four phases remain in one product plan.** The infrastructure changes over time, but organizations, projects, environments, services, incidents, and OpenTelemetry remain stable concepts.
 12. **AWS and OCI setup remains manual through Phase 3.** Reviewed runbooks and a versioned non-secret deployment manifest make the early environments repeatable enough for personal/private use; Terraform becomes authoritative in Phase 4.
 13. **Automated infrastructure alert delivery begins in Phase 4.** Earlier phases expose health and metrics for manual review. Phase 4 defines measured CloudWatch thresholds and sends AWS alarm state through SNS/email, alongside OCI and external dead-man alerts.

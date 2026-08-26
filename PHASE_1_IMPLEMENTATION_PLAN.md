@@ -9,7 +9,7 @@ This document is the working checklist for Phase 1 of the real-time API monitori
 - This document defines the order in which Phase 1 will be implemented and verified.
 - GitHub Issues may contain more detailed work, but their task IDs should match this document.
 
-Phase 1 development is complete only when every active package and development-gate item passes. Production or public-beta readiness additionally requires the deferred production deployment gate and the Phase 1 release gate in `RISKS_AND_CAVEATS.md`.
+Phase 1 development is complete only when every active package and development-gate item passes. The Oracle Cloud deployment used in Phases 1–3 is a private, personal engineering environment with disposable data and no external clients. Customer-facing production readiness, backup and restore, recovery objectives, and public release qualification begin in Phase 4 and require the Phase 4 gates in this plan and `RISKS_AND_CAVEATS.md`.
 
 The implementation order is deliberate: build and verify the complete Go backend first, freeze its API contract, and only then build the React frontend. Frontend tasks must not begin before the backend completion gate passes.
 
@@ -29,7 +29,7 @@ At the end of Phase 1, a user must be able to:
 8. See missing checks as unknown coverage instead of successful uptime.
 9. Restart the application without losing checks that were waiting to run.
 
-The system will run locally with Docker Compose and deploy as a small hybrid-cloud beta: one Oracle Cloud Always Free ARM64 VM for the application and PostgreSQL, plus managed Amazon SQS queues in one AWS Region. AWS usage is budgeted and is not assumed to be permanently free.
+The system will run locally with Docker Compose and may deploy to a private personal hybrid-cloud environment: one Oracle Cloud Always Free ARM64 VM for the application and PostgreSQL, plus controlled Amazon SQS queues in one AWS Region. This deployment carries no client data, durability promise, recovery objective, public-beta status, or availability commitment. AWS usage is budgeted and is not assumed to be permanently free.
 
 ---
 
@@ -46,7 +46,7 @@ The system will run locally with Docker Compose and deploy as a small hybrid-clo
 - A stateless HTTPS queue gateway that translates authenticated worker operations to SQS without reading PostgreSQL.
 - Server-Sent Events with a polling fallback.
 - Docker Compose for local and Oracle Cloud deployment.
-- OCI Email Delivery, Vault, Object Storage, and other free OCI services where suitable.
+- OCI Email Delivery, Vault, and other free OCI services where suitable. Object Storage backup use begins with Phase 4 durability work.
 
 The backend monorepo may contain API, scheduler, FIFO publisher, result consumer, check worker, queue gateway, incident, notification, and live-event commands and modules. These are not separate repositories or independently owned microservices in Phase 1. Control-plane modules may share one deployment initially. The check worker and queue gateway remain process and dependency boundaries: neither contains a PostgreSQL driver, SQL queries, database credentials, or product-data access. Amazon SQS owns durable transport between the control plane and workers; an in-memory channel is never the source of truth.
 
@@ -62,6 +62,8 @@ The React application lives in the separate frontend repository. The two reposit
 - POST, PUT, PATCH, or DELETE synthetic checks.
 - Response-body storage.
 - A commercial availability guarantee.
+- Scheduled backups, restore guarantees, RPO/RTO commitments, or disaster recovery; these begin in Phase 4 before any client use.
+- External-client, public-beta, or production use of the Phase 1–3 personal deployment.
 - Terraform or another infrastructure-as-code implementation for AWS or OCI; Phase 1 uses reviewed manual runbooks and a versioned non-secret deployment manifest.
 - Numeric CloudWatch alarm thresholds, Amazon SNS operational topics, automated infrastructure email notifications, or an external dead-man notification path; these begin in Phase 4.
 
@@ -190,7 +192,8 @@ Previously completed work through P1-204
   -> Phase 1.3 Incidents and durable notifications
   -> Phase 1.4 Complete and freeze the backend
   -> Phase 1.5 React frontend
-  -> Deferred production deployment work when production begins
+  -> Optional private personal Oracle deployment for owner-only testing
+  -> Phase 4 production, backup/restore, and customer-release work
 ```
 
 During backend phases, use API integration tests, command-line HTTP requests, and controlled test servers instead of temporary UI pages. Do not create throwaway server-rendered pages. All customer-facing Phase 1 screens are implemented together in Phase 1.5 after the backend gate passes.
@@ -265,7 +268,7 @@ User -> Organization -> Project -> Environment -> Monitor
   -> Idempotent PostgreSQL result -> Authorized API response
 ```
 
-Account handling in this milestone may be minimal, but passwords must still be hashed securely. Public-beta account features are completed across Phase 1.0 and Phase 1.1. Verify this slice with API and database integration tests; do not build React pages yet.
+Account handling in this milestone may be minimal, but passwords must still be hashed securely. Account features needed for eventual external use are completed across Phase 1.0 and Phase 1.1, but they do not authorize external access. Verify this slice with API and database integration tests; do not build React pages yet.
 
 ### Checklist
 
@@ -657,7 +660,7 @@ Finish every backend capability needed by the Phase 1 React application. After t
   - Automate rollup, deletion, durable-queue, expired-token, and notification cleanup with last-success visibility.
   - Freeze the Phase 1 backend contract after all verification passes.
 
-  **Relevant specification:** Sections 8.12–8.13, 13.4–13.6, and 14; risks R-009, R-035–R-038, R-046, R-061–R-064, R-087, and R-089. Risk R-088 is explicitly accepted until Phase 4.
+  **Relevant specification:** Sections 8.12–8.13, 13.5–13.6, and 14; risks R-009, R-035–R-036, R-038, R-046, R-061–R-064, R-087, and R-089. Risks R-037 and R-088 are explicitly accepted until Phase 4 because Phases 1–3 contain no client data or durability promise.
 
   **Package verification:**
   - Backend unit, database, API, system, security, shutdown, recovery, maintenance, logging-redaction, and contract tests pass.
@@ -760,7 +763,7 @@ Build the entire customer-facing Phase 1 application in React and TypeScript usi
 
 ### Phase 1.5 frontend completion gate
 
-- [x] A beta user can complete the full Phase 1 flow without database edits or command-line tools.
+- [x] A test user can complete the full Phase 1 flow without database edits or command-line tools.
 - [x] Every customer-facing screen is implemented in React and uses the documented API.
 - [x] The frontend repository builds and tests independently against the versioned backend API contract.
 - [x] The dashboard distinguishes unknown coverage from healthy uptime.
@@ -771,51 +774,62 @@ Build the entire customer-facing Phase 1 application in React and TypeScript usi
 
 ---
 
-## 12. Deferred Production Deployment Work
+## 12. Private Personal Deployment and Phase 4 Handoff
 
 ### Goal
 
-Package, secure, test, and deploy the completed backend and React frontend to Oracle Cloud. This work is intentionally excluded from the 14 active Phase 1 execution packages and will be performed later when production deployment begins.
+Package, secure, test, and deploy the completed backend and React frontend to Oracle Cloud for owner-only engineering use. The Phase 1–3 environment is intentionally private and disposable: it accepts no external clients, stores no irreplaceable client data, has no scheduled-backup or restore requirement, and makes no availability or recovery promise. Internet-facing security controls remain mandatory even though durability is deferred.
 
-### Deferred package P1-701 — Backup and restore
+### Moved package P4-701 — Backup and restore
 
-This combines former tasks P1-701 and P1-702. Production deployment must add nightly logical backups, block-volume backups, encrypted Object Storage copies, and a documented isolated restore test covering users, monitors, schedules, incidents, notification state, the versioned cloud-resource deployment manifest, exported queue/policy/role attributes, signed gateway configuration, CA records, and active/retired key history. The exercise must restore an older database beside newer queue data, keep schedulers/publishers/consumers stopped during inventory and reconciliation, quarantine unknown identities, refuse expired job republication, replay valid results idempotently, and start components in the documented order.
+Former Phase 1 tasks P1-701 and P1-702 are moved in full to Phase 4 as P4-701. They are not required for the owner-only Phase 1–3 deployment and must remain unchecked until implemented and verified. Before any external client use, Phase 4 must add automated logical and continuous database backups, block-volume backups, encrypted Object Storage and cross-region copies, recovery monitoring, defined RPO/RTO targets, and documented isolated restore exercises. The recovery set and reconciliation requirements are defined in the Phase 4 handoff below and in `DESIGN_SPECIFICATION.md` Sections 11.8.1 and 13.4.
 
-### Deferred package P1-703 — Oracle and AWS production deployment
+### Deployment package P1-703 — Private Oracle and controlled AWS deployment
 
-This combines former tasks P1-703 through P1-706. Production deployment must provide a version-pinned Docker Compose stack, Nginx with HTTPS and correct React/API/SSE/worker-gateway routing, persistent PostgreSQL and worker-journal storage, OCI Vault and other approved OCI integrations, and reviewed manual AWS/OCI runbooks for FIFO job/result queues, per-pool job routing, FIFO DLQs, SSE-SQS, resource inventory, budgets, worker-pool lifecycle, and cross-cloud failure handling. Every created resource and non-IAM security-relevant attribute is recorded in the versioned non-secret deployment manifest and verified after setup. Production network policy must prove the worker and queue gateway cannot reach PostgreSQL. Separate least-privilege AWS workload roles, trust-policy verification, the production security exercise suite, Terraform, numeric CloudWatch alarm thresholds, SNS topics, and infrastructure email alerting are Phase 4 work. Current Oracle and AWS allowances and pricing must be verified at deployment time.
+This combines former tasks P1-703 through P1-706 for a private personal environment. It must provide a version-pinned Docker Compose stack, Nginx with HTTPS and correct React/API/SSE/worker-gateway routing, persistent PostgreSQL and worker-journal storage for ordinary restart testing, OCI Vault and other approved OCI integrations, and reviewed manual AWS/OCI runbooks for controlled FIFO job/result queues, FIFO DLQs, resource inventory, budgets, worker-pool lifecycle, and cross-cloud failure handling. Every created resource and non-IAM security-relevant attribute is recorded in the versioned non-secret deployment manifest and verified after setup. Network and dependency policy must prove the worker and queue gateway cannot reach PostgreSQL. Database loss, VM loss, or destructive migration may reset the environment; no scheduled backup, restore, or recovery-time gate applies. Current Oracle and AWS allowances and pricing must be verified at deployment time.
 
-### Deferred package P1-707 — Release qualification and beta operations
+### Moved package P4-707 — Customer release qualification and operations
 
-This combines former tasks P1-707 through P1-709. Before public use, run ARM64 load and endurance tests, the production security suite, deployment and rollback exercises, and finish beta operations documentation, known limitations, capacity, incident response, and support expectations.
+Former tasks P1-707 through P1-709 move to Phase 4 as P4-707. Before any external use, run ARM64 load and endurance tests, the production security suite, deployment, rollback and disaster-recovery exercises, and finish customer operations documentation, known limitations, capacity, incident response, legal notices, abuse handling, and support expectations.
 
-These deferred packages are mandatory before production or a public beta. Deferral does not mean acceptance, completion, or removal of their release requirements.
+P1-703 may be executed now for private owner-only testing. P4-701 and P4-707 are mandatory before any external client, production, or public-beta use. Moving them does not accept, complete, or remove their requirements.
 
-### Deferred production deployment gate
+### Private personal deployment gate
 
-- [ ] The complete backend and React production build runs on Linux ARM64 using the tested deployment configuration.
+- [ ] The complete backend and React build runs on Linux ARM64 using the tested private deployment configuration.
 - [ ] HTTPS, React routing, API proxying, SSE proxying, container restart, health checks, and persistent storage work.
-- [ ] A clean-environment PostgreSQL restore has succeeded and is documented.
-- [ ] An isolated cross-system restore with an older database and newer queue state has reconciled queues, infrastructure configuration, certificates, and retained keys without republishing expired work.
 - [ ] Load-test results state the measured safe capacity.
 - [ ] Security tests pass.
-- [ ] Production uses temporary AWS workload credentials; no static AWS secret is stored in source, images, PostgreSQL, SQS messages, or production Compose files.
-- [ ] Queue names, AWS Region, SSE-SQS attributes, role names, trust restrictions, and exact queue/action permissions match the reviewed deployment manifest.
-- [ ] Disk, memory, queue, scheduler, notification, and backup health are visible.
+- [ ] Controlled non-production AWS credentials are stored outside source, images, PostgreSQL, SQS messages, and Compose files and are never represented as production isolation.
+- [ ] Queue names, AWS Region, SSE-SQS attributes, and queue-policy fingerprints match the reviewed private deployment manifest.
+- [ ] Disk, memory, queue, scheduler, and notification health are visible.
 - [ ] FIFO job/result visible and in-flight depth, oldest-message age, visibility expiry, both DLQs, ambiguous dispatch outbox, result-consumer delay, gateway health, worker-journal health, and hard-limit events are visible.
-- [ ] Production network and dependency checks prove that check workers and the queue gateway cannot access PostgreSQL.
+- [ ] Network and dependency checks prove that check workers and the queue gateway cannot access PostgreSQL.
 - [ ] Deployment and rollback have each been tested at least once.
 - [ ] Infrastructure drift and a partially provisioned worker pool are detected and reconciled safely.
+- [ ] The environment is access-controlled, carries no external client or irreplaceable data, is documented as disposable, and makes no backup, restore, availability, RPO, or RTO promise.
 
-### Phase 4 infrastructure and alerting handoff
+### Phase 4 production, durability, infrastructure, and alerting handoff
 
-Phase 4 must create the separate environment-scoped job-publisher, hosted-worker, queue-gateway, result-consumer, DLQ-reconciler, and infrastructure-operator roles; restrict every trust policy and queue/action permission; verify role, trust, and policy fingerprints; and run the production security exercises. It must also import or safely replace the manually created AWS and OCI resources and then manage them with Terraform, protect and lock remote state, pin providers, require reviewed plans, separate environments, detect drift, and test rollback. Phase 4 defines numeric CloudWatch thresholds from measured load and recovery data, creates environment-specific SNS topics with confirmed email subscriptions and an independent operator destination, and adds OCI alarms plus an external readiness/scheduler-heartbeat dead-man path. These items are not Phase 1.2 or P1-306 completion requirements.
+P4-701 must add nightly logical backups, continuous database protection appropriate to the chosen PostgreSQL topology, block-volume backups, encrypted Object Storage copies, cross-region copies, backup-age and failure monitoring, and a documented isolated restore test covering users, monitors, schedules, incidents, notification state, the versioned cloud-resource deployment manifest, exported queue/policy/role attributes, signed gateway configuration, CA records, protected Terraform state, and active/retired key history. The exercise must restore an older database beside newer queue data, keep schedulers/publishers/consumers stopped during inventory and reconciliation, quarantine unknown identities, refuse expired job republication, replay valid results idempotently, and start components in the documented order. Measured exercises establish RPO and RTO before either is promised.
+
+Phase 4 must also create the separate environment-scoped job-publisher, hosted-worker, queue-gateway, result-consumer, DLQ-reconciler, and infrastructure-operator roles; restrict every trust policy and queue/action permission; verify role, trust, and policy fingerprints; and run the production security exercises. It must import or safely replace manually created AWS and OCI resources and then manage them with Terraform, protect and lock remote state, pin providers, require reviewed plans, separate environments, detect drift, and test rollback. Phase 4 defines numeric CloudWatch thresholds from measured load and recovery data, creates environment-specific SNS topics with confirmed email subscriptions and an independent operator destination, and adds OCI alarms plus an external readiness/scheduler-heartbeat dead-man path.
+
+### Phase 4 customer production gate
+
+- [ ] P4-701 backup, restore, cross-system reconciliation, and measured RPO/RTO requirements pass.
+- [ ] A clean-environment PostgreSQL restore has succeeded and is documented.
+- [ ] An isolated restore of an older database beside newer queue state reconciles infrastructure, certificates, retained keys, outboxes, results, and expired work safely.
+- [ ] Production uses temporary AWS workload credentials and separate least-privilege roles; no static AWS secret is stored in source, images, PostgreSQL, SQS messages, or Compose files.
+- [ ] Backup age, backup failure, restore readiness, disk, memory, queues, scheduler, notification, and independent dead-man health are monitored and alert successfully.
+- [ ] Production deployment and rollback, security, load, endurance, incident-response, legal, abuse, and customer-support gates pass.
+- [ ] No external client is admitted before every Phase 4 customer production gate item passes.
 
 ---
 
 ## 13. Phase 1 Development Completion Gate
 
-The active Phase 1 implementation is development-complete only when all of the following are true. This does not authorize production deployment; the deferred production deployment gate must pass separately.
+The active Phase 1 implementation is development-complete only when all of the following are true. This authorizes only local and private personal testing; it does not authorize external-client, public-beta, or production use.
 
 - [ ] A new user can complete the full flow without manual database changes.
 - [ ] Monitoring survives application and container restarts.
@@ -835,7 +849,7 @@ The active Phase 1 implementation is development-complete only when all of the f
 - [ ] Secrets and response bodies are absent from stored results and logs.
 - [ ] Data retention and rollup jobs have run successfully.
 
-When this gate passes, the application is a Phase 1 development release candidate. Do not call it production-ready or open it as a public beta until the deferred production deployment and risk-document gates pass.
+When this gate passes, the application is a Phase 1 development release candidate for owner-only testing. Do not call it production-ready or admit external clients until the Phase 4 customer production gate and the Phase 4 risk-document gate pass.
 
 ---
 
@@ -913,4 +927,4 @@ For each package, Codex should:
 9. Update the package checkbox only when every deliverable and verification item passes.
 10. Summarize changed files, commits, verification results, and any remaining concern.
 
-Continue with **P1-205**, because implementation has progressed through P1-204. Complete subphases in document order. Do not start **P1-601** or another React package until the Phase 1.4 backend completion gate passes. Do not execute P1-701, P1-703, or P1-707 until production deployment begins.
+Continue with the first incomplete package in document order. P1-703 may be executed for the private personal Oracle deployment after Phase 1 development verification. Former P1-701/P1-702 and P1-707/P1-709 are now P4-701 and P4-707 and must not be executed or checked as Phase 1 work. No external client may use the system until the Phase 4 customer production gate passes.
