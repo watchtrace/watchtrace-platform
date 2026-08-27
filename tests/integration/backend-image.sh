@@ -49,6 +49,21 @@ docker run --detach \
     --env 'WATCHTRACE_DATABASE_URL=postgres://watchtrace@postgres/watchtrace?sslmode=disable' \
     "$image_name" >/dev/null
 
+for binary in \
+    watchtrace-api \
+    watchtrace-migrate \
+    watchtrace-monitor-engine \
+    watchtrace-notification-worker \
+    watchtrace-worker-pool \
+    watchtrace-queue-admin \
+    watchtrace-healthcheck
+do
+    if ! docker export "$container_name" | tar -tf - | grep -qx "$binary"; then
+        echo "Container image is missing /$binary." >&2
+        exit 1
+    fi
+done
+
 published_address=$(docker port "$container_name" 8080/tcp)
 attempt=0
 response=""
@@ -66,6 +81,8 @@ if [ "$response" != '{"status":"ok"}' ]; then
     docker logs "$container_name" >&2
     exit 1
 fi
+
+docker exec "$container_name" /watchtrace-healthcheck http://127.0.0.1:8080/health/live
 
 docker stop --time 15 "$container_name" >/dev/null
 exit_code=$(docker inspect --format '{{.State.ExitCode}}' "$container_name")

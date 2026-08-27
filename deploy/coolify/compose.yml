@@ -1,0 +1,211 @@
+name: watchtrace-private
+
+x-bounded-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-control-image: &control-image
+  image: ${WATCHTRACE_CONTROL_IMAGE:?Set the immutable or main WatchTrace control image}
+  pull_policy: always
+  restart: unless-stopped
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  logging: *bounded-logging
+
+x-database-environment: &database-environment
+  WATCHTRACE_DATABASE_URL: ${WATCHTRACE_DATABASE_URL:?Set the internal PostgreSQL URL}
+
+x-aws-environment: &aws-environment
+  AWS_REGION: ${AWS_REGION:?Set the single deployment AWS Region}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set the private Phase 1 AWS access key}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set the private Phase 1 AWS secret key}
+  AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+  WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL: ${WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL:?Set the hosted job FIFO URL}
+  WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL: ${WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL:?Set the hosted job DLQ URL}
+  WATCHTRACE_SQS_RESULT_QUEUE_URL: ${WATCHTRACE_SQS_RESULT_QUEUE_URL:?Set the result FIFO URL}
+  WATCHTRACE_SQS_RESULT_DLQ_URL: ${WATCHTRACE_SQS_RESULT_DLQ_URL:?Set the result DLQ URL}
+
+services:
+  postgres:
+    image: postgres:18.4-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-watchtrace}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a URL-safe PostgreSQL password}
+      POSTGRES_DB: ${POSTGRES_DB:-watchtrace}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 30s
+    logging: *bounded-logging
+
+  migrate:
+    <<: *control-image
+    command: ["/watchtrace-migrate", "up"]
+    restart: "no"
+    environment:
+      <<: *database-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    exclude_from_hc: true
+
+  api:
+    <<: *control-image
+    command: ["/watchtrace-api"]
+    environment:
+      <<: *database-environment
+      WATCHTRACE_ENVIRONMENT: production
+      WATCHTRACE_HTTP_ADDRESS: 0.0.0.0:8080
+      WATCHTRACE_SHUTDOWN_TIMEOUT: 30s
+      WATCHTRACE_VERIFICATION_PROVIDER: oci
+      WATCHTRACE_VERIFICATION_SMTP_ADDRESS: ${WATCHTRACE_SMTP_ADDRESS:?Set the OCI Email Delivery SMTP endpoint}
+      WATCHTRACE_VERIFICATION_SMTP_USERNAME: ${WATCHTRACE_SMTP_USERNAME:?Set the OCI SMTP username}
+      WATCHTRACE_VERIFICATION_SMTP_PASSWORD: ${WATCHTRACE_SMTP_PASSWORD:?Set the OCI SMTP password}
+      WATCHTRACE_VERIFICATION_FROM: ${WATCHTRACE_EMAIL_FROM:?Set the approved sender address}
+      WATCHTRACE_VERIFICATION_URL: ${WATCHTRACE_PUBLIC_URL:?Set the public HTTPS URL}/verify-email
+      WATCHTRACE_PASSWORD_RESET_URL: ${WATCHTRACE_PUBLIC_URL:?Set the public HTTPS URL}/reset-password
+      WATCHTRACE_INVITATION_URL: ${WATCHTRACE_PUBLIC_URL:?Set the public HTTPS URL}/accept-invitation
+      WATCHTRACE_MONITOR_HEADER_KEY: ${WATCHTRACE_MONITOR_HEADER_KEY:?Set a base64-encoded 32-byte key}
+      WATCHTRACE_MONITOR_HEADER_KEY_VERSION: ${WATCHTRACE_MONITOR_HEADER_KEY_VERSION:-1}
+      WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY: ${WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY:?Set a base64-encoded Ed25519 private key}
+      WATCHTRACE_PLATFORM_SIGNING_KEY_ID: ${WATCHTRACE_PLATFORM_SIGNING_KEY_ID:-platform-v1}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8080/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+
+  monitor-engine:
+    <<: *control-image
+    command: ["/watchtrace-monitor-engine"]
+    environment:
+      <<: [*database-environment, *aws-environment]
+      WATCHTRACE_PLATFORM_SIGNING_KEY: /run/secrets/platform-signing-private
+      WATCHTRACE_PLATFORM_SIGNING_KEY_ID: ${WATCHTRACE_PLATFORM_SIGNING_KEY_ID:-platform-v1}
+      WATCHTRACE_MONITOR_HEADER_KEY_FILE: /run/secrets/monitor-header-key
+      WATCHTRACE_QUARANTINE_KEY: /run/secrets/quarantine-key
+      WATCHTRACE_ENGINE_HEALTH_ADDRESS: 0.0.0.0:8091
+    secrets:
+      - platform-signing-private
+      - monitor-header-key
+      - quarantine-key
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8091/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+
+  hosted-worker:
+    image: ${WATCHTRACE_WORKER_IMAGE:?Set the immutable or main WatchTrace worker image}
+    pull_policy: always
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      <<: *aws-environment
+      WATCHTRACE_WORKER_TRANSPORT: direct_sqs
+      WATCHTRACE_WORKER_POOL_ID: ${WATCHTRACE_WORKER_POOL_ID:-hosted}
+      WATCHTRACE_WORKER_ID: ${WATCHTRACE_WORKER_ID:-hosted-worker-1}
+      WATCHTRACE_WORKER_ENCRYPTION_KEY: /run/secrets/worker-encryption-private
+      WATCHTRACE_WORKER_ENCRYPTION_KEY_ID: ${WATCHTRACE_WORKER_ENCRYPTION_KEY_ID:-enc-v1}
+      WATCHTRACE_WORKER_RESULT_KEY: /run/secrets/worker-result-private
+      WATCHTRACE_RESULT_KEY_ID: ${WATCHTRACE_RESULT_KEY_ID:-result-v1}
+      WATCHTRACE_PLATFORM_SIGNING_PUBLIC_KEY: /run/secrets/platform-signing-public
+      WATCHTRACE_PLATFORM_SIGNING_KEY_ID: ${WATCHTRACE_PLATFORM_SIGNING_KEY_ID:-platform-v1}
+      WATCHTRACE_WORKER_JOURNAL: /var/lib/watchtrace-worker/journal.sqlite
+      WATCHTRACE_WORKER_HEALTH_ADDRESS: 0.0.0.0:8090
+    secrets:
+      - worker-encryption-private
+      - worker-result-private
+      - platform-signing-public
+    volumes:
+      - worker-journal:/var/lib/watchtrace-worker
+    healthcheck:
+      test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8090/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    stop_grace_period: 30s
+    logging: *bounded-logging
+
+  notification-worker:
+    <<: *control-image
+    command: ["/watchtrace-notification-worker"]
+    environment:
+      <<: *database-environment
+      WATCHTRACE_NOTIFICATION_PROVIDER: oci
+      WATCHTRACE_NOTIFICATION_SMTP_ADDRESS: ${WATCHTRACE_SMTP_ADDRESS:?Set the OCI Email Delivery SMTP endpoint}
+      WATCHTRACE_NOTIFICATION_SMTP_USERNAME: ${WATCHTRACE_SMTP_USERNAME:?Set the OCI SMTP username}
+      WATCHTRACE_NOTIFICATION_SMTP_PASSWORD: ${WATCHTRACE_SMTP_PASSWORD:?Set the OCI SMTP password}
+      WATCHTRACE_NOTIFICATION_FROM: ${WATCHTRACE_EMAIL_FROM:?Set the approved sender address}
+      WATCHTRACE_NOTIFICATION_WORKER_ID: ${WATCHTRACE_NOTIFICATION_WORKER_ID:-notification-worker-1}
+      WATCHTRACE_NOTIFICATION_HEALTH_ADDRESS: 0.0.0.0:8092
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8092/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+
+  frontend:
+    image: ${WATCHTRACE_FRONTEND_IMAGE:?Set the immutable or main WatchTrace frontend image}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *bounded-logging
+
+volumes:
+  postgres-data:
+  worker-journal:
+
+secrets:
+  platform-signing-private:
+    environment: WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY
+  platform-signing-public:
+    environment: WATCHTRACE_PLATFORM_SIGNING_PUBLIC_KEY
+  monitor-header-key:
+    environment: WATCHTRACE_MONITOR_HEADER_KEY
+  quarantine-key:
+    environment: WATCHTRACE_QUARANTINE_KEY
+  worker-encryption-private:
+    environment: WATCHTRACE_WORKER_ENCRYPTION_PRIVATE_KEY
+  worker-result-private:
+    environment: WATCHTRACE_WORKER_RESULT_PRIVATE_KEY

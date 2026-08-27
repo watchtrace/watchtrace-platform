@@ -4,6 +4,42 @@ Phase 1.2 uses a reviewed manual AWS procedure and a versioned, non-secret deplo
 
 Use one explicit Region for an environment (`ap-south-1` is the reference Region). Never place access keys, session tokens, receipt handles, private keys, certificate private material, or decrypted monitor data in the manifest.
 
+## Create or reconcile the private Phase 1 queues
+
+Authenticate the AWS CLI with the explicitly controlled non-production identity,
+confirm the account before changing anything, and preview the names and output
+path:
+
+```sh
+aws sts get-caller-identity
+./scripts/provision-phase1-sqs.sh --environment dev --region ap-south-1
+```
+
+Apply the reviewed plan. This creates DLQs before source queues, rolls back only
+queues newly created by a failed run, safely reconciles an existing queue set,
+applies the documented tags and TLS-only queue policy, and writes the non-secret
+environment manifest:
+
+```sh
+./scripts/provision-phase1-sqs.sh \
+  --environment dev \
+  --region ap-south-1 \
+  --manifest deploy/aws/phase1-sqs.dev.manifest.json \
+  --runtime-policy deploy/aws/phase1-sqs.dev.runtime-policy.json \
+  --apply
+go run ./cmd/queue-admin \
+  -scope sqs \
+  deploy/aws/phase1-sqs.dev.manifest.json
+```
+
+Review and commit the generated non-secret manifest and runtime IAM policy after
+verification. Attach the generated queue-scoped policy to a dedicated
+non-production runtime identity; put only that identity's access key in Coolify.
+Do not put the provisioning operator's credentials in Coolify. Copy the
+manifest's four queue URLs into the matching Coolify variables. Do not set
+`WATCHTRACE_SQS_ENDPOINT` for AWS; endpoint overrides are accepted only by the
+isolated LocalStack test when `WATCHTRACE_ALLOW_LOCALSTACK=1` is also set.
+
 ## Local validation
 
 Docker Compose starts LocalStack on `http://127.0.0.1:4566`. Set `AWS_ACCESS_KEY_ID=test`, `AWS_SECRET_ACCESS_KEY=test`, `AWS_REGION=ap-south-1`, and `WATCHTRACE_SQS_ENDPOINT=http://host.docker.internal:4566` only for LocalStack. These values are not production credentials.

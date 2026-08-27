@@ -113,6 +113,42 @@ func TestLocalSMTPSenderRejectsNonLoopbackConfiguration(t *testing.T) {
 	}
 }
 
+func TestOCIEmailDeliverySenderRequiresAuthenticatedSMTPAndHTTPSLinks(t *testing.T) {
+	sender, err := NewOCIEmailDeliverySender(
+		"smtp.email.ap-mumbai-1.oci.oraclecloud.com:587",
+		"ocid1.user.oc1..example",
+		"smtp-password",
+		"watchtrace@example.test",
+		"https://watchtrace.example.test/verify-email",
+		"https://watchtrace.example.test/reset-password",
+		"https://watchtrace.example.test/accept-invitation",
+	)
+	if err != nil || sender == nil || !sender.startTLS {
+		t.Fatalf("construct OCI sender: sender=%v err=%v", sender, err)
+	}
+	for _, test := range []struct {
+		name     string
+		address  string
+		username string
+		password string
+		url      string
+	}{
+		{name: "IP SMTP host", address: "127.0.0.1:587", username: "user", password: "password", url: "https://example.test/verify"},
+		{name: "missing username", address: "smtp.example.test:587", password: "password", url: "https://example.test/verify"},
+		{name: "missing password", address: "smtp.example.test:587", username: "user", url: "https://example.test/verify"},
+		{name: "insecure action URL", address: "smtp.example.test:587", username: "user", password: "password", url: "http://example.test/verify"},
+		{name: "action query", address: "smtp.example.test:587", username: "user", password: "password", url: "https://example.test/verify?token=unsafe"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewOCIEmailDeliverySender(test.address, test.username, test.password,
+				"watchtrace@example.test", test.url, "https://example.test/reset",
+				"https://example.test/invite"); err == nil {
+				t.Fatal("unsafe OCI SMTP configuration was accepted")
+			}
+		})
+	}
+}
+
 func serveTestSMTP(listener net.Listener, messages chan<- string, errors chan<- error) {
 	connection, err := listener.Accept()
 	if err != nil {

@@ -1,7 +1,8 @@
 # WatchTrace Platform
 
 Backend monorepo for WatchTrace. The Phase 1 backend is a modular Go
-application; the React frontend will live in a separate repository.
+application; the React frontend lives in the separate `watchtrace-console`
+repository.
 
 This repository owns backend commands and modules, database assets, backend
 tests, deployment definitions, and the versioned HTTP and Server-Sent Events
@@ -29,7 +30,7 @@ index.
 ## Requirements
 
 - Git
-- Go 1.26.5
+- Go 1.26.6
 - Docker Engine with the Docker Compose v2 plugin
 - PowerShell 7 only when running the Windows commands or the PostgreSQL
   integration-test script
@@ -255,9 +256,10 @@ appear in the API response or request logs.
 
 ## Backend Container Image
 
-The production-style image uses a pinned Go builder and a minimal `scratch`
-runtime containing only the statically linked API and migration binaries plus
-the public CA certificate bundle. It runs as numeric user and group
+The production-style control image uses a pinned Go builder and a minimal
+`scratch` runtime containing the statically linked API, migration, monitoring,
+notification, health-check, and operator binaries plus the public CA
+certificate bundle. It runs as numeric user and group
 `65532:65532`; source files and tests are not included in the runtime image.
 
 Build and run the image for the local Docker platform:
@@ -271,9 +273,12 @@ docker run --rm \
   watchtrace-platform:local
 ```
 
-The image defaults to `/watchtrace-api`. Deployment automation may override
-the command with `/watchtrace-migrate up` while supplying its database URL at
-runtime; credentials are never built into the image.
+The control image defaults to `/watchtrace-api`. Deployment automation may
+override the command with `/watchtrace-migrate up`,
+`/watchtrace-monitor-engine`, or `/watchtrace-notification-worker` while
+supplying configuration at runtime. `Dockerfile.worker` builds the separate
+database-free hosted-worker image. Credentials are never built into either
+image.
 
 Build the Oracle-compatible Linux ARM64 image without publishing it:
 
@@ -288,7 +293,12 @@ Run the local image security, liveness, and graceful-shutdown smoke test with:
 
 ```sh
 ./tests/integration/backend-image.sh
+./tests/integration/worker-image.sh
 ```
+
+The owner-only Oracle/Coolify stack and its setup instructions are in the
+[private deployment runbook](deploy/coolify/README.md). It deliberately makes
+no backup or recovery promise and is not eligible for external-client use.
 
 Phase 1 monitoring uses Amazon SQS FIFO in production and LocalStack for the
 local recovery suite. See [the Phase 1 SQS runbook](docs/AWS_SQS_RUNBOOK.md),
@@ -310,7 +320,9 @@ go vet ./...
 go test -race ./...
 go build ./...
 ./tests/integration/postgres-database.sh
+./tests/integration/coolify-compose.sh
 ./tests/integration/backend-image.sh
+./tests/integration/worker-image.sh
 ```
 
 The `Backend CI` GitHub Actions workflow runs these checks for every push and

@@ -40,15 +40,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer databasePool.Close()
-	actionSender, err := auth.NewLocalSMTPSender(
-		configuration.VerificationSMTPAddress,
-		configuration.VerificationFrom,
-		configuration.VerificationURL,
-		configuration.PasswordResetURL,
-		configuration.InvitationURL,
-	)
+	actionSender, err := configuredActionSender(configuration)
 	if err != nil {
-		logger.Error("configure local email verification delivery")
+		logger.Error("configure account action delivery")
 		os.Exit(1)
 	}
 	authService := auth.NewService(databasePool, actionSender)
@@ -86,6 +80,27 @@ func main() {
 		logger.Error("API server stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func configuredActionSender(configuration config.Config) (auth.AccountActionSender, error) {
+	if configuration.VerificationProvider == "oci" {
+		return auth.NewOCIEmailDeliverySender(
+			configuration.VerificationSMTPAddress,
+			configuration.VerificationSMTPUsername,
+			configuration.VerificationSMTPPassword,
+			configuration.VerificationFrom,
+			configuration.VerificationURL,
+			configuration.PasswordResetURL,
+			configuration.InvitationURL,
+		)
+	}
+	return auth.NewLocalSMTPSender(
+		configuration.VerificationSMTPAddress,
+		configuration.VerificationFrom,
+		configuration.VerificationURL,
+		configuration.PasswordResetURL,
+		configuration.InvitationURL,
+	)
 }
 
 func runSessionCleanup(ctx context.Context, service *auth.Service, operationsService *operations.Service, logger *slog.Logger) {

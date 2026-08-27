@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -22,7 +23,7 @@ const (
 )
 
 // AccountActionSender delivers raw account-action tokens without persisting
-// or logging them. Production provider integration remains owned by P1-406.
+// or logging them.
 type AccountActionSender interface {
 	SendVerification(context.Context, string, string) error
 	SendPasswordReset(context.Context, string, string) error
@@ -32,11 +33,25 @@ type AccountActionSender interface {
 // LocalSMTPSender delivers development account mail to a loopback SMTP capture
 // service such as Mailpit.
 type LocalSMTPSender struct {
+	*smtpActionSender
+}
+
+// OCIEmailDeliverySender delivers account-action mail through OCI Email
+// Delivery using authenticated STARTTLS.
+type OCIEmailDeliverySender struct {
+	*smtpActionSender
+}
+
+type smtpActionSender struct {
 	address   string
+	host      string
 	from      string
 	baseURL   *url.URL
 	resetURL  *url.URL
 	inviteURL *url.URL
+	username  string
+	password  string
+	startTLS  bool
 }
 
 // NewLocalSMTPSender constructs a local-only plaintext SMTP adapter. Both the
@@ -62,7 +77,36 @@ func NewLocalSMTPSender(address, from, baseURL, resetURL, inviteURL string) (*Lo
 	if err != nil {
 		return nil, errors.New("invitation URL must be an absolute loopback HTTP URL without query or fragment")
 	}
-	return &LocalSMTPSender{address: address, from: from, baseURL: parsed, resetURL: parsedReset, inviteURL: parsedInvite}, nil
+	return &LocalSMTPSender{smtpActionSender: &smtpActionSender{
+		address: address, host: host, from: from, baseURL: parsed, resetURL: parsedReset, inviteURL: parsedInvite,
+	}}, nil
+}
+
+// NewOCIEmailDeliverySender constructs the production account-action adapter.
+// Action links must use HTTPS and credentials never enter a message or error.
+func NewOCIEmailDeliverySender(address, username, password, from, baseURL, resetURL, inviteURL string) (*OCIEmailDeliverySender, error) {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil || net.ParseIP(host) != nil || strings.TrimSpace(username) == "" ||
+		strings.TrimSpace(password) == "" || strings.TrimSpace(from) == "" || strings.ContainsAny(from, "\r\n") {
+		return nil, errors.New("OCI verification SMTP configuration is invalid")
+	}
+	parsed, err := parseHTTPSActionURL(baseURL)
+	if err != nil {
+		return nil, errors.New("verification URL must be an absolute HTTPS URL without query or fragment")
+	}
+	parsedReset, err := parseHTTPSActionURL(resetURL)
+	if err != nil {
+		return nil, errors.New("password-reset URL must be an absolute HTTPS URL without query or fragment")
+	}
+	parsedInvite, err := parseHTTPSActionURL(inviteURL)
+	if err != nil {
+		return nil, errors.New("invitation URL must be an absolute HTTPS URL without query or fragment")
+	}
+	return &OCIEmailDeliverySender{smtpActionSender: &smtpActionSender{
+		address: strings.TrimSpace(address), host: host, from: strings.TrimSpace(from),
+		baseURL: parsed, resetURL: parsedReset, inviteURL: parsedInvite,
+		username: strings.TrimSpace(username), password: strings.TrimSpace(password), startTLS: true,
+	}}, nil
 }
 
 func parseLocalActionURL(value string) (*url.URL, error) {
@@ -75,7 +119,16 @@ func parseLocalActionURL(value string) (*url.URL, error) {
 	return parsed, nil
 }
 
-func (sender *LocalSMTPSender) SendVerification(ctx context.Context, recipient, token string) error {
+func parseHTTPSActionURL(value string) (*url.URL, error) {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("invalid HTTPS action URL")
+	}
+	return parsed, nil
+}
+
+func (sender *smtpActionSender) SendVerification(ctx context.Context, recipient, token string) error {
 	if sender == nil || strings.ContainsAny(recipient, "\r\n") || !validVerificationToken(token) {
 		return errors.New("invalid verification delivery input")
 	}
@@ -84,7 +137,7 @@ func (sender *LocalSMTPSender) SendVerification(ctx context.Context, recipient, 
 		"Verify your WatchTrace email", "Verify your WatchTrace email within 24 hours:"))
 }
 
-func (sender *LocalSMTPSender) SendPasswordReset(ctx context.Context, recipient, token string) error {
+func (sender *smtpActionSender) SendPasswordReset(ctx context.Context, recipient, token string) error {
 	if sender == nil || strings.ContainsAny(recipient, "\r\n") || !validPasswordResetToken(token) {
 		return errors.New("invalid password-reset delivery input")
 	}
@@ -92,7 +145,7 @@ func (sender *LocalSMTPSender) SendPasswordReset(ctx context.Context, recipient,
 		"Reset your WatchTrace password", "Reset your WatchTrace password within 1 hour:"))
 }
 
-func (sender *LocalSMTPSender) SendInvitation(ctx context.Context, recipient, token string) error {
+func (sender *smtpActionSender) SendInvitation(ctx context.Context, recipient, token string) error {
 	if sender == nil || strings.ContainsAny(recipient, "\r\n") || !ValidInvitationToken(token) {
 		return errors.New("invalid invitation delivery input")
 	}
@@ -100,12 +153,12 @@ func (sender *LocalSMTPSender) SendInvitation(ctx context.Context, recipient, to
 		"Join a WatchTrace organization", "Accept this WatchTrace invitation within 7 days:"))
 }
 
-func (sender *LocalSMTPSender) send(ctx context.Context, recipient, message string) error {
+func (sender *smtpActionSender) send(ctx context.Context, recipient, message string) error {
 	deliveryCtx, cancel := context.WithTimeout(ctx, verificationSendTimeout)
 	defer cancel()
 	connection, err := (&net.Dialer{}).DialContext(deliveryCtx, "tcp", sender.address)
 	if err != nil {
-		return fmt.Errorf("connect to local verification SMTP: %w", err)
+		return fmt.Errorf("connect to verification SMTP: %w", err)
 	}
 	defer connection.Close()
 	deadline := time.Now().Add(verificationSendTimeout)
@@ -119,9 +172,17 @@ func (sender *LocalSMTPSender) send(ctx context.Context, recipient, message stri
 	host, _, _ := net.SplitHostPort(sender.address)
 	client, err := smtp.NewClient(connection, host)
 	if err != nil {
-		return fmt.Errorf("start local verification SMTP: %w", err)
+		return fmt.Errorf("start verification SMTP: %w", err)
 	}
 	defer client.Close()
+	if sender.startTLS {
+		if err = client.StartTLS(&tls.Config{ServerName: sender.host, MinVersion: tls.VersionTLS12}); err != nil {
+			return errors.New("start verification SMTP TLS")
+		}
+		if err = client.Auth(smtp.PlainAuth("", sender.username, sender.password, sender.host)); err != nil {
+			return errors.New("authenticate verification SMTP")
+		}
+	}
 	if err := client.Mail(sender.from); err != nil {
 		return fmt.Errorf("set verification sender: %w", err)
 	}
@@ -145,7 +206,7 @@ func (sender *LocalSMTPSender) send(ctx context.Context, recipient, message stri
 	return nil
 }
 
-func (sender *LocalSMTPSender) message(recipient, token string, baseURL *url.URL, subject, instruction string) string {
+func (sender *smtpActionSender) message(recipient, token string, baseURL *url.URL, subject, instruction string) string {
 	actionURL := *baseURL
 	query := actionURL.Query()
 	query.Set("token", token)

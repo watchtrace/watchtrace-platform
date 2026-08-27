@@ -159,8 +159,11 @@ func VerifySQS(ctx context.Context, client SQSAPI, manifest Manifest) error {
 			}
 		}
 		policyFingerprint, err := fingerprintJSON(out.Attributes[string(types.QueueAttributeNamePolicy)])
-		if err != nil || policyFingerprint != queue.PolicyFingerprintSHA256 {
-			return fmt.Errorf("queue policy drift: %s", key)
+		if err != nil {
+			return fmt.Errorf("read queue policy: %s: %w", key, err)
+		}
+		if policyFingerprint != queue.PolicyFingerprintSHA256 {
+			return fmt.Errorf("queue policy drift: %s: fingerprint %q, want %q", key, policyFingerprint, queue.PolicyFingerprintSHA256)
 		}
 		if queue.MaxReceiveCount > 0 {
 			var redrive struct {

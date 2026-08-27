@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -33,6 +34,7 @@ func main() {
 		logger.Error("configure notification provider")
 		os.Exit(1)
 	}
+	go runHealth(ctx, db)
 	workerID := setting("WATCHTRACE_NOTIFICATION_WORKER_ID", "notification-worker-1")
 	worker, err := notification.NewWorker(db, provider, notification.Config{WorkerID: workerID, LeaseDuration: 30 * time.Second})
 	if err != nil {
@@ -48,6 +50,40 @@ func main() {
 			waitFor(ctx, 500*time.Millisecond)
 		}
 	}
+}
+
+type databasePinger interface {
+	Ping(context.Context) error
+}
+
+func healthHandler(database databasePinger) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health/live", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/health/ready", func(writer http.ResponseWriter, request *http.Request) {
+		if database == nil || database.Ping(request.Context()) != nil {
+			http.Error(writer, "not_ready", http.StatusServiceUnavailable)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	})
+	return mux
+}
+
+func runHealth(ctx context.Context, database databasePinger) {
+	server := &http.Server{
+		Addr:              setting("WATCHTRACE_NOTIFICATION_HEALTH_ADDRESS", "127.0.0.1:8092"),
+		Handler:           healthHandler(database),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+	}()
+	_ = server.ListenAndServe()
 }
 
 func waitFor(ctx context.Context, duration time.Duration) {

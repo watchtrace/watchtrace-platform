@@ -20,6 +20,9 @@ const (
 	shutdownTimeoutEnvironment         = "WATCHTRACE_SHUTDOWN_TIMEOUT"
 	deploymentEnvironment              = "WATCHTRACE_ENVIRONMENT"
 	verificationSMTPEnvironment        = "WATCHTRACE_VERIFICATION_SMTP_ADDRESS"
+	verificationProviderEnvironment    = "WATCHTRACE_VERIFICATION_PROVIDER"
+	verificationUsernameEnvironment    = "WATCHTRACE_VERIFICATION_SMTP_USERNAME"
+	verificationPasswordEnvironment    = "WATCHTRACE_VERIFICATION_SMTP_PASSWORD"
 	verificationFromEnvironment        = "WATCHTRACE_VERIFICATION_FROM"
 	verificationURLEnvironment         = "WATCHTRACE_VERIFICATION_URL"
 	passwordResetURLEnvironment        = "WATCHTRACE_PASSWORD_RESET_URL"
@@ -42,19 +45,22 @@ const (
 
 // Config contains the validated settings needed to start the API.
 type Config struct {
-	DatabaseURL             string
-	HTTPAddress             string
-	ShutdownTimeout         time.Duration
-	Production              bool
-	VerificationSMTPAddress string
-	VerificationFrom        string
-	VerificationURL         string
-	PasswordResetURL        string
-	InvitationURL           string
-	MonitorHeaderKey        []byte
-	MonitorHeaderKeyVersion int32
-	PlatformSigningKey      ed25519.PrivateKey
-	PlatformSigningKeyID    string
+	DatabaseURL              string
+	HTTPAddress              string
+	ShutdownTimeout          time.Duration
+	Production               bool
+	VerificationSMTPAddress  string
+	VerificationProvider     string
+	VerificationSMTPUsername string
+	VerificationSMTPPassword string
+	VerificationFrom         string
+	VerificationURL          string
+	PasswordResetURL         string
+	InvitationURL            string
+	MonitorHeaderKey         []byte
+	MonitorHeaderKeyVersion  int32
+	PlatformSigningKey       ed25519.PrivateKey
+	PlatformSigningKeyID     string
 }
 
 // Load reads configuration from the process environment and validates it.
@@ -104,12 +110,21 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	verificationSMTP := stringSetting(lookup, verificationSMTPEnvironment, defaultVerificationSMTP)
+	verificationProvider := strings.ToLower(stringSetting(lookup, verificationProviderEnvironment, "local"))
+	verificationUsername := stringSetting(lookup, verificationUsernameEnvironment, "")
+	verificationPassword := stringSetting(lookup, verificationPasswordEnvironment, "")
 	verificationFrom := stringSetting(lookup, verificationFromEnvironment, defaultVerificationFrom)
 	verificationURL := stringSetting(lookup, verificationURLEnvironment, defaultVerificationURL)
 	passwordResetURL := stringSetting(lookup, passwordResetURLEnvironment, defaultPasswordResetURL)
 	invitationURL := stringSetting(lookup, invitationURLEnvironment, defaultInvitationURL)
 	if verificationSMTP == "" || verificationFrom == "" || verificationURL == "" || passwordResetURL == "" || invitationURL == "" {
 		return Config{}, errors.New("email verification settings must not be empty")
+	}
+	if verificationProvider != "local" && verificationProvider != "oci" {
+		return Config{}, fmt.Errorf("%s must be local or oci", verificationProviderEnvironment)
+	}
+	if verificationProvider == "oci" && (verificationUsername == "" || verificationPassword == "") {
+		return Config{}, errors.New("OCI verification SMTP credentials are required")
 	}
 	headerKeyValue := defaultDevelopmentHeaderKey
 	if value, exists := lookup(monitorHeaderKeyEnvironment); exists {
@@ -145,19 +160,22 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	return Config{
-		DatabaseURL:             databaseURL,
-		HTTPAddress:             httpAddress,
-		ShutdownTimeout:         shutdownTimeout,
-		Production:              environment == "production",
-		VerificationSMTPAddress: verificationSMTP,
-		VerificationFrom:        verificationFrom,
-		VerificationURL:         verificationURL,
-		PasswordResetURL:        passwordResetURL,
-		InvitationURL:           invitationURL,
-		MonitorHeaderKey:        headerKey,
-		MonitorHeaderKeyVersion: headerKeyVersion,
-		PlatformSigningKey:      signingKey,
-		PlatformSigningKeyID:    signingKeyID,
+		DatabaseURL:              databaseURL,
+		HTTPAddress:              httpAddress,
+		ShutdownTimeout:          shutdownTimeout,
+		Production:               environment == "production",
+		VerificationSMTPAddress:  verificationSMTP,
+		VerificationProvider:     verificationProvider,
+		VerificationSMTPUsername: verificationUsername,
+		VerificationSMTPPassword: verificationPassword,
+		VerificationFrom:         verificationFrom,
+		VerificationURL:          verificationURL,
+		PasswordResetURL:         passwordResetURL,
+		InvitationURL:            invitationURL,
+		MonitorHeaderKey:         headerKey,
+		MonitorHeaderKeyVersion:  headerKeyVersion,
+		PlatformSigningKey:       signingKey,
+		PlatformSigningKeyID:     signingKeyID,
 	}, nil
 }
 

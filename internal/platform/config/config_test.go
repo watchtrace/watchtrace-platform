@@ -29,6 +29,7 @@ func TestLoadUsesDefaults(t *testing.T) {
 		t.Fatal("default development environment enabled production cookies")
 	}
 	if configuration.VerificationSMTPAddress != defaultVerificationSMTP ||
+		configuration.VerificationProvider != "local" ||
 		configuration.VerificationFrom != defaultVerificationFrom ||
 		configuration.VerificationURL != defaultVerificationURL ||
 		configuration.PasswordResetURL != defaultPasswordResetURL ||
@@ -43,6 +44,9 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	t.Setenv(shutdownTimeoutEnvironment, "25s")
 	t.Setenv(deploymentEnvironment, "production")
 	t.Setenv(verificationSMTPEnvironment, "127.0.0.1:2025")
+	t.Setenv(verificationProviderEnvironment, "oci")
+	t.Setenv(verificationUsernameEnvironment, "smtp-user")
+	t.Setenv(verificationPasswordEnvironment, "smtp-password")
 	t.Setenv(verificationFromEnvironment, "local@example.test")
 	t.Setenv(verificationURLEnvironment, "http://localhost:3001/verify")
 	t.Setenv(passwordResetURLEnvironment, "http://localhost:3001/reset")
@@ -65,6 +69,9 @@ func TestLoadReadsEnvironment(t *testing.T) {
 		t.Fatal("production environment did not enable production cookie security")
 	}
 	if configuration.VerificationSMTPAddress != "127.0.0.1:2025" ||
+		configuration.VerificationProvider != "oci" ||
+		configuration.VerificationSMTPUsername != "smtp-user" ||
+		configuration.VerificationSMTPPassword != "smtp-password" ||
 		configuration.VerificationFrom != "local@example.test" ||
 		configuration.VerificationURL != "http://localhost:3001/verify" ||
 		configuration.PasswordResetURL != "http://localhost:3001/reset" ||
@@ -180,6 +187,22 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 				verificationFromEnvironment: " ",
 			},
 			wantMessage: "email verification settings must not be empty",
+		},
+		{
+			name: "invalid verification provider",
+			values: map[string]string{
+				databaseURLEnvironment:          validDatabaseURL,
+				verificationProviderEnvironment: "ses",
+			},
+			wantMessage: "WATCHTRACE_VERIFICATION_PROVIDER must be local or oci",
+		},
+		{
+			name: "missing OCI verification credentials",
+			values: map[string]string{
+				databaseURLEnvironment:          validDatabaseURL,
+				verificationProviderEnvironment: "oci",
+			},
+			wantMessage: "OCI verification SMTP credentials are required",
 		},
 	}
 
