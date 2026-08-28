@@ -71,3 +71,66 @@ func TestWorkerPoolPartialProvisioningLifecycleAndAudit(t *testing.T) {
 		t.Fatalf("audits=%d err=%v", audits, err)
 	}
 }
+
+func TestHostedWorkerPoolBootstrapIsIdempotentAndRejectsDrift(t *testing.T) {
+	databaseURL := os.Getenv("WATCHTRACE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("WATCHTRACE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	db, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(ctx, `DELETE FROM worker_pool_credentials WHERE worker_pool_id='hosted';
+UPDATE worker_pools SET enabled=true,lifecycle_state='active',encryption_key_id=NULL,
+encryption_public_key=NULL,result_key_id=NULL,result_public_key=NULL,job_queue_url=NULL,
+job_queue_arn=NULL,job_dlq_url=NULL,job_dlq_arn=NULL WHERE id='hosted'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(context.Background(), `DELETE FROM worker_pool_credentials WHERE worker_pool_id='hosted';
+UPDATE worker_pools SET enabled=true,lifecycle_state='active',encryption_key_id=NULL,
+encryption_public_key=NULL,result_key_id=NULL,result_public_key=NULL,job_queue_url=NULL,
+job_queue_arn=NULL,job_dlq_url=NULL,job_dlq_arn=NULL WHERE id='hosted'`)
+	})
+
+	encryption, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	resultPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	registration := workerpool.Registration{
+		ID: "hosted", Mode: "hosted", SchemaMin: 1, SchemaMax: 2,
+		EncryptionKeyID: "enc-v1", EncryptionPublic: encryption.PublicKey().Bytes(),
+		ResultKeyID: "result-v1", ResultPublic: resultPublic,
+		JobQueueURL: "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-prod-check-jobs-hosted.fifo",
+		JobQueueARN: "arn:aws:sqs:ap-south-1:123456789012:watchtrace-prod-check-jobs-hosted.fifo",
+		JobDLQURL:   "https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-prod-check-jobs-hosted-dlq.fifo",
+		JobDLQARN:   "arn:aws:sqs:ap-south-1:123456789012:watchtrace-prod-check-jobs-hosted-dlq.fifo",
+	}
+	service := workerpool.New(db)
+	if err = service.BootstrapHosted(ctx, registration, "test-bootstrap", "provision hosted seed"); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.BootstrapHosted(ctx, registration, "test-bootstrap", "confirm hosted seed"); err != nil {
+		t.Fatalf("idempotent bootstrap: %v", err)
+	}
+
+	drifted := registration
+	drifted.JobQueueURL = "https://sqs.ap-south-1.amazonaws.com/123456789012/different.fifo"
+	if err = service.BootstrapHosted(ctx, drifted, "test-bootstrap", "reject drift"); err == nil {
+		t.Fatal("bootstrap overwrote conflicting queue configuration")
+	}
+
+	var credentials int
+	var queueURL string
+	if err = db.QueryRow(ctx, `SELECT job_queue_url,(SELECT count(*) FROM worker_pool_credentials
+WHERE worker_pool_id='hosted' AND status='active') FROM worker_pools WHERE id='hosted'`).Scan(&queueURL, &credentials); err != nil {
+		t.Fatal(err)
+	}
+	if queueURL != registration.JobQueueURL || credentials != 2 {
+		t.Fatalf("queue=%q credentials=%d", queueURL, credentials)
+	}
+}

@@ -11,7 +11,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -28,7 +30,7 @@ type publicBundle struct {
 }
 
 func main() {
-	mode := flag.String("mode", "generate", "generate, register, activate, drain, revoke, fail, reconcile, delete")
+	mode := flag.String("mode", "generate", "generate, register, bootstrap-hosted, activate, drain, revoke, fail, reconcile, delete")
 	pool := flag.String("pool", "", "worker pool ID")
 	bundle := flag.String("bundle", "worker-pool-public.json", "public bundle path")
 	prefix := flag.String("private-prefix", "worker-pool", "private key prefix")
@@ -99,30 +101,36 @@ func operate(ctx context.Context, mode, pool, poolMode, queueURL, queueARN, dlqU
 	service := workerpool.New(db)
 	switch mode {
 	case "register":
-		data, e := os.ReadFile(bundlePath)
+		registration, e := registrationFromBundle(pool, poolMode, queueURL, queueARN, dlqURL, dlqARN, mtlsFingerprint, mtlsExpiry, bundlePath)
 		if e != nil {
 			return e
 		}
-		var b publicBundle
-		if json.Unmarshal(data, &b) != nil || b.PoolID != pool {
-			return errors.New("invalid public bundle")
-		}
-		enc, e := base64.StdEncoding.DecodeString(b.EncryptionPublicKey)
+		return service.Register(ctx, registration, actor, reason)
+	case "bootstrap-hosted":
+		queueURL = setting(queueURL, "WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL")
+		dlqURL = setting(dlqURL, "WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL")
+		queueARN, region, account, e := sqsQueueARN(queueURL)
 		if e != nil {
 			return e
 		}
-		result, e := base64.StdEncoding.DecodeString(b.ResultPublicKey)
-		if e != nil {
-			return e
+		if configuredRegion := setting("", "AWS_REGION"); configuredRegion == "" || configuredRegion != region {
+			return errors.New("AWS region does not match hosted job queue")
 		}
-		var notAfter time.Time
-		if mtlsExpiry != "" {
-			notAfter, e = time.Parse(time.RFC3339, mtlsExpiry)
-			if e != nil {
-				return errors.New("invalid mTLS expiry")
+		dlqARN, dlqRegion, dlqAccount, e := sqsQueueARN(dlqURL)
+		if e != nil || dlqRegion != region || dlqAccount != account {
+			return errors.New("hosted job queue and DLQ identities do not match")
+		}
+		for _, name := range []string{"WATCHTRACE_SQS_RESULT_QUEUE_URL", "WATCHTRACE_SQS_RESULT_DLQ_URL"} {
+			_, resultRegion, resultAccount, resultErr := sqsQueueARN(setting("", name))
+			if resultErr != nil || resultRegion != region || resultAccount != account {
+				return errors.New("SQS queue identities do not share one AWS region and account")
 			}
 		}
-		return service.Register(ctx, workerpool.Registration{ID: pool, Mode: poolMode, JobQueueURL: queueURL, JobQueueARN: queueARN, JobDLQURL: dlqURL, JobDLQARN: dlqARN, EncryptionKeyID: b.EncryptionKeyID, ResultKeyID: b.ResultKeyID, EncryptionPublic: enc, ResultPublic: result, SchemaMin: 1, SchemaMax: 2, MTLSFingerprint: mtlsFingerprint, MTLSNotAfter: notAfter}, actor, reason)
+		registration, e := registrationFromBundle("hosted", "hosted", queueURL, queueARN, dlqURL, dlqARN, "", "", bundlePath)
+		if e != nil {
+			return e
+		}
+		return service.BootstrapHosted(ctx, registration, actor, reason)
 	case "activate", "reconcile":
 		digest, e := manifestDigest(manifestPath)
 		if e != nil {
@@ -143,6 +151,61 @@ func operate(ctx context.Context, mode, pool, poolMode, queueURL, queueARN, dlqU
 	default:
 		return errors.New("unknown mode")
 	}
+}
+
+func registrationFromBundle(pool, poolMode, queueURL, queueARN, dlqURL, dlqARN, mtlsFingerprint, mtlsExpiry, bundlePath string) (workerpool.Registration, error) {
+	data, err := os.ReadFile(bundlePath)
+	if err != nil {
+		return workerpool.Registration{}, err
+	}
+	var b publicBundle
+	if json.Unmarshal(data, &b) != nil || b.PoolID != pool {
+		return workerpool.Registration{}, errors.New("invalid public bundle")
+	}
+	enc, err := base64.StdEncoding.Strict().DecodeString(b.EncryptionPublicKey)
+	if err != nil {
+		return workerpool.Registration{}, errors.New("invalid worker encryption public key")
+	}
+	result, err := base64.StdEncoding.Strict().DecodeString(b.ResultPublicKey)
+	if err != nil {
+		return workerpool.Registration{}, errors.New("invalid worker result public key")
+	}
+	var notAfter time.Time
+	if mtlsExpiry != "" {
+		notAfter, err = time.Parse(time.RFC3339, mtlsExpiry)
+		if err != nil {
+			return workerpool.Registration{}, errors.New("invalid mTLS expiry")
+		}
+	}
+	return workerpool.Registration{ID: pool, Mode: poolMode, JobQueueURL: queueURL, JobQueueARN: queueARN, JobDLQURL: dlqURL, JobDLQARN: dlqARN, EncryptionKeyID: b.EncryptionKeyID, ResultKeyID: b.ResultKeyID, EncryptionPublic: enc, ResultPublic: result, SchemaMin: 1, SchemaMax: 2, MTLSFingerprint: mtlsFingerprint, MTLSNotAfter: notAfter}, nil
+}
+
+func setting(value, name string) string {
+	if strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return strings.TrimSpace(os.Getenv(name))
+}
+
+func sqsQueueARN(raw string) (string, string, string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", "", "", errors.New("invalid Amazon SQS queue URL")
+	}
+	host := strings.Split(parsed.Hostname(), ".")
+	if len(host) != 4 || host[0] != "sqs" || host[1] == "" || host[2] != "amazonaws" || host[3] != "com" {
+		return "", "", "", errors.New("invalid Amazon SQS queue host")
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) != 2 || len(parts[0]) != 12 || path.Base(parsed.Path) != parts[1] || !strings.HasSuffix(parts[1], ".fifo") {
+		return "", "", "", errors.New("invalid Amazon SQS FIFO queue identity")
+	}
+	for _, digit := range parts[0] {
+		if digit < '0' || digit > '9' {
+			return "", "", "", errors.New("invalid Amazon SQS account ID")
+		}
+	}
+	return fmt.Sprintf("arn:aws:sqs:%s:%s:%s", host[1], parts[0], parts[1]), host[1], parts[0], nil
 }
 
 func manifestDigest(path string) ([]byte, error) {

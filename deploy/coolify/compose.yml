@@ -113,6 +113,42 @@ services:
         condition: service_healthy
     exclude_from_hc: true
 
+  hosted-pool-bootstrap:
+    <<: *control-image
+    command:
+      - /watchtrace-worker-pool
+      - -mode
+      - bootstrap-hosted
+      - -pool
+      - hosted
+      - -bundle
+      - /run/deployment-keys/hosted-public.json
+      - -actor
+      - coolify-bootstrap
+      - -reason
+      - provision canonical hosted worker pool
+    restart: "no"
+    environment:
+      <<: *database-environment
+      AWS_REGION: ${AWS_REGION:?Set the single deployment AWS Region}
+      WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL: ${WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL:?Set the hosted job FIFO URL}
+      WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL: ${WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL:?Set the hosted job DLQ URL}
+      WATCHTRACE_SQS_RESULT_QUEUE_URL: ${WATCHTRACE_SQS_RESULT_QUEUE_URL:?Set the result FIFO URL}
+      WATCHTRACE_SQS_RESULT_DLQ_URL: ${WATCHTRACE_SQS_RESULT_DLQ_URL:?Set the result DLQ URL}
+    volumes:
+      - type: bind
+        source: /data/watchtrace/keyset/public/hosted-public.json
+        target: /run/deployment-keys/hosted-public.json
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      deployment-key-check:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    exclude_from_hc: true
+
   api:
     <<: *control-image
     command: ["/watchtrace-api"]
@@ -150,6 +186,8 @@ services:
       deployment-key-check:
         condition: service_completed_successfully
       migrate:
+        condition: service_completed_successfully
+      hosted-pool-bootstrap:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8080/health/ready"]
@@ -195,6 +233,8 @@ services:
       deployment-key-check:
         condition: service_completed_successfully
       migrate:
+        condition: service_completed_successfully
+      hosted-pool-bootstrap:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8091/health/ready"]
@@ -248,6 +288,8 @@ services:
           create_host_path: false
     depends_on:
       deployment-key-check:
+        condition: service_completed_successfully
+      hosted-pool-bootstrap:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8090/health/ready"]
