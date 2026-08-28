@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "environment": "prod",
+  "aws_region": "eu-north-1",
+  "queues": {
+    "jobs": {
+      "name": "watchtrace-prod-check-jobs-hosted.fifo",
+      "url": "https://sqs.eu-north-1.amazonaws.com/825450315823/watchtrace-prod-check-jobs-hosted.fifo",
+      "arn": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted.fifo",
+      "visibility_timeout_seconds": 90,
+      "message_retention_seconds": 345600,
+      "receive_wait_time_seconds": 20,
+      "max_receive_count": 5,
+      "dead_letter_queue_arn": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted-dlq.fifo",
+      "sse": "SSE-SQS",
+      "content_based_deduplication": false,
+      "policy_fingerprint_sha256": "0da1e784c06f5cffdff2c11c94e29c69912886ec6cda9a67134aa08f2995f067"
+    },
+    "results": {
+      "name": "watchtrace-prod-check-results.fifo",
+      "url": "https://sqs.eu-north-1.amazonaws.com/825450315823/watchtrace-prod-check-results.fifo",
+      "arn": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results.fifo",
+      "visibility_timeout_seconds": 60,
+      "message_retention_seconds": 345600,
+      "receive_wait_time_seconds": 20,
+      "max_receive_count": 10,
+      "dead_letter_queue_arn": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results-dlq.fifo",
+      "sse": "SSE-SQS",
+      "content_based_deduplication": false,
+      "policy_fingerprint_sha256": "1ec3b15ee9bcbc6b4a89361c502672782688b22298149317ac8354a76c9444e9"
+    },
+    "jobs_dlq": {
+      "name": "watchtrace-prod-check-jobs-hosted-dlq.fifo",
+      "url": "https://sqs.eu-north-1.amazonaws.com/825450315823/watchtrace-prod-check-jobs-hosted-dlq.fifo",
+      "arn": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted-dlq.fifo",
+      "visibility_timeout_seconds": 0,
+      "message_retention_seconds": 1209600,
+      "receive_wait_time_seconds": 0,
+      "sse": "SSE-SQS",
+      "content_based_deduplication": false,
+      "policy_fingerprint_sha256": "79fbae3f7fa3f2995a5d73c52ede6a1952d7f7bc14e6b0910e6bdd707e387ce5",
+      "redrive_allow_source_arns": [
+        "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted.fifo"
+      ]
+    },
+    "results_dlq": {
+      "name": "watchtrace-prod-check-results-dlq.fifo",
+      "url": "https://sqs.eu-north-1.amazonaws.com/825450315823/watchtrace-prod-check-results-dlq.fifo",
+      "arn": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results-dlq.fifo",
+      "visibility_timeout_seconds": 0,
+      "message_retention_seconds": 1209600,
+      "receive_wait_time_seconds": 0,
+      "sse": "SSE-SQS",
+      "content_based_deduplication": false,
+      "policy_fingerprint_sha256": "873d89eafdaf10c2871b777aa5a96060d3c4a2a7774c869e0d460525cd72b726",
+      "redrive_allow_source_arns": [
+        "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results.fifo"
+      ]
+    }
+  },
+  "roles": {
+    "job_publisher": {
+      "name": "phase4-deferred-job-publisher",
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "hosted_worker": {
+      "name": "phase4-deferred-hosted-worker",
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "queue_gateway": {
+      "name": "phase4-deferred-queue-gateway",
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "result_consumer": {
+      "name": "phase4-deferred-result-consumer",
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "dlq_reconciler": {
+      "name": "phase4-deferred-dlq-reconciler",
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "infrastructure_operator": {
+      "name": "phase4-deferred-infrastructure-operator",
+      "policy_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "trust_fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "gateway_mappings": {},
+  "tags": {
+    "Application": "WatchTrace",
+    "Environment": "prod",
+    "Phase": "1",
+    "ManagedBy": "watchtrace-phase1-manual"
+  }
+}

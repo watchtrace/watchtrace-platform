@@ -1,0 +1,46 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadQueueHealth",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+      ],
+      "Resource": [
+        "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted.fifo",
+        "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results.fifo",
+        "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted-dlq.fifo",
+        "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results-dlq.fifo"
+      ]
+    },
+    {
+      "Sid": "PublishHostedJobs",
+      "Effect": "Allow",
+      "Action": "sqs:SendMessage",
+      "Resource": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted.fifo"
+    },
+    {
+      "Sid": "ExecuteHostedJobs",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:DeleteMessage"
+      ],
+      "Resource": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted.fifo"
+    },
+    {
+      "Sid": "PublishAndConsumeResults",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:SendMessage",
+        "sqs:ReceiveMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:DeleteMessage"
+      ],
+      "Resource": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results.fifo"
+    }
+  ]
+}
