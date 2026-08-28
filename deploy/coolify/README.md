@@ -63,159 +63,110 @@ replacement. They are not backups and may be discarded during Phases 1–3.
 
 ## Generate deployment keys on Oracle
 
-Generate the `prod` keys once, directly on the Oracle host. No private key is
-copied from a developer machine, stored in Git, entered into Coolify, or printed
-to the terminal. The WatchTrace control image contains a purpose-built generator
-that uses the operating system cryptographic random source, separates keys by
-purpose, validates the matching public keys, and refuses to overwrite anything.
+Generate the `prod` keys once, directly on Oracle, with
+`scripts/bootstrap-deployment-keys.sh`. The script runs the generator from the
+reviewed control image without network access. No private key passes through a
+developer computer, GitHub, GHCR metadata, Coolify variables, or terminal
+output.
 
-The procedure creates these six container-readable files:
+The script stages and verifies the complete set before one atomic rename makes
+it active under `/data/watchtrace/keyset`. If an active keyset already exists,
+the same command verifies it and changes nothing; it never rotates or
+overwrites keys.
 
-| Oracle host file | Purpose |
-| --- | --- |
-| `/data/watchtrace/secrets/platform-signing-private` | Platform signs monitoring jobs |
-| `/data/watchtrace/secrets/platform-signing-public` | Hosted worker verifies platform jobs |
-| `/data/watchtrace/secrets/monitor-header-key` | API and engine protect monitor headers |
-| `/data/watchtrace/secrets/quarantine-key` | Engine protects quarantined payloads |
-| `/data/watchtrace/secrets/worker-encryption-private` | Hosted worker decrypts jobs |
-| `/data/watchtrace/secrets/worker-result-private` | Hosted worker signs results |
+### 1. Publish and select the control image
 
-It also creates the non-secret public registration bundle at
-`/data/watchtrace/public/hosted-public.json`. That bundle, not any private file,
-is used when registering the hosted worker pool.
+Push this change and wait for `Backend CI` to succeed. In the workflow summary,
+copy the control image reference that looks like:
 
-### 1. Publish and select the new control image
-
-Commit and push this deployment change, wait for the `Backend CI` GitHub Action
-to succeed, and copy the new `watchtrace-platform` digest from its summary. Then
-connect to Oracle:
-
-```sh
-ssh ubuntu@129.159.236.232
+```text
+ghcr.io/watchtrace/watchtrace-platform@sha256:<64 hexadecimal characters>
 ```
 
-Set the immutable image reference, replacing the example digest:
+The digest is an immutable fingerprint. The ordinary `:main` tag moves after
+new builds, while a digest always identifies the exact reviewed generator.
+
+### 2. Remove the failed empty-file attempt
+
+The previous Coolify configuration created empty files in
+`/data/watchtrace/secrets`. They are not valid keys and the new Compose file no
+longer uses that path. Preserve them temporarily for diagnosis instead of
+deleting them:
 
 ```sh
-control_digest=REPLACE_WITH_NEW_64_CHARACTER_CONTROL_DIGEST
-control_image="ghcr.io/watchtrace/watchtrace-platform@sha256:$control_digest"
-sudo docker pull "$control_image"
-```
-
-The digest is an immutable image fingerprint. It ensures the reviewed generator
-is exactly the one executed on the server.
-
-### 2. Refuse accidental replacement and create staging
-
-Run this in the same Oracle SSH session:
-
-```sh
-if sudo test -e /data/watchtrace/secrets; then
-  echo "STOP: /data/watchtrace/secrets already exists; do not overwrite deployment keys."
+ssh root@129.159.236.232
+test ! -e /data/watchtrace/secrets.failed-empty-files || {
+  echo "STOP: the diagnostic destination already exists"
   exit 1
-fi
-
-sudo install -d -o root -g root -m 0700 /data/watchtrace
-generation_directory=$(sudo mktemp -d /data/watchtrace/secrets.new.XXXXXX)
-sudo chown 65532:65532 "$generation_directory"
-sudo chmod 0700 "$generation_directory"
+}
+mv -T /data/watchtrace/secrets /data/watchtrace/secrets.failed-empty-files
+exit
 ```
 
-The random staging-directory suffix prevents path collisions. The explicit
-existence check turns a repeat run into a safe failure instead of silent key
-rotation.
+If the destination already exists, stop and inspect it rather than choosing a
+different destructive command.
 
-### 3. Generate without network access
+### 3. Run the one-time bootstrap from the repository checkout
+
+On the developer computer, from the `watchtrace-platform` repository, replace
+the example with the complete digest reference and run:
 
 ```sh
-sudo docker run --rm \
-  --user 65532:65532 \
-  --network none \
-  --read-only \
-  --cap-drop ALL \
-  --security-opt no-new-privileges \
-  --mount "type=bind,source=$generation_directory,target=/output" \
-  "$control_image" \
-  /watchtrace-deployment-keys \
-  -mode generate \
-  -directory /output
+ssh root@129.159.236.232 \
+  'sh -s -- ghcr.io/watchtrace/watchtrace-platform@sha256:<control-digest>' \
+  < scripts/bootstrap-deployment-keys.sh
 ```
 
-`--network none` prevents the generator from sending anything over a network.
-`--read-only` protects the container filesystem. `--cap-drop ALL` and
-`no-new-privileges` remove unnecessary operating-system privileges. Only the
-staging directory is writable.
+SSH encrypts the script while sending it to the server. `sh -s --` tells the
+server shell to read that script from standard input and supplies the image as
+its first argument. The script itself then:
 
-The success message deliberately contains no key material.
+1. validates and pulls the immutable image;
+2. creates a root-only staging directory;
+3. generates keys as unprivileged UID `65532` with networking disabled;
+4. cryptographically verifies all key relationships and the public bundle;
+5. sets restrictive ownership and permissions;
+6. atomically renames the complete staging tree to
+   `/data/watchtrace/keyset`; and
+7. verifies the installed files through the same read-only mounts deployment
+   will use.
 
-### 4. Cryptographically verify the generated set
+The six runtime key files end with owner `65532:65532` and mode `400`. The public worker
+registration bundle is
+`/data/watchtrace/keyset/public/hosted-public.json`. Never use `cat` on a
+private file in logs, screenshots, issues, or chat.
 
-```sh
-sudo docker run --rm \
-  --user 65532:65532 \
-  --network none \
-  --read-only \
-  --cap-drop ALL \
-  --security-opt no-new-privileges \
-  --mount "type=bind,source=$generation_directory,target=/output,readonly" \
-  "$control_image" \
-  /watchtrace-deployment-keys \
-  -mode verify \
-  -directory /output
-```
+### 4. Remove obsolete Coolify key values
 
-Verification checks base64 encodings and sizes, both Ed25519 public/private
-relationships, the X25519 public/private relationship, and the hosted public
-bundle. It does not print any secret.
+Delete these old variables from the Coolify resource:
 
-### 5. Install the public bundle and atomically activate the private directory
+- `WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY`
+- `WATCHTRACE_PLATFORM_SIGNING_PUBLIC_KEY`
+- `WATCHTRACE_MONITOR_HEADER_KEY`
+- `WATCHTRACE_QUARANTINE_KEY`
+- `WATCHTRACE_WORKER_ENCRYPTION_PRIVATE_KEY`
+- `WATCHTRACE_WORKER_RESULT_PRIVATE_KEY`
 
-```sh
-sudo install -d -o root -g root -m 0755 /data/watchtrace/public
-sudo install -o root -g root -m 0444 \
-  "$generation_directory/hosted-public.json" \
-  /data/watchtrace/public/hosted-public.json
-sudo rm -f "$generation_directory/hosted-public.json"
+They are raw key-value configuration from the earlier approach. Keeping them
+would give the application two competing sources: an environment value and a
+mounted file. Keep the key IDs and version variables because those are labels,
+not secret contents.
 
-sudo chown 65532:65532 "$generation_directory"/*
-sudo chmod 0400 "$generation_directory"/*
-sudo mv "$generation_directory" /data/watchtrace/secrets
-sudo chown root:root /data/watchtrace/secrets
-sudo chmod 0700 /data/watchtrace/secrets
-unset generation_directory
-```
+### 5. Let every deployment verify, never generate
 
-The private files are readable only by container UID `65532`. The surrounding
-directory is owned by root. The final `mv` activates the already-complete set in
-one filesystem operation; Coolify never sees a partially generated key set.
+The Compose service `deployment-key-check` mounts all seven installed files
+read-only, has no network, and runs only the verifier. Migrations, the API,
+monitor engine, and hosted worker wait for it to complete successfully. A
+missing, empty, corrupt, mismatched, or unreadable key therefore stops the
+deployment before those services start. Every bind mount also sets
+`create_host_path: false`, so Docker reports a missing file instead of silently
+creating another empty directory at that path.
 
-### 6. Verify metadata without printing contents
-
-```sh
-sudo find /data/watchtrace/secrets \
-  -maxdepth 1 -type f \
-  -printf '%f  owner=%u:%g  mode=%m  bytes=%s\n' \
-  | sort
-sudo find /data/watchtrace/public \
-  -maxdepth 1 -type f \
-  -printf '%f  owner=%u:%g  mode=%m  bytes=%s\n' \
-  | sort
-```
-
-The private directory must contain exactly six files with owner `65532:65532`
-and mode `400`. The public directory must contain `hosted-public.json` with
-owner `root:root` and mode `444`. These commands print metadata only. Never use
-`cat` on a private file in screenshots, logs, issues, or chat.
-
-The Compose definition uses ordinary read-only host file mounts. It deliberately
-does not use Coolify's `content:` extension because that extension tells Coolify
-to create and manage the file. Every source file must exist before deployment;
-otherwise Docker may create a directory or Coolify deployment will fail.
-
-If generation fails before activation, do not reuse the partial staging
-directory. Record its exact path, remove only that `secrets.new.*` directory,
-and restart from step 2. Never delete or overwrite an active
-`/data/watchtrace/secrets` directory as an ad-hoc retry or rotation procedure.
+Generation is intentionally not part of continuous deployment. Generating on
+every push would silently rotate the application's identity and could make
+stored encrypted data or in-flight signed messages unusable. Continuous
+deployment changes application containers; this stable server keyset remains
+until an explicit, separately designed rotation procedure is implemented.
 
 ## Create the stack in Coolify
 
@@ -241,7 +192,7 @@ and restart from step 2. Never delete or overwrite an active
    the OCI SMTP endpoint for the VM's OCI Region.
 5. Assign the public domain only to the `frontend` service on container port
    `8080`. Let Coolify provision and renew HTTPS.
-6. Confirm the six files under `/data/watchtrace/secrets` exist, then reload the
+6. Confirm `/data/watchtrace/keyset` passes the bootstrap verifier, then reload the
    latest Compose configuration from Git. Do not enable Coolify's immediate
    Git-source Auto Deploy: it could run before GitHub Actions has tested and
    published the new images. The authenticated workflow webhook below is the
@@ -281,7 +232,7 @@ because the workflow change was pushed.
    Secrets and variables > Actions**. Add repository secrets
    `COOLIFY_DEPLOY_WEBHOOK` and `COOLIFY_TOKEN`. GitHub masks and supplies these
    only to the workflow; never commit either value.
-5. Finish the SQS, SMTP, Coolify variable, GHCR login, `/data/watchtrace/secrets`,
+5. Finish the SQS, SMTP, Coolify variable, GHCR login, `/data/watchtrace/keyset`,
    domain, and firewall setup. Then add the repository variable
    `COOLIFY_DEPLOY_ENABLED=true` in both repositories. A variable is used for
    this non-secret on/off switch; secrets are used for the webhook and token.

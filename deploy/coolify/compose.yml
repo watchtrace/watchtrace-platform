@@ -50,6 +50,56 @@ services:
     stop_grace_period: 30s
     logging: *bounded-logging
 
+  deployment-key-check:
+    <<: *control-image
+    command: ["/watchtrace-deployment-keys", "-mode", "verify", "-directory", "/run/deployment-keys"]
+    restart: "no"
+    network_mode: none
+    volumes:
+      - type: bind
+        source: /data/watchtrace/keyset/secrets/platform-signing-private
+        target: /run/deployment-keys/platform-signing-private
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /data/watchtrace/keyset/secrets/platform-signing-public
+        target: /run/deployment-keys/platform-signing-public
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /data/watchtrace/keyset/secrets/monitor-header-key
+        target: /run/deployment-keys/monitor-header-key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /data/watchtrace/keyset/secrets/quarantine-key
+        target: /run/deployment-keys/quarantine-key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /data/watchtrace/keyset/secrets/worker-encryption-private
+        target: /run/deployment-keys/worker-encryption-private
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /data/watchtrace/keyset/secrets/worker-result-private
+        target: /run/deployment-keys/worker-result-private
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /data/watchtrace/keyset/public/hosted-public.json
+        target: /run/deployment-keys/hosted-public.json
+        read_only: true
+        bind:
+          create_host_path: false
+    exclude_from_hc: true
+
   migrate:
     <<: *control-image
     command: ["/watchtrace-migrate", "up"]
@@ -57,6 +107,8 @@ services:
     environment:
       <<: *database-environment
     depends_on:
+      deployment-key-check:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     exclude_from_hc: true
@@ -83,14 +135,20 @@ services:
       WATCHTRACE_PLATFORM_SIGNING_KEY_ID: ${WATCHTRACE_PLATFORM_SIGNING_KEY_ID:-platform-v1}
     volumes:
       - type: bind
-        source: /data/watchtrace/secrets/platform-signing-private
+        source: /data/watchtrace/keyset/secrets/platform-signing-private
         target: /run/secrets/platform-signing-private
         read_only: true
+        bind:
+          create_host_path: false
       - type: bind
-        source: /data/watchtrace/secrets/monitor-header-key
+        source: /data/watchtrace/keyset/secrets/monitor-header-key
         target: /run/secrets/monitor-header-key
         read_only: true
+        bind:
+          create_host_path: false
     depends_on:
+      deployment-key-check:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
     healthcheck:
@@ -116,18 +174,26 @@ services:
       # deploys this Compose definition. Do not add Coolify's `content:`
       # extension: it would make Coolify manage and overwrite the host files.
       - type: bind
-        source: /data/watchtrace/secrets/platform-signing-private
+        source: /data/watchtrace/keyset/secrets/platform-signing-private
         target: /run/secrets/platform-signing-private
         read_only: true
+        bind:
+          create_host_path: false
       - type: bind
-        source: /data/watchtrace/secrets/monitor-header-key
+        source: /data/watchtrace/keyset/secrets/monitor-header-key
         target: /run/secrets/monitor-header-key
         read_only: true
+        bind:
+          create_host_path: false
       - type: bind
-        source: /data/watchtrace/secrets/quarantine-key
+        source: /data/watchtrace/keyset/secrets/quarantine-key
         target: /run/secrets/quarantine-key
         read_only: true
+        bind:
+          create_host_path: false
     depends_on:
+      deployment-key-check:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
     healthcheck:
@@ -163,17 +229,26 @@ services:
     volumes:
       - worker-journal:/var/lib/watchtrace-worker
       - type: bind
-        source: /data/watchtrace/secrets/worker-encryption-private
+        source: /data/watchtrace/keyset/secrets/worker-encryption-private
         target: /run/secrets/worker-encryption-private
         read_only: true
+        bind:
+          create_host_path: false
       - type: bind
-        source: /data/watchtrace/secrets/worker-result-private
+        source: /data/watchtrace/keyset/secrets/worker-result-private
         target: /run/secrets/worker-result-private
         read_only: true
+        bind:
+          create_host_path: false
       - type: bind
-        source: /data/watchtrace/secrets/platform-signing-public
+        source: /data/watchtrace/keyset/secrets/platform-signing-public
         target: /run/secrets/platform-signing-public
         read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      deployment-key-check:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8090/health/ready"]
       interval: 15s

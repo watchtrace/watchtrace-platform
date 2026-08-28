@@ -35,8 +35,9 @@ export WATCHTRACE_SQS_RESULT_DLQ_URL=https://sqs.ap-south-1.amazonaws.com/123456
 # exclude_from_hc is a documented Coolify extension. Remove only that extension
 # before validating the remaining file against the standard Docker Compose
 # schema.
-if ! grep -Eq '^[[:space:]]+exclude_from_hc:[[:space:]]+true$' "$compose_file"; then
-    echo "The one-shot migration must be excluded from Coolify health checks." >&2
+excluded_healthcheck_count=$(grep -Ec '^[[:space:]]+exclude_from_hc:[[:space:]]+true$' "$compose_file")
+if [ "$excluded_healthcheck_count" -ne 2 ]; then
+    echo "The migration and deployment-key check must be excluded from Coolify health checks." >&2
     exit 1
 fi
 if grep -Eq '^[[:space:]]+content:' "$compose_file"; then
@@ -74,6 +75,16 @@ if jq -e 'has("secrets")' "$rendered_json" >/dev/null; then
     exit 1
 fi
 
+if ! jq -e '
+    .services["deployment-key-check"].command ==
+      ["/watchtrace-deployment-keys", "-mode", "verify", "-directory", "/run/deployment-keys"] and
+    .services["deployment-key-check"].restart == "no" and
+    .services["deployment-key-check"].network_mode == "none"
+' "$rendered_json" >/dev/null; then
+    echo "The deployment-key check must be one-shot, verify-only, and network-disabled." >&2
+    exit 1
+fi
+
 assert_read_only_key_mount() {
     service=$1
     source=$2
@@ -84,20 +95,55 @@ assert_read_only_key_mount() {
         --arg source "$source" \
         --arg target "$target" \
         '.services[$service].volumes[] |
-         select(.type == "bind" and .source == $source and .target == $target and .read_only == true)' \
+         select(.type == "bind" and .source == $source and .target == $target and
+                .read_only == true and .bind.create_host_path == false)' \
         "$rendered_json" >/dev/null; then
         echo "$service must read $target from the read-only host file $source." >&2
         exit 1
     fi
 }
 
-assert_read_only_key_mount monitor-engine /data/watchtrace/secrets/platform-signing-private /run/secrets/platform-signing-private
-assert_read_only_key_mount monitor-engine /data/watchtrace/secrets/monitor-header-key /run/secrets/monitor-header-key
-assert_read_only_key_mount monitor-engine /data/watchtrace/secrets/quarantine-key /run/secrets/quarantine-key
-assert_read_only_key_mount hosted-worker /data/watchtrace/secrets/worker-encryption-private /run/secrets/worker-encryption-private
-assert_read_only_key_mount hosted-worker /data/watchtrace/secrets/worker-result-private /run/secrets/worker-result-private
-assert_read_only_key_mount hosted-worker /data/watchtrace/secrets/platform-signing-public /run/secrets/platform-signing-public
-assert_read_only_key_mount api /data/watchtrace/secrets/platform-signing-private /run/secrets/platform-signing-private
-assert_read_only_key_mount api /data/watchtrace/secrets/monitor-header-key /run/secrets/monitor-header-key
+assert_successful_dependency() {
+    service=$1
+    dependency=$2
+
+    if ! jq -e \
+        --arg service "$service" \
+        --arg dependency "$dependency" \
+        '.services[$service].depends_on[$dependency].condition == "service_completed_successfully"' \
+        "$rendered_json" >/dev/null; then
+        echo "$service must wait for a successful $dependency run." >&2
+        exit 1
+    fi
+}
+
+for key_file in \
+    platform-signing-private \
+    platform-signing-public \
+    monitor-header-key \
+    quarantine-key \
+    worker-encryption-private \
+    worker-result-private
+do
+    assert_read_only_key_mount \
+        deployment-key-check \
+        "/data/watchtrace/keyset/secrets/$key_file" \
+        "/run/deployment-keys/$key_file"
+done
+assert_read_only_key_mount deployment-key-check /data/watchtrace/keyset/public/hosted-public.json /run/deployment-keys/hosted-public.json
+
+assert_read_only_key_mount monitor-engine /data/watchtrace/keyset/secrets/platform-signing-private /run/secrets/platform-signing-private
+assert_read_only_key_mount monitor-engine /data/watchtrace/keyset/secrets/monitor-header-key /run/secrets/monitor-header-key
+assert_read_only_key_mount monitor-engine /data/watchtrace/keyset/secrets/quarantine-key /run/secrets/quarantine-key
+assert_read_only_key_mount hosted-worker /data/watchtrace/keyset/secrets/worker-encryption-private /run/secrets/worker-encryption-private
+assert_read_only_key_mount hosted-worker /data/watchtrace/keyset/secrets/worker-result-private /run/secrets/worker-result-private
+assert_read_only_key_mount hosted-worker /data/watchtrace/keyset/secrets/platform-signing-public /run/secrets/platform-signing-public
+assert_read_only_key_mount api /data/watchtrace/keyset/secrets/platform-signing-private /run/secrets/platform-signing-private
+assert_read_only_key_mount api /data/watchtrace/keyset/secrets/monitor-header-key /run/secrets/monitor-header-key
+
+assert_successful_dependency migrate deployment-key-check
+assert_successful_dependency api deployment-key-check
+assert_successful_dependency monitor-engine deployment-key-check
+assert_successful_dependency hosted-worker deployment-key-check
 
 echo "Coolify Compose configuration is valid."
