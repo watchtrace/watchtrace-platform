@@ -77,10 +77,21 @@ services:
       WATCHTRACE_VERIFICATION_URL: ${WATCHTRACE_PUBLIC_URL:?Set the public HTTPS URL}/verify-email
       WATCHTRACE_PASSWORD_RESET_URL: ${WATCHTRACE_PUBLIC_URL:?Set the public HTTPS URL}/reset-password
       WATCHTRACE_INVITATION_URL: ${WATCHTRACE_PUBLIC_URL:?Set the public HTTPS URL}/accept-invitation
-      WATCHTRACE_MONITOR_HEADER_KEY: ${WATCHTRACE_MONITOR_HEADER_KEY:?Set a base64-encoded 32-byte key}
+      WATCHTRACE_MONITOR_HEADER_KEY_FILE: /run/secrets/monitor-header-key
       WATCHTRACE_MONITOR_HEADER_KEY_VERSION: ${WATCHTRACE_MONITOR_HEADER_KEY_VERSION:-1}
-      WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY: ${WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY:?Set a base64-encoded Ed25519 private key}
+      WATCHTRACE_PLATFORM_SIGNING_KEY_FILE: /run/secrets/platform-signing-private
       WATCHTRACE_PLATFORM_SIGNING_KEY_ID: ${WATCHTRACE_PLATFORM_SIGNING_KEY_ID:-platform-v1}
+    volumes:
+      - type: bind
+        source: /data/watchtrace/secrets/platform-signing-private
+        target: /run/secrets/platform-signing-private
+        read_only: true
+        content: ""
+      - type: bind
+        source: /data/watchtrace/secrets/monitor-header-key
+        target: /run/secrets/monitor-header-key
+        read_only: true
+        content: ""
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -102,10 +113,26 @@ services:
       WATCHTRACE_MONITOR_HEADER_KEY_FILE: /run/secrets/monitor-header-key
       WATCHTRACE_QUARANTINE_KEY: /run/secrets/quarantine-key
       WATCHTRACE_ENGINE_HEALTH_ADDRESS: 0.0.0.0:8091
-    secrets:
-      - platform-signing-private
-      - monitor-header-key
-      - quarantine-key
+    volumes:
+      # These empty content fields are Coolify file-mount markers. They tell
+      # Coolify that each existing absolute host path is a file, not a
+      # directory. The real contents are generated on the Oracle host before
+      # Coolify deploys this Compose definition and are never stored here.
+      - type: bind
+        source: /data/watchtrace/secrets/platform-signing-private
+        target: /run/secrets/platform-signing-private
+        read_only: true
+        content: ""
+      - type: bind
+        source: /data/watchtrace/secrets/monitor-header-key
+        target: /run/secrets/monitor-header-key
+        read_only: true
+        content: ""
+      - type: bind
+        source: /data/watchtrace/secrets/quarantine-key
+        target: /run/secrets/quarantine-key
+        read_only: true
+        content: ""
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -139,12 +166,23 @@ services:
       WATCHTRACE_PLATFORM_SIGNING_KEY_ID: ${WATCHTRACE_PLATFORM_SIGNING_KEY_ID:-platform-v1}
       WATCHTRACE_WORKER_JOURNAL: /var/lib/watchtrace-worker/journal.sqlite
       WATCHTRACE_WORKER_HEALTH_ADDRESS: 0.0.0.0:8090
-    secrets:
-      - worker-encryption-private
-      - worker-result-private
-      - platform-signing-public
     volumes:
       - worker-journal:/var/lib/watchtrace-worker
+      - type: bind
+        source: /data/watchtrace/secrets/worker-encryption-private
+        target: /run/secrets/worker-encryption-private
+        read_only: true
+        content: ""
+      - type: bind
+        source: /data/watchtrace/secrets/worker-result-private
+        target: /run/secrets/worker-result-private
+        read_only: true
+        content: ""
+      - type: bind
+        source: /data/watchtrace/secrets/platform-signing-public
+        target: /run/secrets/platform-signing-public
+        read_only: true
+        content: ""
     healthcheck:
       test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8090/health/ready"]
       interval: 15s
@@ -195,17 +233,3 @@ services:
 volumes:
   postgres-data:
   worker-journal:
-
-secrets:
-  platform-signing-private:
-    environment: WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY
-  platform-signing-public:
-    environment: WATCHTRACE_PLATFORM_SIGNING_PUBLIC_KEY
-  monitor-header-key:
-    environment: WATCHTRACE_MONITOR_HEADER_KEY
-  quarantine-key:
-    environment: WATCHTRACE_QUARANTINE_KEY
-  worker-encryption-private:
-    environment: WATCHTRACE_WORKER_ENCRYPTION_PRIVATE_KEY
-  worker-result-private:
-    environment: WATCHTRACE_WORKER_RESULT_PRIVATE_KEY

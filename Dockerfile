@@ -32,6 +32,9 @@ RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     -o /out/watchtrace-queue-admin ./cmd/queue-admin && \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -mod=readonly -trimpath -buildvcs=false -ldflags="-s -w" \
+    -o /out/watchtrace-deployment-keys ./cmd/deployment-keys && \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+    go build -mod=readonly -trimpath -buildvcs=false -ldflags="-s -w" \
     -o /out/watchtrace-healthcheck ./cmd/healthcheck
 
 FROM scratch
@@ -47,6 +50,7 @@ COPY --from=build --chown=65532:65532 /out/watchtrace-monitor-engine /watchtrace
 COPY --from=build --chown=65532:65532 /out/watchtrace-notification-worker /watchtrace-notification-worker
 COPY --from=build --chown=65532:65532 /out/watchtrace-worker-pool /watchtrace-worker-pool
 COPY --from=build --chown=65532:65532 /out/watchtrace-queue-admin /watchtrace-queue-admin
+COPY --from=build --chown=65532:65532 /out/watchtrace-deployment-keys /watchtrace-deployment-keys
 COPY --from=build --chown=65532:65532 /out/watchtrace-healthcheck /watchtrace-healthcheck
 
 ENV WATCHTRACE_HTTP_ADDRESS=0.0.0.0:8080

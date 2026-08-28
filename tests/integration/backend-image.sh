@@ -56,6 +56,7 @@ for binary in \
     watchtrace-notification-worker \
     watchtrace-worker-pool \
     watchtrace-queue-admin \
+    watchtrace-deployment-keys \
     watchtrace-healthcheck
 do
     if ! docker export "$container_name" | tar -tf - | grep -qx "$binary"; then

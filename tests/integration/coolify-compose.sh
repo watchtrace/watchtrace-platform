@@ -32,21 +32,21 @@ export WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/
 export WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-jobs-hosted-dlq.fifo
 export WATCHTRACE_SQS_RESULT_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-results.fifo
 export WATCHTRACE_SQS_RESULT_DLQ_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-results-dlq.fifo
-export WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY=TEST_ONLY_PRIVATE_KEY
-export WATCHTRACE_PLATFORM_SIGNING_PUBLIC_KEY=TEST_ONLY_PUBLIC_KEY
-export WATCHTRACE_MONITOR_HEADER_KEY=TEST_ONLY_HEADER_KEY
-export WATCHTRACE_QUARANTINE_KEY=TEST_ONLY_QUARANTINE_KEY
-export WATCHTRACE_WORKER_ENCRYPTION_PRIVATE_KEY=TEST_ONLY_ENCRYPTION_KEY
-export WATCHTRACE_WORKER_RESULT_PRIVATE_KEY=TEST_ONLY_RESULT_KEY
-
-# exclude_from_hc is a documented Coolify extension for one-shot migration
-# services. Remove only that extension before validating the remaining file
-# against the standard Docker Compose schema.
+# exclude_from_hc and the empty content file markers are documented Coolify
+# extensions. Remove only those extensions before validating the remaining
+# file against the standard Docker Compose schema.
 if ! grep -Eq '^[[:space:]]+exclude_from_hc:[[:space:]]+true$' "$compose_file"; then
     echo "The one-shot migration must be excluded from Coolify health checks." >&2
     exit 1
 fi
-sed '/^[[:space:]]*exclude_from_hc:[[:space:]]*true$/d' "$compose_file" >"$portable_compose"
+if [ "$(grep -Ec '^[[:space:]]+content:[[:space:]]+""$' "$compose_file")" -ne 8 ]; then
+    echo "Every host-backed key must be declared as a Coolify file mount." >&2
+    exit 1
+fi
+sed \
+    -e '/^[[:space:]]*exclude_from_hc:[[:space:]]*true$/d' \
+    -e '/^[[:space:]]*content:[[:space:]]*""$/d' \
+    "$compose_file" >"$portable_compose"
 
 docker compose --file "$portable_compose" config --quiet
 docker compose --file "$portable_compose" config >"$rendered_file"
@@ -70,5 +70,36 @@ if jq -e '.services["hosted-worker"].environment.WATCHTRACE_DATABASE_URL' \
     echo "The hosted worker must not receive a PostgreSQL URL." >&2
     exit 1
 fi
+
+if jq -e 'has("secrets")' "$rendered_json" >/dev/null; then
+    echo "The Coolify stack must not use environment-backed Compose secrets." >&2
+    exit 1
+fi
+
+assert_read_only_key_mount() {
+    service=$1
+    source=$2
+    target=$3
+
+    if ! jq -e \
+        --arg service "$service" \
+        --arg source "$source" \
+        --arg target "$target" \
+        '.services[$service].volumes[] |
+         select(.type == "bind" and .source == $source and .target == $target and .read_only == true)' \
+        "$rendered_json" >/dev/null; then
+        echo "$service must read $target from the read-only host file $source." >&2
+        exit 1
+    fi
+}
+
+assert_read_only_key_mount monitor-engine /data/watchtrace/secrets/platform-signing-private /run/secrets/platform-signing-private
+assert_read_only_key_mount monitor-engine /data/watchtrace/secrets/monitor-header-key /run/secrets/monitor-header-key
+assert_read_only_key_mount monitor-engine /data/watchtrace/secrets/quarantine-key /run/secrets/quarantine-key
+assert_read_only_key_mount hosted-worker /data/watchtrace/secrets/worker-encryption-private /run/secrets/worker-encryption-private
+assert_read_only_key_mount hosted-worker /data/watchtrace/secrets/worker-result-private /run/secrets/worker-result-private
+assert_read_only_key_mount hosted-worker /data/watchtrace/secrets/platform-signing-public /run/secrets/platform-signing-public
+assert_read_only_key_mount api /data/watchtrace/secrets/platform-signing-private /run/secrets/platform-signing-private
+assert_read_only_key_mount api /data/watchtrace/secrets/monitor-header-key /run/secrets/monitor-header-key
 
 echo "Coolify Compose configuration is valid."

@@ -188,3 +188,38 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
         run: echo "${IMAGE_NAME}@${IMAGE_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Trigger prod deployment in Coolify
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.COOLIFY_DEPLOY_ENABLED == 'true'
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Trigger authenticated Coolify deploy webhook
+        env:
+          COOLIFY_DEPLOY_WEBHOOK: ${{ secrets.COOLIFY_DEPLOY_WEBHOOK }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [ -z "$COOLIFY_DEPLOY_WEBHOOK" ] || [ -z "$COOLIFY_TOKEN" ]; then
+            echo "COOLIFY_DEPLOY_WEBHOOK and COOLIFY_TOKEN must both be configured."
+            exit 1
+          fi
+          case "$COOLIFY_DEPLOY_WEBHOOK" in
+            https://*) ;;
+            *) echo "COOLIFY_DEPLOY_WEBHOOK must use HTTPS."; exit 1 ;;
+          esac
+          curl --fail --silent --show-error \
+            --proto '=https' \
+            --tlsv1.2 \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --output /dev/null \
+            --request GET \
+            "$COOLIFY_DEPLOY_WEBHOOK" \
+            --header "Authorization: Bearer $COOLIFY_TOKEN"
+          echo "Coolify accepted the prod deployment request." >> "$GITHUB_STEP_SUMMARY"

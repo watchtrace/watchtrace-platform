@@ -28,8 +28,10 @@ const (
 	passwordResetURLEnvironment        = "WATCHTRACE_PASSWORD_RESET_URL"
 	invitationURLEnvironment           = "WATCHTRACE_INVITATION_URL"
 	monitorHeaderKeyEnvironment        = "WATCHTRACE_MONITOR_HEADER_KEY"
+	monitorHeaderKeyFileEnvironment    = "WATCHTRACE_MONITOR_HEADER_KEY_FILE"
 	monitorHeaderKeyVersionEnvironment = "WATCHTRACE_MONITOR_HEADER_KEY_VERSION"
 	platformSigningKeyEnvironment      = "WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY"
+	platformSigningKeyFileEnvironment  = "WATCHTRACE_PLATFORM_SIGNING_KEY_FILE"
 	platformSigningKeyIDEnvironment    = "WATCHTRACE_PLATFORM_SIGNING_KEY_ID"
 
 	defaultHTTPAddress          = "127.0.0.1:8080"
@@ -75,6 +77,10 @@ func LoadDatabaseURL() (string, error) {
 }
 
 func load(lookup func(string) (string, bool)) (Config, error) {
+	return loadWithFiles(lookup, os.ReadFile)
+}
+
+func loadWithFiles(lookup func(string) (string, bool), readFile func(string) ([]byte, error)) (Config, error) {
 	databaseURL, err := loadDatabaseURL(lookup)
 	if err != nil {
 		return Config{}, err
@@ -126,11 +132,16 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	if verificationProvider == "oci" && (verificationUsername == "" || verificationPassword == "") {
 		return Config{}, errors.New("OCI verification SMTP credentials are required")
 	}
-	headerKeyValue := defaultDevelopmentHeaderKey
-	if value, exists := lookup(monitorHeaderKeyEnvironment); exists {
-		headerKeyValue = strings.TrimSpace(value)
-	} else if environment == "production" {
-		return Config{}, fmt.Errorf("%s is required in production", monitorHeaderKeyEnvironment)
+	headerKeyValue, err := secretSetting(
+		lookup,
+		readFile,
+		monitorHeaderKeyEnvironment,
+		monitorHeaderKeyFileEnvironment,
+		defaultDevelopmentHeaderKey,
+		environment == "production",
+	)
+	if err != nil {
+		return Config{}, err
 	}
 	headerKey, decodeErr := base64.StdEncoding.DecodeString(headerKeyValue)
 	if decodeErr != nil || len(headerKey) != 32 {
@@ -144,15 +155,24 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		}
 		headerKeyVersion = int32(parsed)
 	}
+	signingKeyValue, err := secretSetting(
+		lookup,
+		readFile,
+		platformSigningKeyEnvironment,
+		platformSigningKeyFileEnvironment,
+		base64.StdEncoding.EncodeToString(ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))),
+		environment == "production",
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	signingKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	if value, exists := lookup(platformSigningKeyEnvironment); exists {
-		decoded, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+	if signingKeyValue != "" {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(signingKeyValue))
 		if decodeErr != nil || len(decoded) != ed25519.PrivateKeySize {
 			return Config{}, fmt.Errorf("%s must be a base64-encoded Ed25519 private key", platformSigningKeyEnvironment)
 		}
 		signingKey = ed25519.PrivateKey(decoded)
-	} else if environment == "production" {
-		return Config{}, fmt.Errorf("%s is required in production", platformSigningKeyEnvironment)
 	}
 	signingKeyID := stringSetting(lookup, platformSigningKeyIDEnvironment, "platform-v1")
 	if signingKeyID == "" || len(signingKeyID) > 64 {
@@ -177,6 +197,35 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		PlatformSigningKey:       signingKey,
 		PlatformSigningKeyID:     signingKeyID,
 	}, nil
+}
+
+func secretSetting(
+	lookup func(string) (string, bool),
+	readFile func(string) ([]byte, error),
+	valueEnvironment, fileEnvironment, fallback string,
+	required bool,
+) (string, error) {
+	value, valueExists := lookup(valueEnvironment)
+	value = strings.TrimSpace(value)
+	path, pathExists := lookup(fileEnvironment)
+	path = strings.TrimSpace(path)
+	if valueExists && value != "" && pathExists && path != "" {
+		return "", fmt.Errorf("%s and %s must not both be set", valueEnvironment, fileEnvironment)
+	}
+	if pathExists && path != "" {
+		data, err := readFile(path)
+		if err != nil {
+			return "", fmt.Errorf("%s could not be read", fileEnvironment)
+		}
+		value = strings.TrimSpace(string(data))
+	}
+	if value == "" {
+		if required {
+			return "", fmt.Errorf("%s or %s is required in production", valueEnvironment, fileEnvironment)
+		}
+		return fallback, nil
+	}
+	return value, nil
 }
 
 func stringSetting(lookup func(string) (string, bool), name, fallback string) string {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,67 @@ func TestLoadReadsEnvironment(t *testing.T) {
 		configuration.PasswordResetURL != "http://localhost:3001/reset" ||
 		configuration.InvitationURL != "http://localhost:3001/invite" {
 		t.Fatalf("verification configuration was not loaded: %+v", configuration)
+	}
+}
+
+func TestLoadReadsMonitoringKeysFromFiles(t *testing.T) {
+	const (
+		headerPath  = "/run/secrets/monitor-header-key"
+		signingPath = "/run/secrets/platform-signing-private"
+	)
+	configuration, err := loadWithFiles(environment(map[string]string{
+		databaseURLEnvironment:            validDatabaseURL,
+		deploymentEnvironment:             "production",
+		monitorHeaderKeyFileEnvironment:   headerPath,
+		platformSigningKeyFileEnvironment: signingPath,
+	}), func(path string) ([]byte, error) {
+		values := map[string]string{
+			headerPath:  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			signingPath: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA7aie8zrakLWKjqNAqbw1zZTIVdx3iQ6Y6wEihi1naKQ==",
+		}
+		return []byte(values[path]), nil
+	})
+	if err != nil {
+		t.Fatalf("loadWithFiles: %v", err)
+	}
+	if !configuration.Production || len(configuration.MonitorHeaderKey) != 32 || len(configuration.PlatformSigningKey) != 64 {
+		t.Fatalf("file-backed monitoring keys were not loaded: %+v", configuration)
+	}
+}
+
+func TestLoadRejectsAmbiguousOrUnreadableKeyFiles(t *testing.T) {
+	tests := []struct {
+		name        string
+		values      map[string]string
+		wantMessage string
+	}{
+		{
+			name: "value and file both set",
+			values: map[string]string{
+				databaseURLEnvironment:          validDatabaseURL,
+				monitorHeaderKeyEnvironment:     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+				monitorHeaderKeyFileEnvironment: "/run/secrets/monitor-header-key",
+			},
+			wantMessage: "WATCHTRACE_MONITOR_HEADER_KEY and WATCHTRACE_MONITOR_HEADER_KEY_FILE must not both be set",
+		},
+		{
+			name: "file cannot be read",
+			values: map[string]string{
+				databaseURLEnvironment:          validDatabaseURL,
+				monitorHeaderKeyFileEnvironment: "/run/secrets/monitor-header-key",
+			},
+			wantMessage: "WATCHTRACE_MONITOR_HEADER_KEY_FILE could not be read",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := loadWithFiles(environment(test.values), func(string) ([]byte, error) {
+				return nil, os.ErrPermission
+			})
+			if err == nil || err.Error() != test.wantMessage {
+				t.Fatalf("error = %v, want %q", err, test.wantMessage)
+			}
+		})
 	}
 }
 
@@ -238,7 +300,7 @@ func TestProductionRequiresExternalMonitoringKeys(t *testing.T) {
 		deploymentEnvironment:       "production",
 		monitorHeaderKeyEnvironment: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 	}))
-	if err == nil || err.Error() != "WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY is required in production" {
+	if err == nil || err.Error() != "WATCHTRACE_PLATFORM_SIGNING_PRIVATE_KEY or WATCHTRACE_PLATFORM_SIGNING_KEY_FILE is required in production" {
 		t.Fatalf("production signing-key error = %v", err)
 	}
 }
