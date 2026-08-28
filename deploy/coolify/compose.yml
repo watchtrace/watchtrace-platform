@@ -86,12 +86,10 @@ services:
         source: /data/watchtrace/secrets/platform-signing-private
         target: /run/secrets/platform-signing-private
         read_only: true
-        content: ""
       - type: bind
         source: /data/watchtrace/secrets/monitor-header-key
         target: /run/secrets/monitor-header-key
         read_only: true
-        content: ""
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -114,25 +112,21 @@ services:
       WATCHTRACE_QUARANTINE_KEY: /run/secrets/quarantine-key
       WATCHTRACE_ENGINE_HEALTH_ADDRESS: 0.0.0.0:8091
     volumes:
-      # These empty content fields are Coolify file-mount markers. They tell
-      # Coolify that each existing absolute host path is a file, not a
-      # directory. The real contents are generated on the Oracle host before
-      # Coolify deploys this Compose definition and are never stored here.
+      # These source files are generated on the Oracle host before Coolify
+      # deploys this Compose definition. Do not add Coolify's `content:`
+      # extension: it would make Coolify manage and overwrite the host files.
       - type: bind
         source: /data/watchtrace/secrets/platform-signing-private
         target: /run/secrets/platform-signing-private
         read_only: true
-        content: ""
       - type: bind
         source: /data/watchtrace/secrets/monitor-header-key
         target: /run/secrets/monitor-header-key
         read_only: true
-        content: ""
       - type: bind
         source: /data/watchtrace/secrets/quarantine-key
         target: /run/secrets/quarantine-key
         read_only: true
-        content: ""
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -172,17 +166,14 @@ services:
         source: /data/watchtrace/secrets/worker-encryption-private
         target: /run/secrets/worker-encryption-private
         read_only: true
-        content: ""
       - type: bind
         source: /data/watchtrace/secrets/worker-result-private
         target: /run/secrets/worker-result-private
         read_only: true
-        content: ""
       - type: bind
         source: /data/watchtrace/secrets/platform-signing-public
         target: /run/secrets/platform-signing-public
         read_only: true
-        content: ""
     healthcheck:
       test: ["CMD", "/watchtrace-healthcheck", "http://127.0.0.1:8090/health/ready"]
       interval: 15s

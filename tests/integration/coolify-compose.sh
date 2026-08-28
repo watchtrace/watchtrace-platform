@@ -32,20 +32,18 @@ export WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/
 export WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-jobs-hosted-dlq.fifo
 export WATCHTRACE_SQS_RESULT_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-results.fifo
 export WATCHTRACE_SQS_RESULT_DLQ_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-results-dlq.fifo
-# exclude_from_hc and the empty content file markers are documented Coolify
-# extensions. Remove only those extensions before validating the remaining
-# file against the standard Docker Compose schema.
+# exclude_from_hc is a documented Coolify extension. Remove only that extension
+# before validating the remaining file against the standard Docker Compose
+# schema.
 if ! grep -Eq '^[[:space:]]+exclude_from_hc:[[:space:]]+true$' "$compose_file"; then
     echo "The one-shot migration must be excluded from Coolify health checks." >&2
     exit 1
 fi
-if [ "$(grep -Ec '^[[:space:]]+content:[[:space:]]+""$' "$compose_file")" -ne 8 ]; then
-    echo "Every host-backed key must be declared as a Coolify file mount." >&2
+if grep -Eq '^[[:space:]]+content:' "$compose_file"; then
+    echo "Host-generated deployment keys must not be managed as Coolify content files." >&2
     exit 1
 fi
-sed \
-    -e '/^[[:space:]]*exclude_from_hc:[[:space:]]*true$/d' \
-    -e '/^[[:space:]]*content:[[:space:]]*""$/d' \
+sed '/^[[:space:]]*exclude_from_hc:[[:space:]]*true$/d' \
     "$compose_file" >"$portable_compose"
 
 docker compose --file "$portable_compose" config --quiet

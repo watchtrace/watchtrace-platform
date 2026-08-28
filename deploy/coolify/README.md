@@ -207,6 +207,11 @@ and mode `400`. The public directory must contain `hosted-public.json` with
 owner `root:root` and mode `444`. These commands print metadata only. Never use
 `cat` on a private file in screenshots, logs, issues, or chat.
 
+The Compose definition uses ordinary read-only host file mounts. It deliberately
+does not use Coolify's `content:` extension because that extension tells Coolify
+to create and manage the file. Every source file must exist before deployment;
+otherwise Docker may create a directory or Coolify deployment will fail.
+
 If generation fails before activation, do not reuse the partial staging
 directory. Record its exact path, remove only that `secrets.new.*` directory,
 and restart from step 2. Never delete or overwrite an active
