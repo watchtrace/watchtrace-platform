@@ -219,7 +219,7 @@ jobs:
             --connect-timeout 10 \
             --max-time 30 \
             --output /dev/null \
-            --request GET \
+            --request POST \
             "$COOLIFY_DEPLOY_WEBHOOK" \
             --header "Authorization: Bearer $COOLIFY_TOKEN"
           echo "Coolify accepted the prod deployment request." >> "$GITHUB_STEP_SUMMARY"

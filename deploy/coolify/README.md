@@ -262,7 +262,8 @@ unconfigured database, queue, SMTP credential, or host key directory merely
 because the workflow change was pushed.
 
 1. In self-hosted Coolify, open **Settings > Configuration > Advanced**, enable
-   API access, and save.
+   API access, and save. The GitHub workflows send an authenticated `POST` to
+   the deployment API after image publication succeeds.
 2. Open **Keys & Tokens > API Tokens**, create a token named
    `github-actions-prod`, grant only its deploy permission, choose an expiry,
    and copy it once. The token authorizes a deployment request; it is not a
