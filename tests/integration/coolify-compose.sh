@@ -44,6 +44,15 @@ if grep -Eq '^[[:space:]]+content:' "$compose_file"; then
     echo "Host-generated deployment keys must not be managed as Coolify content files." >&2
     exit 1
 fi
+# Some Docker Compose releases omit an explicit false value while serializing
+# config to JSON. Check this source-level safety setting independently so the
+# test remains consistent across the local and GitHub runner Compose versions.
+bind_mount_count=$(grep -Ec '^[[:space:]]+- type:[[:space:]]+bind$' "$compose_file")
+non_creating_bind_count=$(grep -Ec '^[[:space:]]+create_host_path:[[:space:]]+false$' "$compose_file")
+if [ "$bind_mount_count" -eq 0 ] || [ "$bind_mount_count" -ne "$non_creating_bind_count" ]; then
+    echo "Every host bind mount must disable automatic host-path creation." >&2
+    exit 1
+fi
 sed '/^[[:space:]]*exclude_from_hc:[[:space:]]*true$/d' \
     "$compose_file" >"$portable_compose"
 
@@ -96,7 +105,7 @@ assert_read_only_key_mount() {
         --arg target "$target" \
         '.services[$service].volumes[] |
          select(.type == "bind" and .source == $source and .target == $target and
-                .read_only == true and .bind.create_host_path == false)' \
+                .read_only == true)' \
         "$rendered_json" >/dev/null; then
         echo "$service must read $target from the read-only host file $source." >&2
         exit 1
