@@ -2,7 +2,13 @@
 
 Phase 1.2 uses a reviewed manual AWS procedure and a versioned, non-secret deployment manifest to validate FIFO queue behavior with one operator-provided non-production IAM identity. Separate workload-role creation, trust-policy verification, production security exercises, Terraform, numeric CloudWatch alarms, SNS topics, and infrastructure email alerts are deferred to Phase 4.
 
-Use one explicit Region for an environment (`ap-south-1` is the reference Region). Never place access keys, session tokens, receipt handles, private keys, certificate private material, or decrypted monitor data in the manifest.
+The owner-only Oracle deployment has one deployment environment, named `prod`.
+That label determines resource names and configuration selection; it does not
+mean the Phase 1 system has passed the Phase 4 customer-production gates. The
+provisioning script rejects `dev` and `stg` so that a second queue set cannot be
+created accidentally.
+
+Use one explicit Region for the `prod` deployment (`ap-south-1` is the reference Region). Never place access keys, session tokens, receipt handles, private keys, certificate private material, or decrypted monitor data in the manifest.
 
 ## Create or reconcile the private Phase 1 queues
 
@@ -12,7 +18,7 @@ path:
 
 ```sh
 aws sts get-caller-identity
-./scripts/provision-phase1-sqs.sh --environment dev --region ap-south-1
+./scripts/provision-phase1-sqs.sh --environment prod --region ap-south-1
 ```
 
 Apply the reviewed plan. This creates DLQs before source queues, rolls back only
@@ -22,14 +28,14 @@ environment manifest:
 
 ```sh
 ./scripts/provision-phase1-sqs.sh \
-  --environment dev \
+  --environment prod \
   --region ap-south-1 \
-  --manifest deploy/aws/phase1-sqs.dev.manifest.json \
-  --runtime-policy deploy/aws/phase1-sqs.dev.runtime-policy.json \
+  --manifest deploy/aws/phase1-sqs.prod.manifest.json \
+  --runtime-policy deploy/aws/phase1-sqs.prod.runtime-policy.json \
   --apply
 go run ./cmd/queue-admin \
   -scope sqs \
-  deploy/aws/phase1-sqs.dev.manifest.json
+  deploy/aws/phase1-sqs.prod.manifest.json
 ```
 
 Review and commit the generated non-secret manifest and runtime IAM policy after

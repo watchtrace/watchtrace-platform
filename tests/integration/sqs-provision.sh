@@ -34,6 +34,12 @@ if "$repository_root/scripts/provision-phase1-sqs.sh" \
     exit 1
 fi
 
+if "$repository_root/scripts/provision-phase1-sqs.sh" \
+    --environment dev >/dev/null 2>&1; then
+    echo "The provisioner must reject an environment other than prod" >&2
+    exit 1
+fi
+
 docker run --detach --name "$container_name" \
     --env SERVICES=sqs \
     --env DEFAULT_REGION=ap-south-1 \
@@ -76,7 +82,7 @@ verify_manifest() {
 
 cd "$repository_root"
 run_with_localstack ./scripts/provision-phase1-sqs.sh \
-    --environment dev \
+    --environment prod \
     --region ap-south-1 \
     --manifest "$manifest_path" \
     --runtime-policy "$runtime_policy_path" \
@@ -85,7 +91,7 @@ verify_manifest
 
 # A second run proves that the reviewed manual operation is safely reconcilable.
 run_with_localstack ./scripts/provision-phase1-sqs.sh \
-    --environment dev \
+    --environment prod \
     --region ap-south-1 \
     --manifest "$manifest_path" \
     --runtime-policy "$runtime_policy_path" \
@@ -95,7 +101,7 @@ verify_manifest
 test "$(run_with_localstack aws --endpoint-url "$endpoint" sqs list-queues --query 'length(QueueUrls)' --output text)" = "4"
 jq -e '
   .version == 1 and
-  .environment == "dev" and
+  .environment == "prod" and
   .aws_region == "ap-south-1" and
   (.queues | length) == 4 and
   ([.queues[].sse] | all(. == "SSE-SQS"))

@@ -3,14 +3,14 @@
 set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-environment=dev
+environment=prod
 region=${AWS_REGION:-ap-south-1}
 manifest_path=
 runtime_policy_path=
 apply=false
 
 usage() {
-    echo "usage: $0 [--environment dev|stg|prod] [--region REGION] [--manifest PATH] [--runtime-policy PATH] [--apply]" >&2
+    echo "usage: $0 [--environment prod] [--region REGION] [--manifest PATH] [--runtime-policy PATH] [--apply]" >&2
 }
 
 while [ "$#" -gt 0 ]; do
@@ -47,8 +47,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$environment" in
-    dev|stg|prod) ;;
-    *) echo "environment must be dev, stg, or prod" >&2; exit 2 ;;
+    prod) ;;
+    *) echo "environment must be prod for the single Phase 1 deployment" >&2; exit 2 ;;
 esac
 [ -n "$region" ] || { echo "AWS Region must not be empty" >&2; exit 2; }
 
@@ -56,7 +56,11 @@ if [ -z "$manifest_path" ]; then
     manifest_path="$repository_root/deploy/aws/phase1-sqs.$environment.manifest.json"
 fi
 if [ -z "$runtime_policy_path" ]; then
-    runtime_policy_path=${manifest_path%.json}.runtime-policy.json
+    case "$manifest_path" in
+        *.manifest.json) runtime_policy_path=${manifest_path%.manifest.json}.runtime-policy.json ;;
+        *.json) runtime_policy_path=${manifest_path%.json}.runtime-policy.json ;;
+        *) runtime_policy_path=$manifest_path.runtime-policy.json ;;
+    esac
 fi
 [ "$manifest_path" != "$runtime_policy_path" ] || {
     echo "manifest and runtime policy paths must be different" >&2
@@ -362,5 +366,5 @@ mv "$runtime_policy_temporary" "$runtime_policy_path"
 completed=true
 echo "Provisioned and recorded the controlled Phase 1 SQS queues."
 echo "Verify with: go run ./cmd/queue-admin -scope sqs $manifest_path"
-echo "Attach the queue-scoped runtime policy to the non-production identity used by Coolify: $runtime_policy_path"
+echo "Attach the queue-scoped runtime policy to the owner-only Phase 1 identity used by Coolify: $runtime_policy_path"
 echo "Copy the four queue URLs from the manifest into the matching Coolify variables."

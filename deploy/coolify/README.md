@@ -1,9 +1,14 @@
-# Private Coolify deployment
+# Private `prod` Coolify deployment
 
 This directory defines the owner-only Phase 1–3 deployment. It is disposable,
 admits no external clients, and makes no backup, restore, availability, RPO, or
 RTO promise. Internet-facing security controls still apply. P4-701 must be
 completed before any customer, production, or public-beta use.
+
+There is one deployment environment and its resource label is `prod`. This is
+the configuration selected by the application and used in AWS queue names. The
+label does not override the private-use restriction above or claim that the
+Phase 4 customer-production gates have passed.
 
 ## What this stack runs
 
@@ -48,15 +53,18 @@ replacement. They are not backups and may be discarded during Phases 1–3.
    fingerprints.
 3. Create an OCI Email Delivery approved sender and SMTP credential. Never use
    the OCI account password as the SMTP password.
-4. Point the public DNS record at the Oracle VM and allow inbound TCP 80 and 443
-   in both the OCI security list/NSG and the VM firewall. Keep PostgreSQL and
-   application ports closed.
+4. Until an owned domain is available, use
+   `watchtrace-129-159-236-232.sslip.io`; sslip.io resolves that hostname to the
+   Oracle VM at `129.159.236.232` without a DNS account. Allow inbound TCP 80
+   and 443 in both the OCI security list/NSG and the VM firewall. Keep
+   PostgreSQL and application ports closed. Replace the temporary hostname with
+   an owned domain before external-client use.
 
 ## Generate deployment keys
 
-Generate every environment's keys on a trusted machine. The following example
-uses a temporary directory so the private material is not written into this
-repository:
+Generate the `prod` deployment's keys on a trusted machine. The following
+example uses a temporary directory so the private material is not written into
+this repository:
 
 ```sh
 key_directory=$(mktemp -d)
@@ -90,14 +98,16 @@ place them in the AWS manifest.
 
 ## Create the stack in Coolify
 
-1. In Coolify, create a Docker Compose resource from this repository and choose
-   `deploy/coolify/compose.yml` as the Compose file.
+1. In Coolify, create the `WatchTrace` project with one environment named
+   `prod`. In that environment, create a Docker Compose resource from this
+   repository and choose `deploy/coolify/compose.yml` as the Compose file.
 2. Copy every name from `.env.example` into the resource's environment-variable
    editor and replace every placeholder. Mark credentials and private keys as
    secrets. `POSTGRES_PASSWORD` must be URL-safe and must exactly match the
    password embedded in `WATCHTRACE_DATABASE_URL`.
-3. Set `WATCHTRACE_PUBLIC_URL` to the final HTTPS origin without a trailing
-   slash. Set the OCI SMTP endpoint for the VM's OCI Region.
+3. Set `WATCHTRACE_PUBLIC_URL` to
+   `https://watchtrace-129-159-236-232.sslip.io` without a trailing slash. Set
+   the OCI SMTP endpoint for the VM's OCI Region.
 4. Assign the public domain only to the `frontend` service on container port
    `8080`. Let Coolify provision and renew HTTPS.
 5. Deploy. The migration must finish successfully before the API and dependent
@@ -115,7 +125,7 @@ Separate temporary workload roles remain a Phase 4 requirement.
 Run these checks before creating personal test data:
 
 ```sh
-./scripts/verify-private-deployment.sh https://watchtrace.example.com
+./scripts/verify-private-deployment.sh https://watchtrace-129-159-236-232.sslip.io
 ```
 
 Then confirm in Coolify that `postgres`, `api`, `monitor-engine`,

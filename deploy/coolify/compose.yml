@@ -1,4 +1,4 @@
-name: watchtrace-private
+name: watchtrace-prod
 
 x-bounded-logging: &bounded-logging
   driver: json-file
