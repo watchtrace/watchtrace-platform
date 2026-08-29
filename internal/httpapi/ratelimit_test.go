@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,82 @@ func TestRateLimiterReturnsStableEnvelopeAndSeconds(t *testing.T) {
 				t.Fatalf("body=%s err=%v", response.Body.String(), err)
 			}
 		}
+	}
+}
+
+func TestRateLimiterSeparatesAuthenticatedSessionsBehindOneProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	limiter := NewRateLimiter(RateLimits{ReportsPerMinute: 1})
+	router := gin.New()
+	router.Use(limiter.Middleware())
+	router.GET("/api/v1/environments/:environmentId/dashboard", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	request := func(token string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/environments/e/dashboard", nil)
+		req.RemoteAddr = "172.18.0.4:1234"
+		req.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response.Code
+	}
+
+	if status := request("session-one"); status != http.StatusOK {
+		t.Fatalf("first session status=%d", status)
+	}
+	if status := request("session-two"); status != http.StatusOK {
+		t.Fatalf("second session shared the proxy bucket: status=%d", status)
+	}
+	if status := request("session-one"); status != http.StatusTooManyRequests {
+		t.Fatalf("repeated first session status=%d", status)
+	}
+	for key := range limiter.buckets {
+		if strings.Contains(key, "session-one") || strings.Contains(key, "session-two") {
+			t.Fatalf("rate-limit key retained a raw session token")
+		}
+	}
+}
+
+func TestRateLimiterSeparatesRefreshSessionsBehindOneProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	limiter := NewRateLimiter(RateLimits{AuthPerMinute: 1})
+	router := gin.New()
+	router.Use(limiter.Middleware())
+	router.POST("/api/v1/auth/refresh", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	request := func(token string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", nil)
+		req.RemoteAddr = "172.18.0.4:1234"
+		req.AddCookie(&http.Cookie{Name: refreshTokenCookieName, Value: token})
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response.Code
+	}
+
+	if first, second := request("refresh-one"), request("refresh-two"); first != http.StatusOK || second != http.StatusOK {
+		t.Fatalf("refresh sessions shared the proxy bucket: first=%d second=%d", first, second)
+	}
+}
+
+func TestAuthRateLimiterIgnoresArbitraryBearerTokens(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	limiter := NewRateLimiter(RateLimits{AuthPerMinute: 1})
+	router := gin.New()
+	router.Use(limiter.Middleware())
+	router.POST("/api/v1/auth/login", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	request := func(token string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		req.RemoteAddr = "192.0.2.10:1234"
+		req.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response.Code
+	}
+
+	if first, second := request("attacker-selected-one"), request("attacker-selected-two"); first != http.StatusOK || second != http.StatusTooManyRequests {
+		t.Fatalf("arbitrary bearer changed auth bucket: first=%d second=%d", first, second)
 	}
 }
 

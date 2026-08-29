@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
 	"net"
 	"net/http"
@@ -53,7 +55,7 @@ func (r *RateLimiter) Middleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		client := clientAddress(c.Request)
+		client := clientIdentity(c.Request)
 		key := class + ":" + client
 		if live {
 			if !r.acquireLive(key) {
@@ -71,6 +73,30 @@ func (r *RateLimiter) Middleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// clientIdentity keeps authenticated callers behind the same reverse proxy in
+// separate buckets without trusting caller-controlled forwarding headers. Raw
+// bearer and refresh tokens are never retained in the limiter's in-memory
+// bucket keys.
+func clientIdentity(request *http.Request) string {
+	if cookie, err := request.Cookie(refreshTokenCookieName); err == nil && cookie.Value != "" {
+		return "refresh:" + identityDigest(cookie.Value)
+	}
+	// Authentication endpoints do not authenticate bearer tokens. Ignoring an
+	// arbitrary Authorization header here prevents callers from selecting a new
+	// rate-limit bucket for every login or password-reset attempt.
+	if !strings.HasPrefix(request.URL.Path, "/api/v1/auth/") {
+		if token, ok := bearerToken(request.Header.Get("Authorization")); ok {
+			return "session:" + identityDigest(token)
+		}
+	}
+	return "address:" + clientAddress(request)
+}
+
+func identityDigest(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
 }
 func (r *RateLimiter) classify(method, path string) (string, int, time.Duration, bool) {
 	switch {
