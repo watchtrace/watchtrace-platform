@@ -2,7 +2,6 @@
 package workerpool
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -10,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type DB interface {
@@ -68,89 +66,6 @@ VALUES($1,$2,false,'provisioning',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, r.ID, r.Mo
 		return err
 	}
 	return tx.Commit(ctx)
-}
-
-// BootstrapHosted idempotently completes the canonical hosted pool created by
-// the schema migration. It only fills an empty seed or confirms an identical
-// configuration; conflicting key or queue material is never overwritten.
-func (s *Service) BootstrapHosted(ctx context.Context, r Registration, actor, reason string) error {
-	if s.db == nil || r.ID != "hosted" || r.Mode != "hosted" || r.JobQueueURL == "" ||
-		r.JobQueueARN == "" || r.JobDLQURL == "" || r.JobDLQARN == "" ||
-		len(r.EncryptionPublic) != 32 || len(r.ResultPublic) != 32 ||
-		r.EncryptionKeyID == "" || r.ResultKeyID == "" || r.SchemaMin < 1 ||
-		r.SchemaMax > 2 || r.SchemaMin > r.SchemaMax || actor == "" || reason == "" {
-		return errors.New("invalid hosted worker-pool bootstrap")
-	}
-
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(context.Background())
-
-	var mode, lifecycle string
-	var encryptionKeyID, resultKeyID, jobQueueURL, jobQueueARN, jobDLQURL, jobDLQARN pgtype.Text
-	var encryptionPublic, resultPublic []byte
-	err = tx.QueryRow(ctx, `SELECT mode,lifecycle_state,encryption_key_id,encryption_public_key,
-result_key_id,result_public_key,job_queue_url,job_queue_arn,job_dlq_url,job_dlq_arn
-FROM worker_pools WHERE id='hosted' FOR UPDATE`).Scan(
-		&mode, &lifecycle, &encryptionKeyID, &encryptionPublic, &resultKeyID, &resultPublic,
-		&jobQueueURL, &jobQueueARN, &jobDLQURL, &jobDLQARN,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errors.New("hosted worker-pool seed is missing")
-	}
-	if err != nil {
-		return err
-	}
-	if mode != "hosted" || (lifecycle != "provisioning" && lifecycle != "active") ||
-		!compatibleText(encryptionKeyID, r.EncryptionKeyID) || !compatibleBytes(encryptionPublic, r.EncryptionPublic) ||
-		!compatibleText(resultKeyID, r.ResultKeyID) || !compatibleBytes(resultPublic, r.ResultPublic) ||
-		!compatibleText(jobQueueURL, r.JobQueueURL) || !compatibleText(jobQueueARN, r.JobQueueARN) ||
-		!compatibleText(jobDLQURL, r.JobDLQURL) || !compatibleText(jobDLQARN, r.JobDLQARN) {
-		return errors.New("hosted worker-pool bootstrap conflicts with existing configuration")
-	}
-
-	if _, err = tx.Exec(ctx, `UPDATE worker_pools SET enabled=true,lifecycle_state='active',
-schema_min=$1,schema_max=$2,encryption_key_id=$3,encryption_public_key=$4,
-result_key_id=$5,result_public_key=$6,job_queue_url=$7,job_queue_arn=$8,
-job_dlq_url=$9,job_dlq_arn=$10,updated_at=CURRENT_TIMESTAMP WHERE id='hosted'`,
-		r.SchemaMin, r.SchemaMax, r.EncryptionKeyID, r.EncryptionPublic, r.ResultKeyID,
-		r.ResultPublic, r.JobQueueURL, r.JobQueueARN, r.JobDLQURL, r.JobDLQARN); err != nil {
-		return err
-	}
-
-	for _, credential := range []struct {
-		purpose, keyID string
-		public         []byte
-	}{{"job_encryption", r.EncryptionKeyID, r.EncryptionPublic}, {"result_signing", r.ResultKeyID, r.ResultPublic}} {
-		fingerprint := fmt.Sprintf("%x", sha256.Sum256(credential.public))
-		tag, credentialErr := tx.Exec(ctx, `INSERT INTO worker_pool_credentials(
-worker_pool_id,purpose,key_id,public_material,fingerprint,status,activates_at)
-VALUES('hosted',$1,$2,$3,$4,'active',CURRENT_TIMESTAMP)
-ON CONFLICT(worker_pool_id,purpose,key_id) DO UPDATE SET status='active',revoked_at=NULL
-WHERE worker_pool_credentials.public_material=EXCLUDED.public_material
-AND worker_pool_credentials.fingerprint=EXCLUDED.fingerprint
-AND worker_pool_credentials.status IN ('pending','active')`, credential.purpose, credential.keyID, credential.public, fingerprint)
-		if credentialErr != nil {
-			return credentialErr
-		}
-		if tag.RowsAffected() != 1 {
-			return errors.New("hosted worker-pool credential conflicts with existing configuration")
-		}
-	}
-	if err = audit(ctx, tx, "hosted", "reconcile", actor, reason); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func compatibleText(current pgtype.Text, desired string) bool {
-	return !current.Valid || current.String == desired
-}
-
-func compatibleBytes(current, desired []byte) bool {
-	return current == nil || bytes.Equal(current, desired)
 }
 
 func (s *Service) Activate(ctx context.Context, id string, manifestDigest []byte, gatewayMapped bool, actor, reason string) error {

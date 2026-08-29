@@ -193,15 +193,7 @@ until an explicit, separately designed rotation procedure is implemented.
 5. Assign the public domain only to the `frontend` service on container port
    `8080`. Let Coolify provision and renew HTTPS.
 6. Confirm `/data/watchtrace/keyset` passes the bootstrap verifier, then reload the
-   latest Compose configuration from Git. The one-shot `hosted-pool-bootstrap`
-   service runs after migrations, reads only
-   `/data/watchtrace/keyset/public/hosted-public.json`, derives the job queue and
-   DLQ ARNs from their configured AWS URLs, verifies all four queue URLs use the
-   configured AWS Region and one account, and idempotently completes the canonical
-   `hosted` database row. It refuses to overwrite conflicting keys or queue
-   identities. The API, monitor engine, and hosted worker start only after this
-   bootstrap succeeds; private key files are never passed to it.
-7. Do not enable Coolify's immediate
+   latest Compose configuration from Git. Do not enable Coolify's immediate
    Git-source Auto Deploy: it could run before GitHub Actions has tested and
    published the new images. The authenticated workflow webhook below is the
    only normal deployment trigger.

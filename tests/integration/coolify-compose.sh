@@ -28,16 +28,16 @@ export WATCHTRACE_EMAIL_FROM=watchtrace@example.test
 export AWS_REGION=ap-south-1
 export AWS_ACCESS_KEY_ID=TESTONLYACCESSKEY
 export AWS_SECRET_ACCESS_KEY=test-only-secret-key
-export WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-prod-check-jobs-hosted.fifo
-export WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-prod-check-jobs-hosted-dlq.fifo
-export WATCHTRACE_SQS_RESULT_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-prod-check-results.fifo
-export WATCHTRACE_SQS_RESULT_DLQ_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-prod-check-results-dlq.fifo
+export WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-jobs-hosted.fifo
+export WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-jobs-hosted-dlq.fifo
+export WATCHTRACE_SQS_RESULT_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-results.fifo
+export WATCHTRACE_SQS_RESULT_DLQ_URL=https://sqs.ap-south-1.amazonaws.com/123456789012/watchtrace-dev-check-results-dlq.fifo
 # exclude_from_hc is a documented Coolify extension. Remove only that extension
 # before validating the remaining file against the standard Docker Compose
 # schema.
 excluded_healthcheck_count=$(grep -Ec '^[[:space:]]+exclude_from_hc:[[:space:]]+true$' "$compose_file")
-if [ "$excluded_healthcheck_count" -ne 3 ]; then
-    echo "The migrations, deployment-key check, and hosted-pool bootstrap must be excluded from Coolify health checks." >&2
+if [ "$excluded_healthcheck_count" -ne 2 ]; then
+    echo "The migration and deployment-key check must be excluded from Coolify health checks." >&2
     exit 1
 fi
 if grep -Eq '^[[:space:]]+content:' "$compose_file"; then
@@ -94,19 +94,6 @@ if ! jq -e '
     exit 1
 fi
 
-if ! jq -e '
-    .services["hosted-pool-bootstrap"].command ==
-      ["/watchtrace-worker-pool", "-mode", "bootstrap-hosted", "-pool", "hosted",
-       "-bundle", "/run/deployment-keys/hosted-public.json", "-actor", "coolify-bootstrap",
-       "-reason", "provision canonical hosted worker pool"] and
-    .services["hosted-pool-bootstrap"].restart == "no" and
-    (.services["hosted-pool-bootstrap"].environment.AWS_ACCESS_KEY_ID | not) and
-    (.services["hosted-pool-bootstrap"].environment.AWS_SECRET_ACCESS_KEY | not)
-' "$rendered_json" >/dev/null; then
-    echo "The hosted-pool bootstrap must be one-shot and must not receive AWS credentials." >&2
-    exit 1
-fi
-
 assert_read_only_key_mount() {
     service=$1
     source=$2
@@ -153,7 +140,6 @@ do
         "/run/deployment-keys/$key_file"
 done
 assert_read_only_key_mount deployment-key-check /data/watchtrace/keyset/public/hosted-public.json /run/deployment-keys/hosted-public.json
-assert_read_only_key_mount hosted-pool-bootstrap /data/watchtrace/keyset/public/hosted-public.json /run/deployment-keys/hosted-public.json
 
 assert_read_only_key_mount monitor-engine /data/watchtrace/keyset/secrets/platform-signing-private /run/secrets/platform-signing-private
 assert_read_only_key_mount monitor-engine /data/watchtrace/keyset/secrets/monitor-header-key /run/secrets/monitor-header-key
@@ -165,10 +151,8 @@ assert_read_only_key_mount api /data/watchtrace/keyset/secrets/platform-signing-
 assert_read_only_key_mount api /data/watchtrace/keyset/secrets/monitor-header-key /run/secrets/monitor-header-key
 
 assert_successful_dependency migrate deployment-key-check
-assert_successful_dependency hosted-pool-bootstrap deployment-key-check
-assert_successful_dependency hosted-pool-bootstrap migrate
-assert_successful_dependency api hosted-pool-bootstrap
-assert_successful_dependency monitor-engine hosted-pool-bootstrap
-assert_successful_dependency hosted-worker hosted-pool-bootstrap
+assert_successful_dependency api deployment-key-check
+assert_successful_dependency monitor-engine deployment-key-check
+assert_successful_dependency hosted-worker deployment-key-check
 
 echo "Coolify Compose configuration is valid."
