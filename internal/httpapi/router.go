@@ -39,6 +39,10 @@ func NewRouter(options Options) *gin.Engine {
 		accessLogMiddleware(logger),
 		recoveryMiddleware(logger),
 	)
+	router.Use(func(c *gin.Context) {
+		c.Header("X-WatchTrace-Service", "api")
+		c.Next()
+	})
 	limiter := options.RateLimiter
 	if limiter == nil {
 		limiter = NewRateLimiter(RateLimits{})

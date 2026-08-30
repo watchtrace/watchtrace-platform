@@ -83,6 +83,14 @@ if [ "$response" != '{"status":"ok"}' ]; then
     exit 1
 fi
 
+if ! curl --fail --silent --show-error --max-time 2 \
+    --dump-header - --output /dev/null \
+    "http://$published_address/health/live" |
+    grep -i '^X-WatchTrace-Service:[[:space:]]*api' >/dev/null; then
+    echo "Container liveness response did not identify the API service." >&2
+    exit 1
+fi
+
 docker exec "$container_name" /watchtrace-healthcheck http://127.0.0.1:8080/health/live
 
 docker stop --time 15 "$container_name" >/dev/null

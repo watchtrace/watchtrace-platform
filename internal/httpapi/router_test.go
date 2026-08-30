@@ -45,6 +45,9 @@ func TestHealthEndpoints(t *testing.T) {
 			if requestID := response.Header().Get(requestIDHeader); requestID == "" {
 				t.Fatal("response did not include a request ID")
 			}
+			if service := response.Header().Get("X-WatchTrace-Service"); service != "api" {
+				t.Fatalf("X-WatchTrace-Service = %q, want api", service)
+			}
 
 			var body struct {
 				Status string `json:"status"`

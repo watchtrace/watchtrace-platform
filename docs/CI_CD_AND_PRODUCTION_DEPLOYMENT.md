@@ -183,8 +183,8 @@ Add to both repositories:
 | Variable | Value/purpose |
 | --- | --- |
 | `COOLIFY_DEPLOY_ENABLED` | Start as `false`; change to `true` after cutover |
-| `COOLIFY_API_URL` | Public HTTPS Coolify origin, with or without `/api/v1` |
-| `WATCHTRACE_PUBLIC_URL` | Public HTTPS frontend URL, no trailing slash |
+| `COOLIFY_API_URL` | `https://coolify.watchtrace.org` |
+| `WATCHTRACE_PUBLIC_URL` | `https://watchtrace.org` |
 
 Add only to `watchtrace-platform`:
 
@@ -300,11 +300,10 @@ Health check:
 | Retries | 5 |
 | Start period | 10 seconds |
 
-The frontend has no secret and does not need host key mounts. Assign the public
-WatchTrace HTTPS domain only to this resource on internal port 8080. If an owned
-domain is not ready, the documented temporary hostname
-`watchtrace-129-159-236-232.sslip.io` can point to `129.159.236.232`. Keep only
-TCP 80 and 443 public.
+The frontend has no secret and does not need host key mounts. Assign
+`https://watchtrace.org` only to this resource on internal port 8080. Coolify is
+served separately at `https://coolify.watchtrace.org`. Keep only TCP 80 and 443
+public for these HTTPS endpoints.
 
 Coolify can perform a health-gated replacement because the frontend has a
 health check, no host port, no consistent/custom name, and no writable volume.

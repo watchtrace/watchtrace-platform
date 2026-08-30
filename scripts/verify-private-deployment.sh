@@ -51,6 +51,7 @@ test "$auth_status" = "401"
 jq -e '.error.code == "invalid_session"' "$temporary_directory/auth.body" >/dev/null
 grep -i '^www-authenticate:[[:space:]]*Bearer' "$temporary_directory/auth.headers" >/dev/null
 grep -i '^cache-control:[[:space:]]*no-store' "$temporary_directory/auth.headers" >/dev/null
+grep -i '^x-watchtrace-service:[[:space:]]*api' "$temporary_directory/auth.headers" >/dev/null
 
 redirect_headers="$temporary_directory/redirect.headers"
 redirect_status=$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
@@ -65,4 +66,4 @@ grep -i "^location:[[:space:]]*https://$authority" "$redirect_headers" >/dev/nul
 openssl s_client -connect "$authority:443" -servername "$authority" </dev/null 2>/dev/null |
     openssl x509 -noout -checkend 604800 >/dev/null
 
-echo "Private deployment HTTPS, React, API proxy, and certificate checks passed."
+echo "Private deployment HTTPS, React, identified API proxy, and certificate checks passed."
