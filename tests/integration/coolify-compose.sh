@@ -18,7 +18,7 @@ fi
 export WATCHTRACE_CONTROL_IMAGE=ghcr.io/example/watchtrace-platform@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export WATCHTRACE_WORKER_IMAGE=ghcr.io/example/watchtrace-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 export POSTGRES_PASSWORD=test-only-url-safe-password
-export WATCHTRACE_DATABASE_URL=postgres://watchtrace:test-only-url-safe-password@postgres:5432/watchtrace?sslmode=disable
+export WATCHTRACE_DATABASE_URL=postgres://watchtrace:test-only-url-safe-password@watchtrace-postgres:5432/watchtrace?sslmode=disable
 export WATCHTRACE_PUBLIC_URL=https://watchtrace.example.test
 export WATCHTRACE_SMTP_ADDRESS=smtp.email.example.test:587
 export WATCHTRACE_SMTP_USERNAME=test-smtp-user
@@ -64,13 +64,19 @@ if grep -Eq '^[[:space:]]+ports:' "$rendered_file"; then
     exit 1
 fi
 
-for service in postgres api monitor-engine hosted-worker notification-worker; do
+for service in watchtrace-postgres api monitor-engine hosted-worker notification-worker; do
     if ! jq -e --arg service "$service" '.services[$service].healthcheck' \
         "$rendered_json" >/dev/null; then
         echo "$service must define a health check." >&2
         exit 1
     fi
 done
+
+if [ "$(jq -r '.services.migrate.environment.WATCHTRACE_DATABASE_URL' "$rendered_json")" != \
+    "$WATCHTRACE_DATABASE_URL" ]; then
+    echo "The migration service must use the collision-resistant watchtrace-postgres hostname." >&2
+    exit 1
+fi
 
 if jq -e '.services.frontend' "$rendered_json" >/dev/null; then
     echo "The frontend must be deployed by the separate watchtrace-console resource." >&2

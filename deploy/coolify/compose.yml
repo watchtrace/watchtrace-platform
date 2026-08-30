@@ -31,7 +31,7 @@ x-aws-environment: &aws-environment
   WATCHTRACE_SQS_RESULT_DLQ_URL: ${WATCHTRACE_SQS_RESULT_DLQ_URL:?Set the result DLQ URL}
 
 services:
-  postgres:
+  watchtrace-postgres:
     image: postgres:18.4-bookworm
     restart: unless-stopped
     environment:
@@ -109,7 +109,7 @@ services:
     depends_on:
       deployment-key-check:
         condition: service_completed_successfully
-      postgres:
+      watchtrace-postgres:
         condition: service_healthy
     exclude_from_hc: true
 
