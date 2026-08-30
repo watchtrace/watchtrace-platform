@@ -57,9 +57,9 @@ SQS message bodies are UTF-8 text. WatchTrace therefore base64-encodes the seale
 | Queue | Retention | Long poll | Visibility | Redrive |
 | --- | ---: | ---: | ---: | ---: |
 | `watchtrace-{environment}-check-jobs-hosted.fifo` | 4 days | 20 seconds | 90 seconds | job DLQ after 5 receives |
-| `watchtrace-{environment}-check-results.fifo` | 4 days | 20 seconds | 60 seconds | result DLQ after 10 receives |
-| `watchtrace-{environment}-check-jobs-hosted-dlq.fifo` | 14 days | 0 | 0 | none |
-| `watchtrace-{environment}-check-results-dlq.fifo` | 14 days | 0 | 0 | none |
+| `watchtrace-{environment}-check-results.fifo` | 4 days | 20 seconds | 120 seconds | result DLQ after 10 receives |
+| `watchtrace-{environment}-check-jobs-hosted-dlq.fifo` | 14 days | 0 | 120 seconds | none |
+| `watchtrace-{environment}-check-results-dlq.fifo` | 14 days | 0 | 120 seconds | none |
 
 Restrict each DLQ's `RedriveAllowPolicy` to its one source queue. For Phase 1.2, record the returned URL and ARN, exact attributes, redrive policy, redrive-allow sources, tags, and queue-policy fingerprint. The controlled AWS FIFO/DLQ integration test verifies those behaviors with the configured non-production profile. The manifest's role/trust/policy fields and the IAM verifier are retained for the Phase 4 production-role rollout; they are not a P1-306 completion requirement.
 

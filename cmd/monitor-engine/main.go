@@ -19,12 +19,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+var receiptHandlePattern = regexp.MustCompile(`Value [^ ]+ for parameter ReceiptHandle`)
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -76,10 +79,14 @@ func main() {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
 	})
-	publisher := fifo.NewPublisher(db, fifo.SQSSender{Client: client})
-	consumer := fifo.NewResultConsumerWithQuarantine(db, fifo.ResultSQS{Client: client, QueueURL: required("WATCHTRACE_SQS_RESULT_QUEUE_URL")}, quarantineSealer)
-	dlq := fifo.NewDLQReconciler(db, &fifo.SQSDLQSource{Client: client, JobDLQURL: required("WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL"), ResultDLQURL: required("WATCHTRACE_SQS_RESULT_DLQ_URL")}, quarantineSealer)
 	queueURLs := operations.QueueURLs{Jobs: required("WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL"), Results: required("WATCHTRACE_SQS_RESULT_QUEUE_URL"), JobDLQ: required("WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL"), ResultDLQ: required("WATCHTRACE_SQS_RESULT_DLQ_URL")}
+	if err = queueURLs.Validate(); err != nil {
+		logger.Error("configure SQS queue URLs", "error", safeError(err))
+		os.Exit(1)
+	}
+	publisher := fifo.NewPublisher(db, fifo.SQSSender{Client: client})
+	consumer := fifo.NewResultConsumerWithQuarantine(db, fifo.ResultSQS{Client: client, QueueURL: queueURLs.Results}, quarantineSealer)
+	dlq := fifo.NewDLQReconciler(db, &fifo.SQSDLQSource{Client: client, JobDLQURL: queueURLs.JobDLQ, ResultDLQURL: queueURLs.ResultDLQ}, quarantineSealer)
 	operationsService := operations.NewWithSQS(db, client, queueURLs)
 	var workers sync.WaitGroup
 	start := func(run func()) { workers.Add(1); go func() { defer workers.Done(); run() }() }
@@ -133,7 +140,7 @@ func runDLQ(ctx context.Context, reconciler *fifo.DLQReconciler, logger *slog.Lo
 	for ctx.Err() == nil {
 		worked, err := reconciler.ReconcileNext(ctx)
 		if err != nil {
-			logger.Warn("DLQ reconciliation failed", "error", err)
+			logger.Warn("DLQ reconciliation failed", "error", safeError(err))
 			wait(ctx, time.Second)
 		} else if !worked {
 			wait(ctx, time.Second)
@@ -150,7 +157,7 @@ func runScheduler(ctx context.Context, scheduler *fifo.Scheduler, logger *slog.L
 			return
 		case <-ticker.C:
 			if _, err := scheduler.ScheduleDue(ctx, 20); err != nil {
-				logger.Warn("schedule failed", "error", err)
+				logger.Warn("schedule failed", "error", safeError(err))
 			}
 		}
 	}
@@ -160,7 +167,7 @@ func runPublisher(ctx context.Context, publisher *fifo.Publisher, logger *slog.L
 	for ctx.Err() == nil {
 		worked, err := publisher.PublishNext(ctx)
 		if err != nil {
-			logger.Warn("publish failed", "error", err)
+			logger.Warn("publish failed", "error", safeError(err))
 			wait(ctx, time.Second)
 		} else if !worked {
 			wait(ctx, 100*time.Millisecond)
@@ -172,7 +179,7 @@ func runConsumer(ctx context.Context, consumer *fifo.ResultConsumer, logger *slo
 	for ctx.Err() == nil {
 		worked, err := consumer.ConsumeNext(ctx)
 		if err != nil {
-			logger.Warn("result consume failed", "error", err)
+			logger.Warn("result consume failed", "error", safeError(err))
 			wait(ctx, time.Second)
 		} else if !worked {
 			wait(ctx, 100*time.Millisecond)
@@ -192,7 +199,7 @@ func runMaintenance(ctx context.Context, db *pgxpool.Pool, consumer *fifo.Result
 		_ = operationsService.Record(context.Background(), "queue_maintenance", started, leased+expired+deleted, queueErr)
 		started = time.Now().UTC()
 		if err := reports.Maintain(ctx, now); err != nil {
-			logger.Warn("reliability maintenance failed", "error", err)
+			logger.Warn("reliability maintenance failed", "error", safeError(err))
 			_ = operationsService.Record(context.Background(), "rollup_retention", started, 0, err)
 		} else {
 			_ = operationsService.Record(context.Background(), "rollup_retention", started, 0, nil)
@@ -217,6 +224,14 @@ func wait(ctx context.Context, duration time.Duration) {
 	case <-timer.C:
 	}
 }
+
+func safeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return receiptHandlePattern.ReplaceAllString(err.Error(), "Value [redacted] for parameter ReceiptHandle")
+}
+
 func readKey(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -93,8 +93,8 @@ func validManifest(t *testing.T) Manifest {
 	}
 	return Manifest{Version: 1, Environment: "dev", AWSRegion: region, Queues: map[string]Queue{
 		"jobs":        {Name: prefix + "check-jobs-hosted.fifo", URL: jobURL, ARN: jobARN, VisibilityTimeoutSeconds: 90, MessageRetentionSeconds: 345600, ReceiveWaitTimeSeconds: 20, MaxReceiveCount: 5, DeadLetterQueueARN: jobDLQARN, SSE: "SSE-SQS", PolicyFingerprintSHA256: fingerprint},
-		"results":     {Name: prefix + "check-results.fifo", URL: resultURL, ARN: resultARN, VisibilityTimeoutSeconds: 60, MessageRetentionSeconds: 345600, ReceiveWaitTimeSeconds: 20, MaxReceiveCount: 10, DeadLetterQueueARN: resultDLQARN, SSE: "SSE-SQS", PolicyFingerprintSHA256: fingerprint},
-		"jobs_dlq":    {Name: prefix + "check-jobs-hosted-dlq.fifo", URL: jobDLQURL, ARN: jobDLQARN, MessageRetentionSeconds: 1209600, SSE: "SSE-SQS", PolicyFingerprintSHA256: fingerprint, RedriveAllowSourceARNs: []string{jobARN}},
-		"results_dlq": {Name: prefix + "check-results-dlq.fifo", URL: resultDLQURL, ARN: resultDLQARN, MessageRetentionSeconds: 1209600, SSE: "SSE-SQS", PolicyFingerprintSHA256: fingerprint, RedriveAllowSourceARNs: []string{resultARN}},
+		"results":     {Name: prefix + "check-results.fifo", URL: resultURL, ARN: resultARN, VisibilityTimeoutSeconds: 120, MessageRetentionSeconds: 345600, ReceiveWaitTimeSeconds: 20, MaxReceiveCount: 10, DeadLetterQueueARN: resultDLQARN, SSE: "SSE-SQS", PolicyFingerprintSHA256: fingerprint},
+		"jobs_dlq":    {Name: prefix + "check-jobs-hosted-dlq.fifo", URL: jobDLQURL, ARN: jobDLQARN, VisibilityTimeoutSeconds: 120, MessageRetentionSeconds: 1209600, SSE: "SSE-SQS", PolicyFingerprintSHA256: fingerprint, RedriveAllowSourceARNs: []string{jobARN}},
+		"results_dlq": {Name: prefix + "check-results-dlq.fifo", URL: resultDLQURL, ARN: resultDLQARN, VisibilityTimeoutSeconds: 120, MessageRetentionSeconds: 1209600, SSE: "SSE-SQS", PolicyFingerprintSHA256: fingerprint, RedriveAllowSourceARNs: []string{resultARN}},
 	}, Roles: roles, Tags: map[string]string{"Application": "WatchTrace", "Environment": "dev", "Phase": "1"}}
 }

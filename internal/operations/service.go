@@ -137,7 +137,12 @@ func (s *Service) CleanupExpired(ctx context.Context, now time.Time) (int64, err
 	}
 	defer tx.Rollback(context.Background())
 	var count int64
-	queries := []string{`DELETE FROM user_action_tokens WHERE expires_at<$1 OR used_at<$1-INTERVAL '7 days'`, `DELETE FROM org_invitations WHERE expires_at<$1-INTERVAL '7 days' OR accepted_at<$1-INTERVAL '7 days'`, `DELETE FROM notification_outbox WHERE state IN('accepted','failed') AND updated_at<$1-INTERVAL '30 days'`, `DELETE FROM api_refresh_events WHERE occurred_at<$1-INTERVAL '1 day'`}
+	queries := []string{
+		`DELETE FROM user_action_tokens WHERE expires_at<$1::timestamptz OR used_at<($1::timestamptz-INTERVAL '7 days')`,
+		`DELETE FROM org_invitations WHERE expires_at<($1::timestamptz-INTERVAL '7 days') OR accepted_at<($1::timestamptz-INTERVAL '7 days')`,
+		`DELETE FROM notification_outbox WHERE state IN('accepted','failed') AND updated_at<($1::timestamptz-INTERVAL '30 days')`,
+		`DELETE FROM api_refresh_events WHERE occurred_at<($1::timestamptz-INTERVAL '1 day')`,
+	}
 	for _, query := range queries {
 		tag, e := tx.Exec(ctx, query, now.UTC())
 		if e != nil {

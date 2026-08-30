@@ -88,8 +88,8 @@ func (m Manifest) Validate() error {
 		suffix                                string
 		visibility, retention, wait, receives int
 	}{
-		"jobs": {"check-jobs-hosted.fifo", 90, 345600, 20, 5}, "results": {"check-results.fifo", 60, 345600, 20, 10},
-		"jobs_dlq": {"check-jobs-hosted-dlq.fifo", 0, 1209600, 0, 0}, "results_dlq": {"check-results-dlq.fifo", 0, 1209600, 0, 0},
+		"jobs": {"check-jobs-hosted.fifo", 90, 345600, 20, 5}, "results": {"check-results.fifo", 120, 345600, 20, 10},
+		"jobs_dlq": {"check-jobs-hosted-dlq.fifo", 120, 1209600, 0, 0}, "results_dlq": {"check-results-dlq.fifo", 120, 1209600, 0, 0},
 	}
 	accounts := map[string]struct{}{}
 	for key, want := range expected {

@@ -3,7 +3,11 @@ package operations
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
+	"path"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -15,6 +19,38 @@ type SQSClient interface {
 
 type QueueURLs struct {
 	Jobs, Results, JobDLQ, ResultDLQ string
+}
+
+func (q QueueURLs) Validate() error {
+	queues := []struct {
+		name string
+		url  string
+		dlq  bool
+	}{
+		{"jobs", q.Jobs, false},
+		{"results", q.Results, false},
+		{"job DLQ", q.JobDLQ, true},
+		{"result DLQ", q.ResultDLQ, true},
+	}
+	seen := make(map[string]string, len(queues))
+	for _, queue := range queues {
+		if queue.url == "" {
+			continue
+		}
+		if previous, exists := seen[queue.url]; exists {
+			return fmt.Errorf("%s and %s must use distinct SQS queue URLs", previous, queue.name)
+		}
+		seen[queue.url] = queue.name
+		parsed, err := url.Parse(queue.url)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("%s SQS queue URL is invalid", queue.name)
+		}
+		isDLQ := strings.HasSuffix(path.Base(strings.TrimSuffix(parsed.Path, "/")), "-dlq.fifo")
+		if isDLQ != queue.dlq {
+			return fmt.Errorf("%s SQS queue URL does not identify the expected queue type", queue.name)
+		}
+	}
+	return nil
 }
 
 type QueueState struct {

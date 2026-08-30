@@ -35,3 +35,25 @@ func TestReadTransportHealthDoesNotHidePartialFailure(t *testing.T) {
 		t.Fatalf("health=%+v err=%v", health, err)
 	}
 }
+
+func TestQueueURLsValidateDistinctQueueRoles(t *testing.T) {
+	valid := QueueURLs{
+		Jobs:      "https://sqs.eu-north-1.amazonaws.com/123/watchtrace-prod-check-jobs-hosted.fifo",
+		Results:   "https://sqs.eu-north-1.amazonaws.com/123/watchtrace-prod-check-results.fifo",
+		JobDLQ:    "https://sqs.eu-north-1.amazonaws.com/123/watchtrace-prod-check-jobs-hosted-dlq.fifo",
+		ResultDLQ: "https://sqs.eu-north-1.amazonaws.com/123/watchtrace-prod-check-results-dlq.fifo",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := valid
+	duplicate.ResultDLQ = duplicate.Results
+	if err := duplicate.Validate(); err == nil {
+		t.Fatal("duplicate queue URL was accepted")
+	}
+	swapped := valid
+	swapped.Results, swapped.ResultDLQ = swapped.ResultDLQ, swapped.Results
+	if err := swapped.Validate(); err == nil {
+		t.Fatal("swapped source and DLQ URLs were accepted")
+	}
+}

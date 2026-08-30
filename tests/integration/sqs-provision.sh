@@ -104,7 +104,10 @@ jq -e '
   .environment == "prod" and
   .aws_region == "ap-south-1" and
   (.queues | length) == 4 and
-  ([.queues[].sse] | all(. == "SSE-SQS"))
+  ([.queues[].sse] | all(. == "SSE-SQS")) and
+  .queues.results.visibility_timeout_seconds == 120 and
+  .queues.jobs_dlq.visibility_timeout_seconds == 120 and
+  .queues.results_dlq.visibility_timeout_seconds == 120
 ' "$manifest_path" >/dev/null
 jq -e '
   .Version == "2012-10-17" and

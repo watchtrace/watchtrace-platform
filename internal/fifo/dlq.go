@@ -14,6 +14,8 @@ import (
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
 )
 
+const dlqVisibilityTimeoutSeconds int32 = 120
+
 type DLQDelivery struct {
 	Kind       string
 	Body       []byte
@@ -106,7 +108,14 @@ func (s *SQSDLQSource) PullDLQ(ctx context.Context, kind string, wait time.Durat
 	if seconds > 20 {
 		seconds = 20
 	}
-	out, err := s.Client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(url), MaxNumberOfMessages: 1, WaitTimeSeconds: seconds, MessageAttributeNames: []string{"All"}, MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameApproximateReceiveCount}})
+	out, err := s.Client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+		QueueUrl:                    aws.String(url),
+		MaxNumberOfMessages:         1,
+		VisibilityTimeout:           dlqVisibilityTimeoutSeconds,
+		WaitTimeSeconds:             seconds,
+		MessageAttributeNames:       []string{"All"},
+		MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameApproximateReceiveCount},
+	})
 	if err != nil {
 		return DLQDelivery{}, err
 	}

@@ -70,12 +70,12 @@ func TestHundredTimeoutsAcrossQueueJournalsAndLedger(t *testing.T) {
 		t.Fatal("WATCHTRACE_ENV must be dev, stg, or prod")
 	}
 	prefix := fmt.Sprintf("watchtrace-%s-p1309-load-%d", environment, time.Now().UnixNano())
-	jobDLQ := createFIFOQueue(t, ctx, client, prefix+"-jobs-dlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
-	resultDLQ := createFIFOQueue(t, ctx, client, prefix+"-results-dlq.fifo", map[string]string{"VisibilityTimeout": "0", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
+	jobDLQ := createFIFOQueue(t, ctx, client, prefix+"-jobs-dlq.fifo", map[string]string{"VisibilityTimeout": "120", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
+	resultDLQ := createFIFOQueue(t, ctx, client, prefix+"-results-dlq.fifo", map[string]string{"VisibilityTimeout": "120", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "1209600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false"})
 	jobRedrive := fmt.Sprintf(`{"deadLetterTargetArn":%q,"maxReceiveCount":5}`, jobDLQ.arn)
 	resultRedrive := fmt.Sprintf(`{"deadLetterTargetArn":%q,"maxReceiveCount":10}`, resultDLQ.arn)
 	jobs := createFIFOQueue(t, ctx, client, prefix+"-jobs.fifo", map[string]string{"VisibilityTimeout": "90", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false", "RedrivePolicy": jobRedrive})
-	results := createFIFOQueue(t, ctx, client, prefix+"-results.fifo", map[string]string{"VisibilityTimeout": "60", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false", "RedrivePolicy": resultRedrive})
+	results := createFIFOQueue(t, ctx, client, prefix+"-results.fifo", map[string]string{"VisibilityTimeout": "120", "ReceiveMessageWaitTimeSeconds": "0", "MessageRetentionPeriod": "345600", "SqsManagedSseEnabled": "true", "ContentBasedDeduplication": "false", "RedrivePolicy": resultRedrive})
 	for _, queue := range []queueIdentity{jobs, results, jobDLQ, resultDLQ} {
 		queue := queue
 		t.Cleanup(func() {

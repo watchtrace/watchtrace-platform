@@ -233,7 +233,7 @@ policy_fingerprint() {
 jq -n '{
   FifoQueue:"true",
   ContentBasedDeduplication:"false",
-  VisibilityTimeout:"0",
+  VisibilityTimeout:"120",
   MessageRetentionPeriod:"1209600",
   ReceiveMessageWaitTimeSeconds:"0",
   SqsManagedSseEnabled:"true"
@@ -256,7 +256,7 @@ jq -n --arg arn "$jobs_dlq_arn" '{
 jq -n --arg arn "$results_dlq_arn" '{
   FifoQueue:"true",
   ContentBasedDeduplication:"false",
-  VisibilityTimeout:"60",
+  VisibilityTimeout:"120",
   MessageRetentionPeriod:"345600",
   ReceiveMessageWaitTimeSeconds:"20",
   SqsManagedSseEnabled:"true",
@@ -306,9 +306,9 @@ jq -n \
       aws_region:$region,
       queues:{
         jobs:{name:$jobs_name,url:$jobs_url,arn:$jobs_arn,visibility_timeout_seconds:90,message_retention_seconds:345600,receive_wait_time_seconds:20,max_receive_count:5,dead_letter_queue_arn:$jobs_dlq_arn,sse:"SSE-SQS",content_based_deduplication:false,policy_fingerprint_sha256:$jobs_policy},
-        results:{name:$results_name,url:$results_url,arn:$results_arn,visibility_timeout_seconds:60,message_retention_seconds:345600,receive_wait_time_seconds:20,max_receive_count:10,dead_letter_queue_arn:$results_dlq_arn,sse:"SSE-SQS",content_based_deduplication:false,policy_fingerprint_sha256:$results_policy},
-        jobs_dlq:{name:$jobs_dlq_name,url:$jobs_dlq_url,arn:$jobs_dlq_arn,visibility_timeout_seconds:0,message_retention_seconds:1209600,receive_wait_time_seconds:0,sse:"SSE-SQS",content_based_deduplication:false,policy_fingerprint_sha256:$jobs_dlq_policy,redrive_allow_source_arns:[$jobs_arn]},
-        results_dlq:{name:$results_dlq_name,url:$results_dlq_url,arn:$results_dlq_arn,visibility_timeout_seconds:0,message_retention_seconds:1209600,receive_wait_time_seconds:0,sse:"SSE-SQS",content_based_deduplication:false,policy_fingerprint_sha256:$results_dlq_policy,redrive_allow_source_arns:[$results_arn]}
+        results:{name:$results_name,url:$results_url,arn:$results_arn,visibility_timeout_seconds:120,message_retention_seconds:345600,receive_wait_time_seconds:20,max_receive_count:10,dead_letter_queue_arn:$results_dlq_arn,sse:"SSE-SQS",content_based_deduplication:false,policy_fingerprint_sha256:$results_policy},
+        jobs_dlq:{name:$jobs_dlq_name,url:$jobs_dlq_url,arn:$jobs_dlq_arn,visibility_timeout_seconds:120,message_retention_seconds:1209600,receive_wait_time_seconds:0,sse:"SSE-SQS",content_based_deduplication:false,policy_fingerprint_sha256:$jobs_dlq_policy,redrive_allow_source_arns:[$jobs_arn]},
+        results_dlq:{name:$results_dlq_name,url:$results_dlq_url,arn:$results_dlq_arn,visibility_timeout_seconds:120,message_retention_seconds:1209600,receive_wait_time_seconds:0,sse:"SSE-SQS",content_based_deduplication:false,policy_fingerprint_sha256:$results_dlq_policy,redrive_allow_source_arns:[$results_arn]}
       },
       roles:{
         job_publisher:{name:"phase4-deferred-job-publisher",policy_fingerprint_sha256:$zero,trust_fingerprint_sha256:$zero},

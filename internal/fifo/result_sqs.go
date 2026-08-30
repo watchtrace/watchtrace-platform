@@ -3,14 +3,17 @@ package fifo
 import (
 	"context"
 	"encoding/base64"
+	"strconv"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/watchtrace/watchtrace-platform/internal/envelope"
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
-	"strconv"
-	"time"
 )
+
+const resultVisibilityTimeoutSeconds int32 = 120
 
 type ResultSQS struct {
 	Client interface {
@@ -21,7 +24,14 @@ type ResultSQS struct {
 }
 
 func (s ResultSQS) PullResult(ctx context.Context, wait time.Duration) (ResultDelivery, error) {
-	out, err := s.Client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(s.QueueURL), MaxNumberOfMessages: 1, WaitTimeSeconds: int32(wait / time.Second), MessageAttributeNames: []string{"All"}, MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameApproximateReceiveCount}})
+	out, err := s.Client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+		QueueUrl:                    aws.String(s.QueueURL),
+		MaxNumberOfMessages:         1,
+		VisibilityTimeout:           resultVisibilityTimeoutSeconds,
+		WaitTimeSeconds:             int32(wait / time.Second),
+		MessageAttributeNames:       []string{"All"},
+		MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameApproximateReceiveCount},
+	})
 	if err != nil {
 		return ResultDelivery{}, err
 	}
