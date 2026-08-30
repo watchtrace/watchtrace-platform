@@ -133,7 +133,7 @@ func runDLQ(ctx context.Context, reconciler *fifo.DLQReconciler, logger *slog.Lo
 	for ctx.Err() == nil {
 		worked, err := reconciler.ReconcileNext(ctx)
 		if err != nil {
-			logger.Warn("DLQ reconciliation failed")
+			logger.Warn("DLQ reconciliation failed", "error", err)
 			wait(ctx, time.Second)
 		} else if !worked {
 			wait(ctx, time.Second)
@@ -150,7 +150,7 @@ func runScheduler(ctx context.Context, scheduler *fifo.Scheduler, logger *slog.L
 			return
 		case <-ticker.C:
 			if _, err := scheduler.ScheduleDue(ctx, 20); err != nil {
-				logger.Warn("schedule failed")
+				logger.Warn("schedule failed", "error", err)
 			}
 		}
 	}
@@ -160,7 +160,7 @@ func runPublisher(ctx context.Context, publisher *fifo.Publisher, logger *slog.L
 	for ctx.Err() == nil {
 		worked, err := publisher.PublishNext(ctx)
 		if err != nil {
-			logger.Warn("publish failed")
+			logger.Warn("publish failed", "error", err)
 			wait(ctx, time.Second)
 		} else if !worked {
 			wait(ctx, 100*time.Millisecond)
@@ -172,7 +172,7 @@ func runConsumer(ctx context.Context, consumer *fifo.ResultConsumer, logger *slo
 	for ctx.Err() == nil {
 		worked, err := consumer.ConsumeNext(ctx)
 		if err != nil {
-			logger.Warn("result consume failed")
+			logger.Warn("result consume failed", "error", err)
 			wait(ctx, time.Second)
 		} else if !worked {
 			wait(ctx, 100*time.Millisecond)
@@ -192,7 +192,7 @@ func runMaintenance(ctx context.Context, db *pgxpool.Pool, consumer *fifo.Result
 		_ = operationsService.Record(context.Background(), "queue_maintenance", started, leased+expired+deleted, queueErr)
 		started = time.Now().UTC()
 		if err := reports.Maintain(ctx, now); err != nil {
-			logger.Warn("reliability maintenance failed")
+			logger.Warn("reliability maintenance failed", "error", err)
 			_ = operationsService.Record(context.Background(), "rollup_retention", started, 0, err)
 		} else {
 			_ = operationsService.Record(context.Background(), "rollup_retention", started, 0, nil)

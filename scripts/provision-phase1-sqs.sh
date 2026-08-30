@@ -357,6 +357,12 @@ jq -n \
           Effect:"Allow",
           Action:["sqs:SendMessage","sqs:ReceiveMessage","sqs:ChangeMessageVisibility","sqs:DeleteMessage"],
           Resource:$results
+        },
+        {
+          Sid:"ReconcileDeadLetterQueues",
+          Effect:"Allow",
+          Action:["sqs:ReceiveMessage","sqs:ChangeMessageVisibility","sqs:DeleteMessage"],
+          Resource:[$jobs_dlq,$results_dlq]
         }
       ]
     }' >"$runtime_policy_temporary"

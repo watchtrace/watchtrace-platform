@@ -113,6 +113,13 @@ jq -e '
   ([.Statement[].Action] | tostring | contains("sqs:DeleteMessage")) and
   ([.Statement[].Action] | tostring | contains("sqs:ChangeMessageVisibility")) and
   ([.Statement[].Action] | tostring | contains("sqs:GetQueueAttributes")) and
+  ([.Statement[] | select(.Sid == "ReconcileDeadLetterQueues")] | length) == 1 and
+  (.Statement[] | select(.Sid == "ReconcileDeadLetterQueues") |
+    (.Action | index("sqs:ReceiveMessage")) != null and
+    (.Action | index("sqs:ChangeMessageVisibility")) != null and
+    (.Action | index("sqs:DeleteMessage")) != null and
+    (.Resource | length) == 2 and
+    ([.Resource[] | endswith("-dlq.fifo")] | all)) and
   (tostring | contains("sqs:*") | not)
 ' "$runtime_policy_path" >/dev/null
 

@@ -4,10 +4,7 @@
     {
       "Sid": "ReadQueueHealth",
       "Effect": "Allow",
-      "Action": [
-        "sqs:GetQueueAttributes",
-        "sqs:GetQueueUrl"
-      ],
+      "Action": ["sqs:GetQueueAttributes", "sqs:GetQueueUrl"],
       "Resource": [
         "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted.fifo",
         "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results.fifo",
@@ -41,6 +38,19 @@
         "sqs:DeleteMessage"
       ],
       "Resource": "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results.fifo"
+    },
+    {
+      "Sid": "ReconcileDeadLetterQueues",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:DeleteMessage"
+      ],
+      "Resource": [
+        "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-jobs-hosted-dlq.fifo",
+        "arn:aws:sqs:eu-north-1:825450315823:watchtrace-prod-check-results-dlq.fifo"
+      ]
     }
   ]
 }

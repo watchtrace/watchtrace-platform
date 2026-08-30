@@ -43,7 +43,7 @@ func main() {
 	for ctx.Err() == nil {
 		worked, err := worker.RunOne(ctx)
 		if err != nil && ctx.Err() == nil {
-			logger.Warn("worker attempt failed", "category", "internal")
+			logger.Warn("worker attempt failed", "category", "internal", "error", err)
 			waitFor(ctx, time.Second)
 		} else if !worked {
 			waitFor(ctx, 100*time.Millisecond)

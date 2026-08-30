@@ -430,10 +430,10 @@ func (s *Service) RefreshDueStates(ctx context.Context, now time.Time, limit int
 	if err != nil {
 		return 0, err
 	}
-	rows, err := tx.Query(ctx, `SELECT DISTINCT m.id::text FROM monitors m
+	rows, err := tx.Query(ctx, `SELECT DISTINCT m.id::text AS monitor_id FROM monitors m
 JOIN monitor_schedule_periods p ON p.monitor_id=m.id
 WHERE m.deleted_at IS NULL AND p.starts_at<=$1
-ORDER BY m.id LIMIT $2`, now.UTC(), limit)
+ORDER BY monitor_id LIMIT $2`, now.UTC(), limit)
 	if err != nil {
 		tx.Rollback(context.Background())
 		return 0, err

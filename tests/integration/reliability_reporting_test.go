@@ -75,6 +75,32 @@ VALUES($1::uuid,$2::uuid,$3::uuid,$4,'missed')`, organizationID, environmentID, 
 	}
 }
 
+func TestRefreshDueStatesSelectsDistinctMonitorIDs(t *testing.T) {
+	ctx, pool := openSchedulerTestPool(t)
+	slugs := []string{"refresh-due-states"}
+	deleteSchedulerTestData(t, ctx, pool, slugs)
+	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), pool, slugs) })
+	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slugs[0])
+	now := time.Now().UTC().Truncate(time.Minute)
+	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "Refresh due states", 60, now.Add(time.Hour))
+	insertSchedulePeriod(t, ctx, pool, organizationID, environmentID, monitorID, 1, 60, now.Add(-time.Minute), now.Add(-time.Minute), now.Add(time.Minute))
+
+	refreshed, err := reliability.New(pool).RefreshDueStates(ctx, now, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed < 1 {
+		t.Fatalf("refreshed=%d", refreshed)
+	}
+	var displayState string
+	if err = pool.QueryRow(ctx, `SELECT display_state FROM monitor_reliability_states WHERE monitor_id=$1::uuid`, monitorID).Scan(&displayState); err != nil {
+		t.Fatal(err)
+	}
+	if displayState != "unknown" {
+		t.Fatalf("display state=%s", displayState)
+	}
+}
+
 func TestOrderedStateRecomputesLateResultsAndUnknownPausesCounters(t *testing.T) {
 	ctx, pool := openSchedulerTestPool(t)
 	slugs := []string{"ordered-state-correction"}
