@@ -17,7 +17,6 @@ fi
 
 export WATCHTRACE_CONTROL_IMAGE=ghcr.io/example/watchtrace-platform@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export WATCHTRACE_WORKER_IMAGE=ghcr.io/example/watchtrace-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-export WATCHTRACE_FRONTEND_IMAGE=ghcr.io/example/watchtrace-console@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 export POSTGRES_PASSWORD=test-only-url-safe-password
 export WATCHTRACE_DATABASE_URL=postgres://watchtrace:test-only-url-safe-password@postgres:5432/watchtrace?sslmode=disable
 export WATCHTRACE_PUBLIC_URL=https://watchtrace.example.test
@@ -65,13 +64,26 @@ if grep -Eq '^[[:space:]]+ports:' "$rendered_file"; then
     exit 1
 fi
 
-for service in postgres api monitor-engine hosted-worker notification-worker frontend; do
+for service in postgres api monitor-engine hosted-worker notification-worker; do
     if ! jq -e --arg service "$service" '.services[$service].healthcheck' \
         "$rendered_json" >/dev/null; then
         echo "$service must define a health check." >&2
         exit 1
     fi
 done
+
+if jq -e '.services.frontend' "$rendered_json" >/dev/null; then
+    echo "The frontend must be deployed by the separate watchtrace-console resource." >&2
+    exit 1
+fi
+
+if ! jq -e '
+    (.volumes | has("postgres-data")) and
+    (.volumes | has("worker-journal"))
+' "$rendered_json" >/dev/null; then
+    echo "The backend split must preserve both existing named volumes." >&2
+    exit 1
+fi
 
 if jq -e '.services["hosted-worker"].environment.WATCHTRACE_DATABASE_URL' \
     "$rendered_json" >/dev/null; then

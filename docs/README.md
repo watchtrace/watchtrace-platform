@@ -38,6 +38,9 @@ Current implementation documentation:
 - [`QUEUE_GATEWAY.md`](QUEUE_GATEWAY.md) documents the stateless mTLS adapter.
 - [`AWS_SQS_RUNBOOK.md`](AWS_SQS_RUNBOOK.md) defines manual Phase 1 queue
   provisioning, least-privilege roles, manifest verification, and recovery.
+- [`CI_CD_AND_PRODUCTION_DEPLOYMENT.md`](CI_CD_AND_PRODUCTION_DEPLOYMENT.md)
+  defines the final single-environment CI/CD design, production cutover and
+  deployment procedures, acceptance gates, and manual Coolify rollback.
 - [`../deploy/coolify/README.md`](../deploy/coolify/README.md) defines the
   disposable owner-only Oracle/Coolify deployment and its configuration.
 - [`../api/worker-v1.openapi.yaml`](../api/worker-v1.openapi.yaml) is the

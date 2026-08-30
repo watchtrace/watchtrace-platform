@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+: "${MOCK_CURL_STATE:?Set MOCK_CURL_STATE to a temporary directory}"
+method=GET; body=; authorization=; url=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --request) method=$2; shift 2 ;;
+    --data) body=$2; shift 2 ;;
+    --header) case "$2" in Authorization:*) authorization=$2 ;; esac; shift 2 ;;
+    https://*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+[ "$authorization" = "Authorization: Bearer test-token" ] || exit 22
+path=${url#https://coolify.example.test/api/v1}
+
+case "$method:$path" in
+  GET:/applications/backend-app)
+    printf '{"uuid":"backend-app","build_pack":"dockercompose"}\n'
+    ;;
+  GET:/applications/backend-app/envs)
+    jq -cn --arg control "$(cat "$MOCK_CURL_STATE/control")" --arg worker "$(cat "$MOCK_CURL_STATE/worker")" \
+      '[{key:"WATCHTRACE_CONTROL_IMAGE",value:$control,is_preview:false},{key:"WATCHTRACE_WORKER_IMAGE",value:$worker,is_preview:false}]'
+    ;;
+  PATCH:/applications/backend-app/envs/bulk)
+    control=$(printf '%s' "$body" | jq -er '.data[] | select(.key == "WATCHTRACE_CONTROL_IMAGE") | .value')
+    worker=$(printf '%s' "$body" | jq -er '.data[] | select(.key == "WATCHTRACE_WORKER_IMAGE") | .value')
+    printf '%s\n' "$control" > "$MOCK_CURL_STATE/control"
+    printf '%s\n' "$worker" > "$MOCK_CURL_STATE/worker"
+    printf '[]\n'
+    ;;
+  POST:/deploy)
+    uuid=$(printf '%s' "$body" | jq -er '.uuid')
+    jq -cn --arg uuid "$uuid" '{deployments:[{resource_uuid:$uuid,deployment_uuid:("deployment-"+$uuid)}]}'
+    ;;
+  GET:/deployments/deployment-backend-app)
+    printf '{"status":"finished"}\n'
+    ;;
+  *) echo "unexpected mock request: $method $path" >&2; exit 22 ;;
+esac
