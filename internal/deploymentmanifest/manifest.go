@@ -137,8 +137,11 @@ func VerifySQS(ctx context.Context, client SQSAPI, manifest Manifest) error {
 	}
 	for key, queue := range manifest.Queues {
 		url, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: aws.String(queue.Name)})
-		if err != nil || aws.ToString(url.QueueUrl) != queue.URL {
-			return fmt.Errorf("queue URL drift: %s", key)
+		if err != nil {
+			return fmt.Errorf("read queue URL: %s: %w", key, err)
+		}
+		if actual := aws.ToString(url.QueueUrl); actual != queue.URL {
+			return fmt.Errorf("queue URL drift: %s: got %q, want %q", key, actual, queue.URL)
 		}
 		out, err := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{QueueUrl: url.QueueUrl, AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameAll}})
 		if err != nil {
