@@ -84,8 +84,8 @@ func main() {
 		logger.Error("configure SQS queue URLs", "error", safeError(err))
 		os.Exit(1)
 	}
-	publisher := fifo.NewPublisher(db, fifo.SQSSender{Client: client})
-	consumer := fifo.NewResultConsumerWithQuarantine(db, fifo.ResultSQS{Client: client, QueueURL: queueURLs.Results}, quarantineSealer)
+	publisher := fifo.NewPublisher(db, loggingSender{next: fifo.SQSSender{Client: client}, logger: logger})
+	consumer := fifo.NewResultConsumerWithQuarantine(db, loggingResultSource{next: fifo.ResultSQS{Client: client, QueueURL: queueURLs.Results}, logger: logger}, quarantineSealer)
 	dlq := fifo.NewDLQReconciler(db, &fifo.SQSDLQSource{Client: client, JobDLQURL: queueURLs.JobDLQ, ResultDLQURL: queueURLs.ResultDLQ}, quarantineSealer)
 	operationsService := operations.NewWithSQS(db, client, queueURLs)
 	var workers sync.WaitGroup

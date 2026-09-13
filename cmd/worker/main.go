@@ -32,7 +32,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	worker, cleanup, err := build(ctx)
+	worker, cleanup, err := build(ctx, logger)
 	if err != nil {
 		logger.Error("configure worker")
 		os.Exit(1)
@@ -70,7 +70,7 @@ func maintain(ctx context.Context, worker *modworker.Worker) {
 		}
 	}
 }
-func build(ctx context.Context) (*modworker.Worker, func(), error) {
+func build(ctx context.Context, logger *slog.Logger) (*modworker.Worker, func(), error) {
 	pool := required("WATCHTRACE_WORKER_POOL_ID")
 	workerID := required("WATCHTRACE_WORKER_ID")
 	encBytes, err := readKey("WATCHTRACE_WORKER_ENCRYPTION_KEY")
@@ -142,7 +142,8 @@ func build(ctx context.Context) (*modworker.Worker, func(), error) {
 	}
 	engine := checkengine.New(policy, nil, nil)
 	var transport workqueue.Transport
-	if value("WATCHTRACE_WORKER_TRANSPORT", "https") == "direct_sqs" {
+	transportName := value("WATCHTRACE_WORKER_TRANSPORT", "https")
+	if transportName == "direct_sqs" {
 		cfg, e := awsconfig.LoadDefaultConfig(ctx)
 		if e != nil {
 			journal.Close()
@@ -162,6 +163,7 @@ func build(ctx context.Context) (*modworker.Worker, func(), error) {
 		}
 		transport = &workqueue.HTTPS{BaseURL: required("WATCHTRACE_GATEWAY_URL"), Client: client, PoolToken: os.Getenv("WATCHTRACE_POOL_TOKEN")}
 	}
+	transport = loggingTransport{next: transport, logger: logger, transportName: transportName}
 	w, err := modworker.New(transport, journal, engine, modworker.Config{WorkerID: workerID, WorkerPoolID: pool, PlatformKeyID: required("WATCHTRACE_PLATFORM_SIGNING_KEY_ID"), WorkerEncryptionKeyID: required("WATCHTRACE_WORKER_ENCRYPTION_KEY_ID"), ResultKeyID: required("WATCHTRACE_RESULT_KEY_ID"), ClockTolerance: 5 * time.Second, WorkerPrivate: enc, PlatformPublic: ed25519.PublicKey(platform), ResultPrivate: ed25519.PrivateKey(result), WorkerPrivateKeys: workerKeys, PlatformPublicKeys: platformKeys, RevokedKeyIDs: revoked})
 	if err != nil {
 		journal.Close()
