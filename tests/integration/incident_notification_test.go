@@ -34,7 +34,7 @@ type incidentFixture struct {
 }
 
 func TestIncidentLifecycleRecipientsAndAuthorizedActions(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	fixture := setupIncidentFixture(t, ctx, pool, "incident-lifecycle")
 
 	applyIncidentObservation(t, ctx, pool, fixture.monitorID, fixture.base, false, true)
@@ -127,7 +127,7 @@ VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'cross@example.test','opened')`,
 }
 
 func TestConfiguredIncidentThresholds(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	fixture := setupIncidentFixture(t, ctx, pool, "incident-thresholds")
 	if _, err := pool.Exec(ctx, `INSERT INTO alert_rules(
  organization_id,environment_id,monitor_id,failure_threshold,recovery_threshold)
@@ -145,7 +145,7 @@ SELECT organization_id,environment_id,id,2,1 FROM monitors WHERE id=$1::uuid`, f
 }
 
 func TestResultConsumerAtomicallyOpensIncidentAndNotification(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	fixture := setupIncidentFixture(t, ctx, pool, "incident-result-consumer")
 	resultPublic, resultPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -188,7 +188,7 @@ RETURNING id::text`, fixture.organizationID, fixture.environmentID, fixture.moni
 }
 
 func TestLateIncidentCorrectionAndConcurrentOpenAreIdempotent(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	fixture := setupIncidentFixture(t, ctx, pool, "incident-correction")
 
 	applyIncidentObservation(t, ctx, pool, fixture.monitorID, fixture.base, false, true)
@@ -279,7 +279,7 @@ func TestLateIncidentCorrectionAndConcurrentOpenAreIdempotent(t *testing.T) {
 }
 
 func TestNotificationRetryRestartExhaustionAndConcurrentClaim(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	fixture := setupIncidentFixture(t, ctx, pool, "notification-delivery")
 	applyIncidentObservation(t, ctx, pool, fixture.monitorID, fixture.base, false, true)
 	applyIncidentObservation(t, ctx, pool, fixture.monitorID, fixture.base.Add(time.Minute), false, true)
@@ -391,7 +391,7 @@ func TestIncidentNotificationSchemaRollback(t *testing.T) {
 	if testing.Short() || strings.TrimSpace(os.Getenv("WATCHTRACE_EXPECT_INCIDENT_NOTIFICATION_SCHEMA_ABSENT")) == "" {
 		t.Skip("incident/notification rollback check is not enabled")
 	}
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	for _, table := range []string{"alert_rules", "incidents", "incident_events", "notification_outbox", "notification_attempts"} {
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists); err != nil {
@@ -425,7 +425,7 @@ func (provider *scriptedNotificationProvider) Send(_ context.Context, message no
 
 func setupIncidentFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, slug string) incidentFixture {
 	t.Helper()
-	deleteSchedulerTestData(t, ctx, pool, []string{slug, slug + "-cross"})
+	deleteMonitoringTestData(t, ctx, pool, []string{slug, slug + "-cross"})
 	emails := []string{
 		"owner-" + slug + "@example.test",
 		"member-" + slug + "@example.test",
@@ -434,11 +434,11 @@ func setupIncidentFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	}
 	_, _ = pool.Exec(ctx, `DELETE FROM users WHERE email=ANY($1::text[])`, emails)
 	t.Cleanup(func() {
-		deleteSchedulerTestData(t, context.Background(), pool, []string{slug, slug + "-cross"})
+		deleteMonitoringTestData(t, context.Background(), pool, []string{slug, slug + "-cross"})
 		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE email=ANY($1::text[])`, emails)
 	})
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slug)
-	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "Incident monitor", 60, time.Now().UTC().Add(time.Hour))
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, pool, slug)
+	monitorID := insertMonitoringMonitor(t, ctx, pool, organizationID, environmentID, "Incident monitor", 60, time.Now().UTC().Add(time.Hour))
 	base := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Minute)
 	insertSchedulePeriod(t, ctx, pool, organizationID, environmentID, monitorID, 1, 60, base, base, base.Add(20*time.Minute))
 	ids := make([]string, 4)
@@ -460,7 +460,7 @@ VALUES($1::uuid,$2::uuid,$3,$4)`, organizationID, ids[index], role, enabled); er
 			t.Fatal(err)
 		}
 	}
-	crossOrganizationID, _ := insertSchedulerTenant(t, ctx, pool, slug+"-cross")
+	crossOrganizationID, _ := insertMonitoringTenant(t, ctx, pool, slug+"-cross")
 	if _, err := pool.Exec(ctx, `INSERT INTO org_members(organization_id,user_id,role,incident_notifications_enabled)
 VALUES($1::uuid,$2::uuid,'owner',true)`, crossOrganizationID, ids[3]); err != nil {
 		t.Fatal(err)

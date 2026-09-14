@@ -1,10 +1,8 @@
 # FIFO Durable Scheduler and Publisher
 
-The original PostgreSQL scheduler remains a compatibility path for the first
-backend slice. Phase 1.2 production scheduling uses `internal/fifo`: it commits
-a stable job ledger row, exact encrypted dispatch body, FIFO identifiers, and
-the next stable schedule in one transaction. Amazon SQS is the durable delivery
-boundary.
+Phase 1 scheduling uses `internal/fifo`: it commits a stable job ledger row,
+exact encrypted dispatch body, FIFO identifiers, and the next stable schedule
+in one transaction. Amazon SQS is the durable delivery boundary.
 
 Every monitor has a stably spread `next_check_at` timestamp. The scheduler:
 

@@ -10,13 +10,13 @@ import (
 )
 
 func TestReliabilityReportsScheduleHistoryBoundariesAndZeroDenominators(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	slugs := []string{"reliability-boundaries"}
-	deleteSchedulerTestData(t, ctx, pool, slugs)
-	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), pool, slugs) })
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slugs[0])
+	deleteMonitoringTestData(t, ctx, pool, slugs)
+	t.Cleanup(func() { deleteMonitoringTestData(t, context.Background(), pool, slugs) })
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, pool, slugs[0])
 	base := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Minute)
-	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "Reliability boundaries", 60, base.Add(time.Hour))
+	monitorID := insertMonitoringMonitor(t, ctx, pool, organizationID, environmentID, "Reliability boundaries", 60, base.Add(time.Hour))
 
 	insertSchedulePeriod(t, ctx, pool, organizationID, environmentID, monitorID, 1, 60, base, base, base.Add(5*time.Minute))
 	// Five paused minutes create no expectations. The resumed monitor changes
@@ -76,13 +76,13 @@ VALUES($1::uuid,$2::uuid,$3::uuid,$4,'missed')`, organizationID, environmentID, 
 }
 
 func TestRefreshDueStatesSelectsDistinctMonitorIDs(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	slugs := []string{"refresh-due-states"}
-	deleteSchedulerTestData(t, ctx, pool, slugs)
-	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), pool, slugs) })
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slugs[0])
+	deleteMonitoringTestData(t, ctx, pool, slugs)
+	t.Cleanup(func() { deleteMonitoringTestData(t, context.Background(), pool, slugs) })
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, pool, slugs[0])
 	now := time.Now().UTC().Truncate(time.Minute)
-	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "Refresh due states", 60, now.Add(time.Hour))
+	monitorID := insertMonitoringMonitor(t, ctx, pool, organizationID, environmentID, "Refresh due states", 60, now.Add(time.Hour))
 	insertSchedulePeriod(t, ctx, pool, organizationID, environmentID, monitorID, 1, 60, now.Add(-time.Minute), now.Add(-time.Minute), now.Add(time.Minute))
 
 	refreshed, err := reliability.New(pool).RefreshDueStates(ctx, now, 1000)
@@ -102,13 +102,13 @@ func TestRefreshDueStatesSelectsDistinctMonitorIDs(t *testing.T) {
 }
 
 func TestOrderedStateRecomputesLateResultsAndUnknownPausesCounters(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	slugs := []string{"ordered-state-correction"}
-	deleteSchedulerTestData(t, ctx, pool, slugs)
-	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), pool, slugs) })
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slugs[0])
+	deleteMonitoringTestData(t, ctx, pool, slugs)
+	t.Cleanup(func() { deleteMonitoringTestData(t, context.Background(), pool, slugs) })
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, pool, slugs[0])
 	base := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Minute)
-	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "Ordered state", 60, base.Add(time.Hour))
+	monitorID := insertMonitoringMonitor(t, ctx, pool, organizationID, environmentID, "Ordered state", 60, base.Add(time.Hour))
 	insertSchedulePeriod(t, ctx, pool, organizationID, environmentID, monitorID, 1, 60, base, base, base.Add(7*time.Minute))
 	service := reliability.New(pool)
 
@@ -158,13 +158,13 @@ func TestOrderedStateRecomputesLateResultsAndUnknownPausesCounters(t *testing.T)
 }
 
 func TestLateResultInvalidationRepairsHourlyAndDailyRollupsRepeatably(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	slugs := []string{"rollup-repair"}
-	deleteSchedulerTestData(t, ctx, pool, slugs)
-	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), pool, slugs) })
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slugs[0])
+	deleteMonitoringTestData(t, ctx, pool, slugs)
+	t.Cleanup(func() { deleteMonitoringTestData(t, context.Background(), pool, slugs) })
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, pool, slugs[0])
 	base := time.Now().UTC().Add(-26 * time.Hour).Truncate(time.Hour)
-	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "Rollup repair", 60, time.Now().UTC().Add(time.Hour))
+	monitorID := insertMonitoringMonitor(t, ctx, pool, organizationID, environmentID, "Rollup repair", 60, time.Now().UTC().Add(time.Hour))
 	insertSchedulePeriod(t, ctx, pool, organizationID, environmentID, monitorID, 1, 60, base, base, base.Add(3*time.Minute))
 	insertReliabilityResult(t, ctx, pool, organizationID, environmentID, monitorID, "scheduled", base, true)
 	service := reliability.New(pool)
@@ -205,7 +205,7 @@ FROM monitor_rollups_hourly WHERE monitor_id=$1::uuid AND bucket_start=$2`, moni
 }
 
 func TestRollupCheckpointCatchUpIsBoundedAndRestartSafe(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	var originalHour time.Time
 	var originalDay time.Time
 	if err := pool.QueryRow(ctx, `SELECT hourly_through,daily_through::timestamptz FROM monitoring_rollup_checkpoint WHERE singleton`).Scan(&originalHour, &originalDay); err != nil {

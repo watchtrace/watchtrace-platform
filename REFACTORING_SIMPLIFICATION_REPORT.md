@@ -30,7 +30,7 @@ The codebase is therefore harder to follow than necessary, but the main problem 
 The review covered:
 
 - All 14 `cmd` entry points.
-- All 30 top-level `internal` packages.
+- All 30 original top-level `internal` packages. Task 1 reduced the active set to 28.
 - All SQLC query files and generated code.
 - All 14 migrations.
 - Deployment definitions and Phase 1 documentation.
@@ -40,16 +40,52 @@ Approximate size:
 
 | Area | Lines/count |
 |---|---:|
-| Hand-written non-test Go | 13,356 lines |
-| Generated SQLC Go | 1,866 lines |
-| Go tests | 11,390 lines |
-| Hand-written interfaces | 38 |
-| Top-level internal packages | 30 |
+| Hand-written non-test Go | 12,993 lines |
+| Generated SQLC Go | 1,414 lines |
+| Go tests | 10,106 lines |
+| Hand-written interfaces | 35 |
+| Top-level internal packages | 28 |
 | Commands | 14 |
 
-Thirty-eight interfaces in a backend of this size is not inherently excessive. Most represent PostgreSQL, SQS, SMTP, HTTP, DNS, or worker transport boundaries.
+Thirty-five interfaces in a backend of this size is not inherently excessive. Most represent PostgreSQL, SQS, SMTP, HTTP, DNS, or worker transport boundaries.
 
-A full `go test ./...` run was attempted during the review. Packages not requiring local listeners passed; five listener-based packages could not bind ports because of the review environment's sandbox restrictions. Those were environment restrictions rather than assertion failures.
+After Task 1, the full race-enabled Go test suite, `go vet`, `go build`, SQLC generation, and the Docker/PostgreSQL migration and integration workflow all pass.
+
+## Task 1 implementation report — completed 2026-09-14
+
+Task 1 removed the obsolete PostgreSQL-only scheduler and checker while preserving the current FIFO/SQS implementation and historical migration coverage.
+
+### Removed
+
+- `internal/scheduler`, including its unit tests.
+- `internal/checker`, including its unit tests.
+- `db/queries/scheduler.sql` and `db/queries/checker.sql`.
+- The generated SQLC scheduler/checker files and their methods in `Querier`.
+- Integration tests that executed only the retired PostgreSQL scheduling/leasing path.
+- The duplicate `docs/CHECKER.md` document.
+- README descriptions and links that presented the retired implementation as active.
+
+### Preserved or replaced
+
+- The production `internal/fifo` scheduler, publisher, consumer, DLQ, and recovery paths remain unchanged.
+- The database-free `cmd/worker`, `internal/modworker`, `internal/checkengine`, `internal/workqueue`, and SQLite journal remain unchanged.
+- Shared PostgreSQL integration fixtures were moved into `tests/integration/monitoring_fixtures_test.go` and given neutral monitoring names.
+- The rollback check for historical migration `000006_http_check_worker` was retained in `tests/integration/legacy_migration_test.go`.
+- Both shell and PowerShell database workflows now run the renamed historical migration test.
+- The existing production FIFO tests continue to cover encrypted immutable dispatch, publisher recovery, worker execution, journal replay, result idempotency, reliability, DLQ handling, and load behavior.
+
+### Size impact
+
+The tracked diff removes 2,801 lines and adds 75 changed/replacement lines. Two new focused integration support files add 164 lines, for a net reduction of approximately 2,560 lines. No database migration or deployed schema was changed.
+
+### Verification completed
+
+- Pinned SQLC generation: passed.
+- `go test -race ./... -count=1`: passed.
+- `go vet ./...`: passed.
+- `go build ./...`: passed.
+- `git diff --check`: passed.
+- `tests/integration/postgres-database.sh`: passed, including migration rollback checks and the final full PostgreSQL integration suite.
 
 ## Important execution flow
 
@@ -91,7 +127,9 @@ This corresponds closely to the architecture required in `DESIGN_SPECIFICATION.m
 
 **Classification: Can remove**
 
-Relevant files:
+**Implementation status: Completed by Task 1 on 2026-09-14.**
+
+Removed files:
 
 - `internal/scheduler/service.go`
 - `internal/checker/service.go`
@@ -99,8 +137,9 @@ Relevant files:
 - `db/queries/checker.sql`
 - `internal/platform/database/sqlc/scheduler.sql.go`
 - `internal/platform/database/sqlc/checker.sql.go`
-- `docs/SCHEDULER.md`
 - `docs/CHECKER.md`
+
+`docs/SCHEDULER.md` was retained and updated to describe only the active FIFO scheduler.
 
 The documentation itself identifies these as compatibility paths. The old scheduler writes directly to PostgreSQL:
 
@@ -599,8 +638,6 @@ internal/
   backendapi/
   realtime/
 
-  scheduler/             # obsolete PostgreSQL scheduler
-  checker/               # obsolete PostgreSQL worker
   fifo/
   reliability/
   incident/
@@ -734,7 +771,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 - Repeated command configuration and startup code.
 - Ambiguous names such as `backendapi` and `modworker`.
 
-### Can remove
+### Can remove — completed in Task 1
 
 - `internal/scheduler`.
 - `internal/checker`.
@@ -753,7 +790,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
 ## Ordered refactoring plan
 
-- [ ] **Task 1 — Remove the obsolete PostgreSQL scheduler/checker path**
+- [x] **Task 1 — Remove the obsolete PostgreSQL scheduler/checker path**
 
   **Goal:** Establish one canonical check execution flow.
 
@@ -764,6 +801,8 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
   **Risk:** Medium. Useful edge-case tests could accidentally disappear.
 
   **Verification:** SQLC generation, unit/race tests, PostgreSQL tests, SQS scheduler/worker/result-consumer vertical slice, and destination-security tests.
+
+  **Completion:** Finished on 2026-09-14. All specified verification passed. No schema migration was changed.
 
 - [ ] **Task 2 — Make API and service composition explicit**
 
@@ -853,7 +892,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
 The largest immediate improvement would come from:
 
-1. Removing the old scheduler/checker.
+1. ~~Removing the old scheduler/checker.~~ Completed in Task 1.
 2. Removing partial runtime composition.
 3. Splitting the largest files without behavioral changes.
 4. Standardizing SQL location.

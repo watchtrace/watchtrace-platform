@@ -48,12 +48,12 @@ func (s *ambiguousSender) Send(_ context.Context, input fifo.SendInput) (string,
 }
 
 func TestPublisherAcceptedSendRecoveryUsesExactImmutableMessage(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	slugs := []string{"publisher-accepted-crash"}
-	deleteSchedulerTestData(t, ctx, pool, slugs)
-	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), pool, slugs) })
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slugs[0])
-	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "Publisher recovery", 60, time.Now().UTC().Add(-time.Second))
+	deleteMonitoringTestData(t, ctx, pool, slugs)
+	t.Cleanup(func() { deleteMonitoringTestData(t, context.Background(), pool, slugs) })
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, pool, slugs[0])
+	monitorID := insertMonitoringMonitor(t, ctx, pool, organizationID, environmentID, "Publisher recovery", 60, time.Now().UTC().Add(-time.Second))
 	_, platformPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	workerPrivate, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	resultPublic, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -93,7 +93,7 @@ func TestReliableEngineSchemaRollback(t *testing.T) {
 	if os.Getenv("WATCHTRACE_EXPECT_RELIABLE_ENGINE_SCHEMA_ABSENT") == "" {
 		t.Skip("WATCHTRACE_EXPECT_RELIABLE_ENGINE_SCHEMA_ABSENT is not set")
 	}
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	for _, table := range []string{"worker_pools", "check_dispatch_outbox", "monitor_schedule_periods", "monitor_rollups_hourly", "monitor_rollups_daily", "monitoring_coverage_gaps"} {
 		var exists bool
 		if err := pool.QueryRow(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists); err != nil {
@@ -116,7 +116,7 @@ func TestReliabilityReportingSchemaRollback(t *testing.T) {
 	if os.Getenv("WATCHTRACE_EXPECT_RELIABILITY_REPORTING_SCHEMA_ABSENT") == "" {
 		t.Skip("WATCHTRACE_EXPECT_RELIABILITY_REPORTING_SCHEMA_ABSENT is not set")
 	}
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	for _, table := range []string{
 		"monitor_reliability_states",
 		"monitor_result_evaluations",
@@ -183,13 +183,13 @@ type engineDoer func(*http.Request) (*http.Response, error)
 func (d engineDoer) Do(request *http.Request) (*http.Response, error) { return d(request) }
 
 func TestReliableFIFOEngineWithPostgreSQL(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	slugs := []string{"reliable-fifo-engine"}
-	deleteSchedulerTestData(t, ctx, pool, slugs)
-	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), pool, slugs) })
+	deleteMonitoringTestData(t, ctx, pool, slugs)
+	t.Cleanup(func() { deleteMonitoringTestData(t, context.Background(), pool, slugs) })
 
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slugs[0])
-	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "Encrypted FIFO monitor", 60, time.Now().UTC().Add(-time.Second))
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, pool, slugs[0])
+	monitorID := insertMonitoringMonitor(t, ctx, pool, organizationID, environmentID, "Encrypted FIFO monitor", 60, time.Now().UTC().Add(-time.Second))
 	if _, err := pool.Exec(ctx, `INSERT INTO monitor_schedule_periods(organization_id,environment_id,monitor_id,monitor_version,interval_seconds,worker_pool_id,starts_at,first_slot_at) SELECT organization_id,environment_id,id,version,interval_seconds,worker_pool_id,next_check_at,next_check_at FROM monitors WHERE id=$1::uuid`, monitorID); err != nil {
 		t.Fatal(err)
 	}
@@ -292,13 +292,13 @@ func TestReliableFIFOEngineWithPostgreSQL(t *testing.T) {
 }
 
 func TestReliabilityRetentionPreservesRequiredSummaries(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	slugs := []string{"reliability-retention"}
-	deleteSchedulerTestData(t, ctx, pool, slugs)
-	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), pool, slugs) })
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slugs[0])
+	deleteMonitoringTestData(t, ctx, pool, slugs)
+	t.Cleanup(func() { deleteMonitoringTestData(t, context.Background(), pool, slugs) })
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, pool, slugs[0])
 	now := time.Now().UTC().Truncate(time.Hour)
-	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "Retention", 300, now.Add(time.Hour))
+	monitorID := insertMonitoringMonitor(t, ctx, pool, organizationID, environmentID, "Retention", 300, now.Add(time.Hour))
 	old := now.Add(-8 * 24 * time.Hour)
 	if _, err := pool.Exec(ctx, `INSERT INTO monitor_schedule_periods(organization_id,environment_id,monitor_id,monitor_version,interval_seconds,worker_pool_id,starts_at,first_slot_at,ends_at) SELECT organization_id,environment_id,id,version,interval_seconds,worker_pool_id,$2::timestamptz,$2::timestamptz,$2::timestamptz+INTERVAL '5 minutes' FROM monitors WHERE id=$1::uuid`, monitorID, old); err != nil {
 		t.Fatal(err)

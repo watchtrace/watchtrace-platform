@@ -142,15 +142,12 @@ available under `/api/v1/environments/{environmentId}/monitors`. See
 current-state semantics, and the destination-safety boundary applied before
 outbound connections.
 
-The initial scheduler stores due work durably in PostgreSQL and advances each
-monitor schedule in the same transaction. See
-[`docs/SCHEDULER.md`](docs/SCHEDULER.md) for its batching, idempotency, tenant,
-and timestamp guarantees.
-
-The initial HTTP worker claims pending jobs with a PostgreSQL lease, executes
-them through the guarded destination client, and atomically stores one result
-per stable job ID without response bodies. See
-[`docs/CHECKER.md`](docs/CHECKER.md).
+The production scheduler atomically stores stable job identity, the exact
+encrypted dispatch message, and the next monitor schedule before publishing to
+SQS FIFO. The database-free worker executes the bounded request, journals the
+signed result locally, and publishes that result before acknowledging the job.
+See [`docs/SCHEDULER.md`](docs/SCHEDULER.md) and
+[`docs/MODULAR_WORKER.md`](docs/MODULAR_WORKER.md).
 
 ## Local PostgreSQL
 
@@ -224,7 +221,6 @@ PostgreSQL atomically stores stable job identity and exact encrypted dispatch
 intent. Database-free workers execute through direct SQS or the stateless mTLS
 HTTPS gateway and journal signed results in SQLite. See
 [`docs/SCHEDULER.md`](docs/SCHEDULER.md),
-[`docs/CHECKER.md`](docs/CHECKER.md),
 [`docs/MODULAR_WORKER.md`](docs/MODULAR_WORKER.md), and
 [`docs/QUEUE_GATEWAY.md`](docs/QUEUE_GATEWAY.md).
 

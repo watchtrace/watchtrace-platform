@@ -40,12 +40,12 @@ func (s *scriptedDLQ) AcknowledgeDLQ(_ context.Context, delivery fifo.DLQDeliver
 }
 
 func TestDLQReconciliationMarksUnknownAndEncryptsRecoverableResult(t *testing.T) {
-	ctx, pool := openSchedulerTestPool(t)
+	ctx, pool := openMonitoringTestPool(t)
 	slug := "dlq-recovery"
-	deleteSchedulerTestData(t, ctx, pool, []string{slug})
-	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), pool, []string{slug}) })
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, pool, slug)
-	monitorID := insertSchedulerMonitor(t, ctx, pool, organizationID, environmentID, "DLQ recovery", 60, time.Now().UTC().Add(-time.Second))
+	deleteMonitoringTestData(t, ctx, pool, []string{slug})
+	t.Cleanup(func() { deleteMonitoringTestData(t, context.Background(), pool, []string{slug}) })
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, pool, slug)
+	monitorID := insertMonitoringMonitor(t, ctx, pool, organizationID, environmentID, "DLQ recovery", 60, time.Now().UTC().Add(-time.Second))
 	_, platformPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	resultPublic, resultPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	workerPrivate, _ := ecdh.X25519().GenerateKey(rand.Reader)

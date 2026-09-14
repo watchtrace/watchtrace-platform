@@ -27,8 +27,7 @@ $previousDatabaseURL = $env:WATCHTRACE_DATABASE_URL
 $previousTestDatabaseURL = $env:WATCHTRACE_TEST_DATABASE_URL
 $previousExpectedAuthSchemaAbsent = $env:WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT
 $previousExpectedMonitorSchemaAbsent = $env:WATCHTRACE_EXPECT_MONITOR_SCHEMA_ABSENT
-$previousExpectedSchedulerSchemaAbsent = $env:WATCHTRACE_EXPECT_SCHEDULER_SCHEMA_ABSENT
-$previousExpectedCheckerSchemaAbsent = $env:WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABSENT
+$previousExpectedLegacyWorkerSchemaAbsent = $env:WATCHTRACE_EXPECT_LEGACY_WORKER_SCHEMA_ABSENT
 $previousExpectedProductionAuthSchemaAbsent = $env:WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT
 $previousExpectedEmailVerificationSchemaAbsent = $env:WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT
 $previousExpectedPasswordResetSchemaAbsent = $env:WATCHTRACE_EXPECT_PASSWORD_RESET_SCHEMA_ABSENT
@@ -167,9 +166,9 @@ try {
     if ($LASTEXITCODE -ne 0 -or $version -ne "version 5 (clean)") {
         throw "Unexpected migration version after fifth down: $version"
     }
-    $env:WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABSENT = "1"
-    Invoke-Go test ./tests/integration -run '^TestHTTPCheckWorkerSchemaRollback$' -count=1
-    $env:WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABSENT = $previousExpectedCheckerSchemaAbsent
+    $env:WATCHTRACE_EXPECT_LEGACY_WORKER_SCHEMA_ABSENT = "1"
+    Invoke-Go test ./tests/integration -run '^TestLegacyHTTPCheckWorkerSchemaRollback$' -count=1
+    $env:WATCHTRACE_EXPECT_LEGACY_WORKER_SCHEMA_ABSENT = $previousExpectedLegacyWorkerSchemaAbsent
 
     Invoke-Go run ./cmd/migrate up
     Invoke-Go test ./tests/integration -count=1
@@ -188,8 +187,7 @@ finally {
     $env:WATCHTRACE_TEST_DATABASE_URL = $previousTestDatabaseURL
     $env:WATCHTRACE_EXPECT_AUTH_SCHEMA_ABSENT = $previousExpectedAuthSchemaAbsent
     $env:WATCHTRACE_EXPECT_MONITOR_SCHEMA_ABSENT = $previousExpectedMonitorSchemaAbsent
-    $env:WATCHTRACE_EXPECT_SCHEDULER_SCHEMA_ABSENT = $previousExpectedSchedulerSchemaAbsent
-    $env:WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABSENT = $previousExpectedCheckerSchemaAbsent
+    $env:WATCHTRACE_EXPECT_LEGACY_WORKER_SCHEMA_ABSENT = $previousExpectedLegacyWorkerSchemaAbsent
     $env:WATCHTRACE_EXPECT_PRODUCTION_AUTH_SCHEMA_ABSENT = $previousExpectedProductionAuthSchemaAbsent
     $env:WATCHTRACE_EXPECT_EMAIL_VERIFICATION_SCHEMA_ABSENT = $previousExpectedEmailVerificationSchemaAbsent
     $env:WATCHTRACE_EXPECT_PASSWORD_RESET_SCHEMA_ABSENT = $previousExpectedPasswordResetSchemaAbsent

@@ -147,8 +147,8 @@ if [ "$version" != "version 5 (clean)" ]; then
     exit 1
 fi
 env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
-    WATCHTRACE_EXPECT_CHECKER_SCHEMA_ABSENT=1 \
-    go test ./tests/integration -run '^TestHTTPCheckWorkerSchemaRollback$' -count=1
+    WATCHTRACE_EXPECT_LEGACY_WORKER_SCHEMA_ABSENT=1 \
+    go test ./tests/integration -run '^TestLegacyHTTPCheckWorkerSchemaRollback$' -count=1
 
 env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate up
 env WATCHTRACE_TEST_DATABASE_URL="$database_url" \

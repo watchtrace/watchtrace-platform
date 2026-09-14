@@ -84,9 +84,9 @@ func TestHundredTimeoutsAcrossQueueJournalsAndLedger(t *testing.T) {
 	}
 
 	slug := "timeout-pipeline"
-	deleteSchedulerTestData(t, ctx, db, []string{slug})
-	t.Cleanup(func() { deleteSchedulerTestData(t, context.Background(), db, []string{slug}) })
-	organizationID, environmentID := insertSchedulerTenant(t, ctx, db, slug)
+	deleteMonitoringTestData(t, ctx, db, []string{slug})
+	t.Cleanup(func() { deleteMonitoringTestData(t, context.Background(), db, []string{slug}) })
+	organizationID, environmentID := insertMonitoringTenant(t, ctx, db, slug)
 	platformPublic, platformPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	resultPublic, resultPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	workerPrivate, _ := ecdh.X25519().GenerateKey(rand.Reader)
@@ -95,7 +95,7 @@ func TestHundredTimeoutsAcrossQueueJournalsAndLedger(t *testing.T) {
 	}
 	due := time.Now().UTC().Add(-time.Second)
 	for index := 0; index < 100; index++ {
-		monitorID := insertSchedulerMonitor(t, ctx, db, organizationID, environmentID, fmt.Sprintf("Timeout %03d", index), 60, due)
+		monitorID := insertMonitoringMonitor(t, ctx, db, organizationID, environmentID, fmt.Sprintf("Timeout %03d", index), 60, due)
 		if _, err = db.Exec(ctx, `UPDATE monitors SET target_url='https://controlled-timeout.test/health',timeout_seconds=1 WHERE id=$1::uuid`, monitorID); err != nil {
 			t.Fatal(err)
 		}
