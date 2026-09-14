@@ -85,8 +85,16 @@ func main() {
 		os.Exit(1)
 	}
 	publisher := fifo.NewPublisher(db, loggingSender{next: fifo.SQSSender{Client: client}, logger: logger})
-	consumer := fifo.NewResultConsumerWithQuarantine(db, loggingResultSource{next: fifo.ResultSQS{Client: client, QueueURL: queueURLs.Results}, logger: logger}, quarantineSealer)
-	dlq := fifo.NewDLQReconciler(db, &fifo.SQSDLQSource{Client: client, JobDLQURL: queueURLs.JobDLQ, ResultDLQURL: queueURLs.ResultDLQ}, quarantineSealer)
+	consumer, err := fifo.NewResultConsumer(db, loggingResultSource{next: fifo.ResultSQS{Client: client, QueueURL: queueURLs.Results}, logger: logger}, quarantineSealer)
+	if err != nil {
+		logger.Error("configure result consumer")
+		os.Exit(1)
+	}
+	dlq, err := fifo.NewDLQReconciler(db, &fifo.SQSDLQSource{Client: client, JobDLQURL: queueURLs.JobDLQ, ResultDLQURL: queueURLs.ResultDLQ}, quarantineSealer)
+	if err != nil {
+		logger.Error("configure DLQ reconciler")
+		os.Exit(1)
+	}
 	operationsService := operations.NewWithSQS(db, client, queueURLs)
 	var workers sync.WaitGroup
 	start := func(run func()) { workers.Add(1); go func() { defer workers.Done(); run() }() }

@@ -25,7 +25,7 @@ func TestCreateDefaultOwnershipUsesAuthenticatedUser(t *testing.T) {
 		Project:      ownership.Project{ID: "project-id", OrganizationID: "org-id", Name: "API", Description: "Primary API"},
 		Environment:  ownership.Environment{ID: "environment-id", OrganizationID: "org-id", ProjectID: "project-id", Name: "Production", EnvironmentType: "production"},
 	}}
-	router := NewRouter(Options{
+	router := newTestRouter(testRouterOptions{
 		Logger:           discardLogger(),
 		Authenticator:    authenticator,
 		OwnershipService: service,
@@ -84,7 +84,7 @@ func TestCreateDefaultOwnershipRequiresValidSession(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service := &fakeOwnershipService{}
-			router := NewRouter(Options{
+			router := newTestRouter(testRouterOptions{
 				Logger:           discardLogger(),
 				Authenticator:    test.authenticator,
 				OwnershipService: service,
@@ -115,7 +115,7 @@ func TestCreateDefaultOwnershipRequiresValidSession(t *testing.T) {
 func TestCreateDefaultOwnershipRejectsCallerSelectedOwner(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeOwnershipService{}
-	router := NewRouter(Options{
+	router := newTestRouter(testRouterOptions{
 		Logger:           discardLogger(),
 		Authenticator:    &fakeSessionAuthenticator{user: auth.User{ID: "authenticated-user"}},
 		OwnershipService: service,
@@ -154,7 +154,7 @@ func TestCreateDefaultOwnershipMapsServiceErrors(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service := &fakeOwnershipService{err: test.err}
-			router := NewRouter(Options{
+			router := newTestRouter(testRouterOptions{
 				Logger:           discardLogger(),
 				Authenticator:    &fakeSessionAuthenticator{user: auth.User{ID: "user-id"}},
 				OwnershipService: service,

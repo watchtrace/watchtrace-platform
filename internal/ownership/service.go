@@ -117,13 +117,12 @@ type Service struct {
 	sender auth.AccountActionSender
 }
 
-// NewService constructs an ownership service backed by PostgreSQL.
-func NewService(db databaseConnection, senders ...auth.AccountActionSender) *Service {
-	var sender auth.AccountActionSender
-	if len(senders) > 0 {
-		sender = senders[0]
+// NewService constructs a fully configured ownership service.
+func NewService(db databaseConnection, sender auth.AccountActionSender) (*Service, error) {
+	if db == nil || sender == nil {
+		return nil, errors.New("ownership: database and account action sender are required")
 	}
-	return &Service{db: db, sender: sender}
+	return &Service{db: db, sender: sender}, nil
 }
 
 func (s *Service) ListMembers(ctx context.Context, userID, organizationID string) ([]Member, error) {
@@ -183,9 +182,6 @@ func (s *Service) Invite(ctx context.Context, userID, organizationID, email stri
 	expiresAt := time.Now().UTC().Truncate(time.Microsecond).Add(invitationLifetime)
 	if err := queries.CreateOrganizationInvitation(ctx, database.CreateOrganizationInvitationParams{OrganizationID: organizationID, InvitedByUserID: userID, Email: normalizedEmail, Role: string(role), TokenDigest: digest, ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true}}); err != nil {
 		return Invitation{}, fmt.Errorf("create organization invitation: %w", err)
-	}
-	if s.sender == nil {
-		return Invitation{}, errors.New("invitation sender is unavailable")
 	}
 	if err := s.sender.SendInvitation(ctx, normalizedEmail, token); err != nil {
 		return Invitation{}, fmt.Errorf("deliver organization invitation: %w", err)

@@ -37,7 +37,7 @@ func TestAuthEndpointsReturnSafeSessionResponse(t *testing.T) {
 			},
 		},
 	}
-	router := NewRouter(Options{Logger: testLogger(&logs), AuthService: service, SecureCookies: true})
+	router := newTestRouter(testRouterOptions{Logger: testLogger(&logs), AuthService: service, SecureCookies: true})
 
 	for _, test := range []struct {
 		name       string
@@ -112,7 +112,7 @@ func TestRefreshEndpointUsesCookieAndRotatesIt(t *testing.T) {
 			RefreshTokenExpiresAt: time.Now().UTC().Add(30 * 24 * time.Hour),
 		},
 	}}
-	router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", nil)
 	request.AddCookie(&http.Cookie{Name: refreshTokenCookieName, Value: oldRefreshToken})
 	response := httptest.NewRecorder()
@@ -134,7 +134,7 @@ func TestRefreshEndpointUsesCookieAndRotatesIt(t *testing.T) {
 func TestRefreshEndpointRejectsMissingCookieAndClearsIt(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeAuthenticationService{}
-	router := NewRouter(Options{Logger: discardLogger(), AuthService: service, SecureCookies: true})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service, SecureCookies: true})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", nil)
 	response := httptest.NewRecorder()
 
@@ -167,7 +167,7 @@ func TestLogoutEndpointRevokesRequestedScopeAndClearsCookie(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service := &fakeAuthenticationService{}
-			router := NewRouter(Options{Logger: discardLogger(), AuthService: service, SecureCookies: true})
+			router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service, SecureCookies: true})
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", strings.NewReader(test.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.AddCookie(&http.Cookie{Name: refreshTokenCookieName, Value: refreshToken})
@@ -192,7 +192,7 @@ func TestLogoutEndpointRevokesRequestedScopeAndClearsCookie(t *testing.T) {
 func TestLogoutEndpointIsIdempotentWithoutCookie(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeAuthenticationService{}
-	router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", strings.NewReader(`{}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -207,7 +207,7 @@ func TestLogoutEndpointIsIdempotentWithoutCookie(t *testing.T) {
 func TestLogoutEndpointRetainsCookieWhenRevocationFails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeAuthenticationService{err: errors.New("database detail must not escape")}
-	router := NewRouter(Options{Logger: discardLogger(), AuthService: service, SecureCookies: true})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service, SecureCookies: true})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", strings.NewReader(`{}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.AddCookie(&http.Cookie{Name: refreshTokenCookieName, Value: "wt_refresh_retry-test-token"})
@@ -231,7 +231,7 @@ func TestVerifyEmailEndpointReturnsOnlySafeUserState(t *testing.T) {
 		Email:         "verified@example.test",
 		EmailVerified: true,
 	}}
-	router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/verify-email",
 		strings.NewReader(`{"token":"`+verificationToken+`"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -257,7 +257,7 @@ func TestVerifyEmailEndpointReturnsOnlySafeUserState(t *testing.T) {
 func TestVerifyEmailEndpointMapsInvalidTokenSafely(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeAuthenticationService{err: auth.ErrInvalidVerificationToken}
-	router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/verify-email",
 		strings.NewReader(`{"token":"wt_verify_invalid-test-token"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -277,7 +277,7 @@ func TestForgotPasswordDoesNotRevealAccountOrDeliveryState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, serviceErr := range []error{nil, errors.New("database or delivery detail")} {
 		service := &fakeAuthenticationService{err: serviceErr}
-		router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+		router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service})
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/forgot-password",
 			strings.NewReader(`{"email":"user@example.test"}`))
 		request.Header.Set("Content-Type", "application/json")
@@ -296,7 +296,7 @@ func TestResetPasswordClearsCookieAndMapsInvalidToken(t *testing.T) {
 	const password = "new-safe-password"
 
 	service := &fakeAuthenticationService{}
-	router := NewRouter(Options{Logger: discardLogger(), AuthService: service, SecureCookies: true})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service, SecureCookies: true})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/reset-password",
 		strings.NewReader(`{"token":"`+token+`","new_password":"`+password+`"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -310,7 +310,7 @@ func TestResetPasswordClearsCookieAndMapsInvalidToken(t *testing.T) {
 	}
 
 	service = &fakeAuthenticationService{err: auth.ErrInvalidPasswordResetToken}
-	router = NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	router = newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service})
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/reset-password",
 		strings.NewReader(`{"token":"`+token+`","new_password":"`+password+`"}`))
 	request.Header.Set("Content-Type", "application/json")
@@ -339,7 +339,7 @@ func TestAuthEndpointsMapErrorsWithoutLeakingDetails(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service := &fakeAuthenticationService{err: test.serviceErr}
-			router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+			router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service})
 			request := httptest.NewRequest(
 				http.MethodPost,
 				test.path,
@@ -367,7 +367,7 @@ func TestAuthEndpointsMapErrorsWithoutLeakingDetails(t *testing.T) {
 func TestAuthEndpointValidatesCredentialsBeforeService(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeAuthenticationService{}
-	router := NewRouter(Options{Logger: discardLogger(), AuthService: service})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger(), AuthService: service})
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/api/v1/auth/signup",

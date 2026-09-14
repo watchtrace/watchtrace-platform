@@ -17,8 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
 	"github.com/watchtrace/watchtrace-platform/internal/httpapi"
-	"github.com/watchtrace/watchtrace-platform/internal/monitor"
-	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 )
 
 func TestMembershipAuthorizationAndTenantSecurityWithPostgreSQL(t *testing.T) {
@@ -44,10 +42,10 @@ func TestMembershipAuthorizationAndTenantSecurityWithPostgreSQL(t *testing.T) {
 
 	delivery := &recordingVerificationSender{}
 	authService := auth.NewService(pool, delivery)
-	ownershipService := ownership.NewService(pool, delivery)
-	monitorService := monitor.NewService(pool)
+	ownershipService := newIntegrationOwnershipService(t, pool, delivery)
+	monitorService := newIntegrationMonitorService(t, pool)
 	var logs bytes.Buffer
-	router := httpapi.NewRouter(httpapi.Options{Logger: slog.New(slog.NewJSONHandler(&logs, nil)), AuthService: authService, Authenticator: authService, OwnershipService: ownershipService, MonitorService: monitorService, SecureCookies: true})
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{Logger: slog.New(slog.NewJSONHandler(&logs, nil)), AuthService: authService, OwnershipService: ownershipService, MonitorService: monitorService, SecureCookies: true})
 
 	tokens := map[string]string{}
 	for index, email := range emails {

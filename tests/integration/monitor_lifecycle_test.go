@@ -19,7 +19,6 @@ import (
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
 	"github.com/watchtrace/watchtrace-platform/internal/httpapi"
 	"github.com/watchtrace/watchtrace-platform/internal/monitor"
-	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 	"github.com/watchtrace/watchtrace-platform/internal/secureheaders"
 )
 
@@ -43,8 +42,11 @@ func TestSecureMonitorLifecycleWithPostgreSQL(t *testing.T) {
 	keys, _ := secureheaders.New(1, map[int32][]byte{1: bytes.Repeat([]byte{9}, 32)})
 	platformPublic, platformPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	_ = platformPublic
-	service := monitor.NewServiceWithQueue(pool, keys, platformPrivate, "platform-v1")
-	router := httpapi.NewRouter(httpapi.Options{Logger: slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)), AuthService: authService, Authenticator: authService, OwnershipService: ownership.NewService(pool), MonitorService: service})
+	service, err := monitor.NewService(pool, monitor.Config{Headers: keys, SigningKey: platformPrivate, SigningKeyID: "platform-v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{Logger: slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)), AuthService: authService, OwnershipService: newIntegrationOwnershipService(t, pool, &recordingVerificationSender{}), MonitorService: service})
 	signup := performAuthRequest(t, router, "/api/v1/auth/signup", email, "P1-301-lifecycle-password!")
 	owned := performOwnershipRequest(t, router, signup.Body.Session.Token, ownershipRequestBody{OrganizationName: "Lifecycle", OrganizationSlug: slug, ProjectName: "Checks"})
 	workerPrivate, _ := ecdh.X25519().GenerateKey(rand.Reader)

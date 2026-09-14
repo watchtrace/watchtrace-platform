@@ -76,7 +76,10 @@ func TestDLQReconciliationMarksUnknownAndEncryptsRecoverableResult(t *testing.T)
 		job:    fifo.DLQDelivery{Kind: "job", Attributes: envelope.Attributes{JobID: jobID, WorkerPoolID: "hosted"}, Receipt: "job-receipt"},
 		result: fifo.DLQDelivery{Kind: "result", Body: signed, Receipt: "result-receipt"},
 	}
-	reconciler := fifo.NewDLQReconciler(pool, source, sealer)
+	reconciler, err := fifo.NewDLQReconciler(pool, source, sealer)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if worked, reconcileErr := reconciler.ReconcileNext(ctx); reconcileErr != nil || !worked {
 		t.Fatalf("job reconcile worked=%t error=%v", worked, reconcileErr)
 	}

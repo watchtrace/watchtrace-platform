@@ -25,7 +25,7 @@ func TestRequestIDIsValidatedAndPropagated(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			router := NewRouter(Options{Logger: discardLogger()})
+			router := newTestRouter(testRouterOptions{Logger: discardLogger()})
 			router.GET("/request-id", func(c *gin.Context) {
 				if RequestID(c) != RequestIDFromContext(c.Request.Context()) {
 					t.Error("Gin and request contexts received different request IDs")
@@ -60,7 +60,7 @@ func TestRequestIDIsValidatedAndPropagated(t *testing.T) {
 func TestAccessLogDoesNotExposeRequestSecrets(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var logs bytes.Buffer
-	router := NewRouter(Options{Logger: testLogger(&logs)})
+	router := newTestRouter(testRouterOptions{Logger: testLogger(&logs)})
 
 	request := httptest.NewRequest(http.MethodGet, "/health?token=query-secret", nil)
 	request.Header.Set("Authorization", "Bearer authorization-secret")
@@ -82,7 +82,7 @@ func TestAccessLogDoesNotExposeRequestSecrets(t *testing.T) {
 func TestAccessLogIncludesOnlyValidatedRecordIdentifiers(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var logs bytes.Buffer
-	router := NewRouter(Options{Logger: testLogger(&logs)})
+	router := newTestRouter(testRouterOptions{Logger: testLogger(&logs)})
 	router.GET("/records/:environmentId/:monitorId", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	request := httptest.NewRequest(http.MethodGet, "/records/550e8400-e29b-41d4-a716-446655440000/not-a-record-secret", nil)
 	response := httptest.NewRecorder()
@@ -96,7 +96,7 @@ func TestPanicRecoveryDoesNotExposePanicValue(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const panicSecret = "panic-secret-must-not-escape"
 	var logs bytes.Buffer
-	router := NewRouter(Options{Logger: testLogger(&logs)})
+	router := newTestRouter(testRouterOptions{Logger: testLogger(&logs)})
 	router.GET("/panic", func(_ *gin.Context) {
 		panic(panicSecret)
 	})

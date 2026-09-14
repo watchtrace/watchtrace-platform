@@ -140,17 +140,26 @@ type Service struct {
 	signingKeyID string
 }
 
-// NewService constructs a monitor service backed by PostgreSQL.
-func NewService(db databaseConnection) *Service {
-	return &Service{db: db}
+// Config contains the cryptographic dependencies needed by every monitor use
+// case, including encrypted headers and manual test dispatch.
+type Config struct {
+	Headers      *secureheaders.Keyring
+	SigningKey   ed25519.PrivateKey
+	SigningKeyID string
 }
 
-func NewServiceWithHeaders(db databaseConnection, headers *secureheaders.Keyring) *Service {
-	return &Service{db: db, headers: headers}
-}
-
-func NewServiceWithQueue(db databaseConnection, headers *secureheaders.Keyring, signingKey ed25519.PrivateKey, signingKeyID string) *Service {
-	return &Service{db: db, headers: headers, signingKey: signingKey, signingKeyID: signingKeyID}
+// NewService constructs a fully configured monitor service.
+func NewService(db databaseConnection, config Config) (*Service, error) {
+	config.SigningKeyID = strings.TrimSpace(config.SigningKeyID)
+	if db == nil || config.Headers == nil || len(config.SigningKey) != ed25519.PrivateKeySize || config.SigningKeyID == "" {
+		return nil, errors.New("monitor: database, header keys, signing key, and signing key ID are required")
+	}
+	return &Service{
+		db:           db,
+		headers:      config.Headers,
+		signingKey:   append(ed25519.PrivateKey(nil), config.SigningKey...),
+		signingKeyID: config.SigningKeyID,
+	}, nil
 }
 
 // Create adds one GET monitor after locking its organization so concurrent
@@ -546,9 +555,6 @@ func (s *Service) Delete(ctx context.Context, userID, environmentID, monitorID s
 }
 
 func (s *Service) TestNow(ctx context.Context, userID, environmentID, monitorID string) (string, error) {
-	if len(s.signingKey) != ed25519.PrivateKeySize || s.signingKeyID == "" || s.headers == nil {
-		return "", ErrQueueUnavailable
-	}
 	tx, row, err := s.lockManaged(ctx, userID, environmentID, monitorID)
 	if err != nil {
 		return "", err
@@ -663,7 +669,7 @@ func (s *Service) lockManaged(ctx context.Context, userID, environmentID, monito
 	return tx, row, nil
 }
 func (s *Service) headerNames(ciphertext []byte, version pgtype.Int4) []string {
-	if len(ciphertext) == 0 || !version.Valid || s.headers == nil {
+	if len(ciphertext) == 0 || !version.Valid {
 		return []string{}
 	}
 	headers, err := s.headers.Decrypt(ciphertext, version.Int32)
@@ -687,9 +693,6 @@ func nullableInt32(value int32) any {
 func (s *Service) encryptHeaders(headers map[string]string) ([]byte, int32, []string, error) {
 	if len(headers) == 0 {
 		return nil, 0, []string{}, nil
-	}
-	if s.headers == nil {
-		return nil, 0, nil, ErrInvalidInput
 	}
 	ciphertext, version, err := s.headers.Encrypt(headers)
 	if err != nil {

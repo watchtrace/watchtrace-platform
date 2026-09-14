@@ -1,13 +1,24 @@
 package integration_test
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
 )
+
+func newTestQuarantineSealer(t *testing.T) *quarantine.Sealer {
+	t.Helper()
+	sealer, err := quarantine.New(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sealer
+}
 
 func openMonitoringTestPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 	t.Helper()

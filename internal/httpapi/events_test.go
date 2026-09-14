@@ -43,7 +43,7 @@ func (f *eventServiceFake) Poll(ctx context.Context, _, _ string, after int64, _
 func TestEventStreamReplaysLastEventIDAndEmitsIdentifiersOnly(t *testing.T) {
 	service := &eventServiceFake{first: make(chan struct{}), events: []realtime.Event{{ID: 42, Type: "monitor.changed", ResourceType: "monitor", ResourceID: "00000000-0000-0000-0000-000000000042", OccurredAt: time.Now()}}}
 	authenticator := &fakeSessionAuthenticator{user: auth.User{ID: "00000000-0000-0000-0000-000000000001", Email: "person@example.test"}}
-	router := NewRouter(Options{Authenticator: authenticator, RealtimeService: service, RateLimiter: NewRateLimiter(RateLimits{LiveConnections: 2})})
+	router := newTestRouter(testRouterOptions{Authenticator: authenticator, RealtimeService: service, RateLimiter: NewRateLimiter(RateLimits{LiveConnections: 2})})
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/environments/00000000-0000-0000-0000-000000000002/events", nil).WithContext(ctx)
 	request.Header.Set("Authorization", "Bearer session")
@@ -75,7 +75,7 @@ func TestEventStreamReplaysLastEventIDAndEmitsIdentifiersOnly(t *testing.T) {
 
 func TestEventStreamHidesUnauthorizedEnvironment(t *testing.T) {
 	service := &eventServiceFake{err: realtime.ErrNotFound}
-	router := NewRouter(Options{Authenticator: &fakeSessionAuthenticator{user: auth.User{ID: "00000000-0000-0000-0000-000000000001"}}, RealtimeService: service})
+	router := newTestRouter(testRouterOptions{Authenticator: &fakeSessionAuthenticator{user: auth.User{ID: "00000000-0000-0000-0000-000000000001"}}, RealtimeService: service})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/environments/00000000-0000-0000-0000-000000000002/events", nil)
 	request.Header.Set("Authorization", "Bearer session")
 	response := httptest.NewRecorder()
@@ -86,7 +86,7 @@ func TestEventStreamHidesUnauthorizedEnvironment(t *testing.T) {
 }
 
 func TestEventStreamRejectsInvalidReconnectCursor(t *testing.T) {
-	router := NewRouter(Options{Authenticator: &fakeSessionAuthenticator{user: auth.User{ID: "00000000-0000-0000-0000-000000000001"}}, RealtimeService: &eventServiceFake{err: errors.New("must not poll")}})
+	router := newTestRouter(testRouterOptions{Authenticator: &fakeSessionAuthenticator{user: auth.User{ID: "00000000-0000-0000-0000-000000000001"}}, RealtimeService: &eventServiceFake{err: errors.New("must not poll")}})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/environments/00000000-0000-0000-0000-000000000002/events", nil)
 	request.Header.Set("Authorization", "Bearer session")
 	request.Header.Set("Last-Event-ID", "not-an-id")

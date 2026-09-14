@@ -17,7 +17,6 @@ import (
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
 	"github.com/watchtrace/watchtrace-platform/internal/httpapi"
 	"github.com/watchtrace/watchtrace-platform/internal/monitor"
-	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 )
 
 func TestMonitorAPIWithPostgreSQL(t *testing.T) {
@@ -44,13 +43,12 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 	})
 
 	authService := auth.NewService(pool, &recordingVerificationSender{})
-	ownershipService := ownership.NewService(pool)
-	monitorService := monitor.NewService(pool)
+	ownershipService := newIntegrationOwnershipService(t, pool, &recordingVerificationSender{})
+	monitorService := newIntegrationMonitorService(t, pool)
 	var logs bytes.Buffer
-	router := httpapi.NewRouter(httpapi.Options{
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{
 		Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
 		AuthService:      authService,
-		Authenticator:    authService,
 		OwnershipService: ownershipService,
 		MonitorService:   monitorService,
 	})

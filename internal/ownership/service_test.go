@@ -1,9 +1,38 @@
 package ownership
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
+
+type constructorDB struct{ database.DBTX }
+
+func (constructorDB) Begin(context.Context) (pgx.Tx, error) {
+	return nil, errors.New("not used")
+}
+
+type constructorSender struct{}
+
+func (constructorSender) SendVerification(context.Context, string, string) error  { return nil }
+func (constructorSender) SendPasswordReset(context.Context, string, string) error { return nil }
+func (constructorSender) SendInvitation(context.Context, string, string) error    { return nil }
+
+func TestNewServiceRequiresCompleteConfiguration(t *testing.T) {
+	if _, err := NewService(nil, constructorSender{}); err == nil {
+		t.Fatal("NewService accepted a missing database")
+	}
+	if _, err := NewService(constructorDB{}, nil); err == nil {
+		t.Fatal("NewService accepted a missing account action sender")
+	}
+	if service, err := NewService(constructorDB{}, constructorSender{}); err != nil || service == nil {
+		t.Fatalf("valid service = %v, error = %v", service, err)
+	}
+}
 
 func TestNormalizeInput(t *testing.T) {
 	input, err := normalizeInput("user-id", CreateDefaultInput{

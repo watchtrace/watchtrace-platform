@@ -18,9 +18,7 @@ import (
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
 	"github.com/watchtrace/watchtrace-platform/internal/backendapi"
 	"github.com/watchtrace/watchtrace-platform/internal/httpapi"
-	"github.com/watchtrace/watchtrace-platform/internal/monitor"
 	"github.com/watchtrace/watchtrace-platform/internal/operations"
-	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 	"github.com/watchtrace/watchtrace-platform/internal/realtime"
 )
 
@@ -32,8 +30,8 @@ func TestPhase14TenantManagementAPIAuthorization(t *testing.T) {
 	t.Cleanup(func() { deleteOwnershipTestData(t, context.Background(), pool, emails, slugs) })
 
 	authService := auth.NewService(pool, &recordingVerificationSender{})
-	ownershipService := ownership.NewService(pool)
-	router := httpapi.NewRouter(httpapi.Options{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), AuthService: authService, Authenticator: authService, OwnershipService: ownershipService})
+	ownershipService := newIntegrationOwnershipService(t, pool, &recordingVerificationSender{})
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), AuthService: authService, OwnershipService: ownershipService})
 	owner := performAuthRequest(t, router, "/api/v1/auth/signup", emails[0], "Phase-14-owner-password!")
 	viewer := performAuthRequest(t, router, "/api/v1/auth/signup", emails[1], "Phase-14-viewer-password!")
 	outsider := performAuthRequest(t, router, "/api/v1/auth/signup", emails[2], "Phase-14-outsider-password!")
@@ -106,10 +104,10 @@ func TestPhase14MonitoringReportingIncidentsEventsAndPolling(t *testing.T) {
 	t.Cleanup(func() { deleteOwnershipTestData(t, context.Background(), pool, emails, slugs) })
 
 	authService := auth.NewService(pool, &recordingVerificationSender{})
-	ownershipService := ownership.NewService(pool)
-	monitorService := monitor.NewService(pool)
+	ownershipService := newIntegrationOwnershipService(t, pool, &recordingVerificationSender{})
+	monitorService := newIntegrationMonitorService(t, pool)
 	realtimeService := realtime.New(pool)
-	router := httpapi.NewRouter(httpapi.Options{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), AuthService: authService, Authenticator: authService, OwnershipService: ownershipService, MonitorService: monitorService, BackendService: backendapi.New(pool), RealtimeService: realtimeService, OperationsService: operations.New(pool)})
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), AuthService: authService, OwnershipService: ownershipService, MonitorService: monitorService, BackendService: backendapi.New(pool), RealtimeService: realtimeService, OperationsService: operations.New(pool)})
 	owner := performAuthRequest(t, router, "/api/v1/auth/signup", emails[0], "Phase-14-system-password!")
 	cross := performAuthRequest(t, router, "/api/v1/auth/signup", emails[1], "Phase-14-cross-password!")
 	root := performOwnershipRequest(t, router, owner.Body.Session.Token, ownershipRequestBody{OrganizationName: "System", OrganizationSlug: slugs[0], ProjectName: "API"})

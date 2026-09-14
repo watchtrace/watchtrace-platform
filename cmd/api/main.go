@@ -47,14 +47,41 @@ func main() {
 	}
 	authService := auth.NewService(databasePool, actionSender)
 	operationsService := operations.New(databasePool)
-	go runSessionCleanup(ctx, authService, operationsService, logger)
-	ownershipService := ownership.NewService(databasePool, actionSender)
+	ownershipService, err := ownership.NewService(databasePool, actionSender)
+	if err != nil {
+		logger.Error("configure ownership service")
+		os.Exit(1)
+	}
 	headerKeys, err := secureheaders.New(configuration.MonitorHeaderKeyVersion, map[int32][]byte{configuration.MonitorHeaderKeyVersion: configuration.MonitorHeaderKey})
 	if err != nil {
 		logger.Error("configure monitor header encryption")
 		os.Exit(1)
 	}
-	monitorService := monitor.NewServiceWithQueue(databasePool, headerKeys, configuration.PlatformSigningKey, configuration.PlatformSigningKeyID)
+	monitorService, err := monitor.NewService(databasePool, monitor.Config{
+		Headers:      headerKeys,
+		SigningKey:   configuration.PlatformSigningKey,
+		SigningKeyID: configuration.PlatformSigningKeyID,
+	})
+	if err != nil {
+		logger.Error("configure monitor service")
+		os.Exit(1)
+	}
+	router, err := httpapi.NewRouter(httpapi.Options{
+		Logger:            logger,
+		ReadinessCheck:    databasePool.Ping,
+		AuthService:       authService,
+		OwnershipService:  ownershipService,
+		MonitorService:    monitorService,
+		BackendService:    backendapi.New(databasePool),
+		RealtimeService:   realtime.New(databasePool),
+		OperationsService: operationsService,
+		SecureCookies:     configuration.Production,
+	})
+	if err != nil {
+		logger.Error("configure API router")
+		os.Exit(1)
+	}
+	go runSessionCleanup(ctx, authService, operationsService, logger)
 
 	listener, err := net.Listen("tcp", configuration.HTTPAddress)
 	if err != nil {
@@ -64,18 +91,7 @@ func main() {
 
 	logger.Info("API server listening", "address", listener.Addr())
 
-	server := httpserver.New(httpapi.NewRouter(httpapi.Options{
-		Logger:            logger,
-		ReadinessCheck:    databasePool.Ping,
-		AuthService:       authService,
-		Authenticator:     authService,
-		OwnershipService:  ownershipService,
-		MonitorService:    monitorService,
-		BackendService:    backendapi.New(databasePool),
-		RealtimeService:   realtime.New(databasePool),
-		OperationsService: operationsService,
-		SecureCookies:     configuration.Production,
-	}), configuration.ShutdownTimeout)
+	server := httpserver.New(router, configuration.ShutdownTimeout)
 	if err := server.Serve(ctx, listener); err != nil {
 		logger.Error("API server stopped", "error", err)
 		os.Exit(1)

@@ -10,14 +10,11 @@ import (
 	"github.com/watchtrace/watchtrace-platform/internal/monitor"
 )
 
-// MonitorService is the initial monitor boundary used by the HTTP API.
+// MonitorService is the complete monitor boundary used by the HTTP API.
 type MonitorService interface {
 	Create(context.Context, string, string, monitor.CreateInput) (monitor.Monitor, error)
 	List(context.Context, string, string) ([]monitor.Monitor, error)
 	Get(context.Context, string, string, string) (monitor.Detail, error)
-}
-type monitorLifecycleService interface {
-	MonitorService
 	Update(context.Context, string, string, string, monitor.UpdateInput) (monitor.Monitor, error)
 	Delete(context.Context, string, string, string) error
 	Pause(context.Context, string, string, string) (monitor.Monitor, error)
@@ -93,13 +90,11 @@ func registerMonitorRoutes(
 		requireAuthenticatedUser(authenticator),
 		listMonitors(service),
 	)
-	if lifecycle, ok := service.(monitorLifecycleService); ok {
-		router.PUT("/api/v1/environments/:environmentId/monitors/:monitorId", requireAuthenticatedUser(authenticator), updateMonitor(lifecycle))
-		router.DELETE("/api/v1/environments/:environmentId/monitors/:monitorId", requireAuthenticatedUser(authenticator), deleteMonitor(lifecycle))
-		router.POST("/api/v1/environments/:environmentId/monitors/:monitorId/pause", requireAuthenticatedUser(authenticator), pauseMonitor(lifecycle, true))
-		router.POST("/api/v1/environments/:environmentId/monitors/:monitorId/resume", requireAuthenticatedUser(authenticator), pauseMonitor(lifecycle, false))
-		router.POST("/api/v1/environments/:environmentId/monitors/:monitorId/test", requireAuthenticatedUser(authenticator), testMonitor(lifecycle))
-	}
+	router.PUT("/api/v1/environments/:environmentId/monitors/:monitorId", requireAuthenticatedUser(authenticator), updateMonitor(service))
+	router.DELETE("/api/v1/environments/:environmentId/monitors/:monitorId", requireAuthenticatedUser(authenticator), deleteMonitor(service))
+	router.POST("/api/v1/environments/:environmentId/monitors/:monitorId/pause", requireAuthenticatedUser(authenticator), pauseMonitor(service, true))
+	router.POST("/api/v1/environments/:environmentId/monitors/:monitorId/resume", requireAuthenticatedUser(authenticator), pauseMonitor(service, false))
+	router.POST("/api/v1/environments/:environmentId/monitors/:monitorId/test", requireAuthenticatedUser(authenticator), testMonitor(service))
 	router.GET(
 		"/api/v1/environments/:environmentId/monitors/:monitorId",
 		requireAuthenticatedUser(authenticator),
@@ -138,7 +133,7 @@ func createMonitor(service MonitorService) gin.HandlerFunc {
 	}
 }
 
-func updateMonitor(service monitorLifecycleService) gin.HandlerFunc {
+func updateMonitor(service MonitorService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user, ok := authenticatedUser(c)
 		if !ok {
@@ -157,7 +152,7 @@ func updateMonitor(service monitorLifecycleService) gin.HandlerFunc {
 		c.JSON(http.StatusOK, monitorToResponse(item))
 	}
 }
-func deleteMonitor(service monitorLifecycleService) gin.HandlerFunc {
+func deleteMonitor(service MonitorService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user, ok := authenticatedUser(c)
 		if !ok {
@@ -171,7 +166,7 @@ func deleteMonitor(service monitorLifecycleService) gin.HandlerFunc {
 		c.Status(http.StatusNoContent)
 	}
 }
-func pauseMonitor(service monitorLifecycleService, paused bool) gin.HandlerFunc {
+func pauseMonitor(service MonitorService, paused bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user, ok := authenticatedUser(c)
 		if !ok {
@@ -192,7 +187,7 @@ func pauseMonitor(service monitorLifecycleService, paused bool) gin.HandlerFunc 
 		c.JSON(http.StatusOK, monitorToResponse(item))
 	}
 }
-func testMonitor(service monitorLifecycleService) gin.HandlerFunc {
+func testMonitor(service MonitorService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user, ok := authenticatedUser(c)
 		if !ok {

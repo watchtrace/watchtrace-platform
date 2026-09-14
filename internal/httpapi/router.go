@@ -2,30 +2,87 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/watchtrace/watchtrace-platform/internal/auth"
+	"github.com/watchtrace/watchtrace-platform/internal/backendapi"
+	"github.com/watchtrace/watchtrace-platform/internal/monitor"
+	"github.com/watchtrace/watchtrace-platform/internal/operations"
+	"github.com/watchtrace/watchtrace-platform/internal/ownership"
+	"github.com/watchtrace/watchtrace-platform/internal/realtime"
 )
 
-// Options contains the dependencies used by the HTTP router.
+// Options contains every dependency required by the API process. Service
+// pointers are concrete here because this is the application's composition
+// boundary; the individual handlers still depend on their small interfaces.
 type Options struct {
 	Logger            *slog.Logger
 	ReadinessCheck    func(context.Context) error
-	AuthService       AuthenticationService
-	Authenticator     SessionAuthenticator
-	OwnershipService  OwnershipService
-	MonitorService    MonitorService
-	BackendService    BackendViewService
-	RealtimeService   RealtimeService
-	OperationsService OperationsService
+	AuthService       *auth.Service
+	OwnershipService  *ownership.Service
+	MonitorService    *monitor.Service
+	BackendService    *backendapi.Service
+	RealtimeService   *realtime.Service
+	OperationsService *operations.Service
 	SecureCookies     bool
 	RateLimiter       *RateLimiter
 }
 
-// NewRouter assembles the HTTP routes owned by the API command.
-func NewRouter(options Options) *gin.Engine {
-	logger := options.Logger
+// NewRouter assembles the complete HTTP API. It rejects incomplete startup
+// configuration instead of silently omitting routes.
+func NewRouter(options Options) (*gin.Engine, error) {
+	if err := options.validate(); err != nil {
+		return nil, err
+	}
+
+	router := newBaseRouter(routerSettings{
+		Logger:         options.Logger,
+		ReadinessCheck: options.ReadinessCheck,
+		RateLimiter:    options.RateLimiter,
+	})
+	registerAuthRoutes(router, options.AuthService, options.SecureCookies)
+	registerCurrentUserRoute(router, options.AuthService)
+	registerOwnershipRoutes(router, options.AuthService, options.OwnershipService)
+	registerTenantManagementRoutes(router, options.AuthService, options.OwnershipService)
+	registerMonitorRoutes(router, options.AuthService, options.MonitorService)
+	registerBackendViewRoutes(router, options.AuthService, options.BackendService)
+	registerEventRoutes(router, options.AuthService, options.RealtimeService)
+	registerOperationsRoute(router, options.OperationsService)
+	return router, nil
+}
+
+func (options Options) validate() error {
+	switch {
+	case options.ReadinessCheck == nil:
+		return errors.New("httpapi: readiness check is required")
+	case options.AuthService == nil:
+		return errors.New("httpapi: auth service is required")
+	case options.OwnershipService == nil:
+		return errors.New("httpapi: ownership service is required")
+	case options.MonitorService == nil:
+		return errors.New("httpapi: monitor service is required")
+	case options.BackendService == nil:
+		return errors.New("httpapi: backend service is required")
+	case options.RealtimeService == nil:
+		return errors.New("httpapi: realtime service is required")
+	case options.OperationsService == nil:
+		return errors.New("httpapi: operations service is required")
+	default:
+		return nil
+	}
+}
+
+type routerSettings struct {
+	Logger         *slog.Logger
+	ReadinessCheck func(context.Context) error
+	RateLimiter    *RateLimiter
+}
+
+func newBaseRouter(settings routerSettings) *gin.Engine {
+	logger := settings.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -43,7 +100,7 @@ func NewRouter(options Options) *gin.Engine {
 		c.Header("X-WatchTrace-Service", "api")
 		c.Next()
 	})
-	limiter := options.RateLimiter
+	limiter := settings.RateLimiter
 	if limiter == nil {
 		limiter = NewRateLimiter(RateLimits{})
 	}
@@ -57,38 +114,14 @@ func NewRouter(options Options) *gin.Engine {
 	router.GET("/health/live", liveness)
 	router.GET("/health/ready", func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
-		if options.ReadinessCheck != nil {
-			if err := options.ReadinessCheck(c.Request.Context()); err != nil {
+		if settings.ReadinessCheck != nil {
+			if err := settings.ReadinessCheck(c.Request.Context()); err != nil {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready"})
 				return
 			}
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ready"})
 	})
-	if options.AuthService != nil {
-		registerAuthRoutes(router, options.AuthService, options.SecureCookies)
-	}
-	if options.Authenticator != nil {
-		registerCurrentUserRoute(router, options.Authenticator)
-	}
-	if options.Authenticator != nil && options.OwnershipService != nil {
-		registerOwnershipRoutes(router, options.Authenticator, options.OwnershipService)
-		if management, ok := options.OwnershipService.(OwnershipManagementService); ok {
-			registerTenantManagementRoutes(router, options.Authenticator, management)
-		}
-	}
-	if options.Authenticator != nil && options.MonitorService != nil {
-		registerMonitorRoutes(router, options.Authenticator, options.MonitorService)
-	}
-	if options.Authenticator != nil && options.BackendService != nil {
-		registerBackendViewRoutes(router, options.Authenticator, options.BackendService)
-	}
-	if options.Authenticator != nil && options.RealtimeService != nil {
-		registerEventRoutes(router, options.Authenticator, options.RealtimeService)
-	}
-	if options.OperationsService != nil {
-		registerOperationsRoute(router, options.OperationsService)
-	}
 
 	router.NoRoute(func(c *gin.Context) {
 		RespondError(c, http.StatusNotFound, "not_found", "resource not found")

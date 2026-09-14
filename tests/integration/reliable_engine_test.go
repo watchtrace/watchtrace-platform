@@ -264,7 +264,10 @@ func TestReliableFIFOEngineWithPostgreSQL(t *testing.T) {
 	}
 
 	source := &capturedResultSource{body: loopback.result}
-	consumer := fifo.NewResultConsumer(pool, source)
+	consumer, err := fifo.NewResultConsumer(pool, source, newTestQuarantineSealer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err = consumer.ConsumeNext(ctx); err != nil {
 		t.Fatal(err)
 	}

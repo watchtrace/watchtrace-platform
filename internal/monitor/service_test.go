@@ -1,11 +1,54 @@
 package monitor
 
-import "testing"
+import (
+	"context"
+	"crypto/ed25519"
+	"errors"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
+	"github.com/watchtrace/watchtrace-platform/internal/secureheaders"
+)
 
 const (
 	testUserID        = "97867dd1-1283-4477-a9a5-289cac23151a"
 	testEnvironmentID = "3249c694-c0fc-4430-95d3-f12419307dd2"
 )
+
+type constructorDB struct{ database.DBTX }
+
+func (constructorDB) Begin(context.Context) (pgx.Tx, error) {
+	return nil, errors.New("not used")
+}
+
+func TestNewServiceRequiresCompleteConfiguration(t *testing.T) {
+	headers, err := secureheaders.New(1, map[int32][]byte{1: make([]byte, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := Config{Headers: headers, SigningKey: make(ed25519.PrivateKey, ed25519.PrivateKeySize), SigningKeyID: "platform-v1"}
+	tests := []struct {
+		name   string
+		db     databaseConnection
+		config Config
+	}{
+		{name: "database", config: valid},
+		{name: "header keys", db: constructorDB{}, config: Config{SigningKey: valid.SigningKey, SigningKeyID: valid.SigningKeyID}},
+		{name: "signing key", db: constructorDB{}, config: Config{Headers: headers, SigningKeyID: valid.SigningKeyID}},
+		{name: "signing key ID", db: constructorDB{}, config: Config{Headers: headers, SigningKey: valid.SigningKey}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewService(test.db, test.config); err == nil {
+				t.Fatalf("NewService accepted missing %s", test.name)
+			}
+		})
+	}
+	if service, err := NewService(constructorDB{}, valid); err != nil || service == nil {
+		t.Fatalf("valid service = %v, error = %v", service, err)
+	}
+}
 
 func TestNormalizeCreateInputAppliesDefaults(t *testing.T) {
 	input, err := normalizeCreateInput(testUserID, testEnvironmentID, CreateInput{

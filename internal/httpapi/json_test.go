@@ -70,7 +70,7 @@ func TestDecodeJSONRejectsInvalidBodies(t *testing.T) {
 
 func decodeTestRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	router := NewRouter(Options{Logger: discardLogger()})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger()})
 	router.POST("/decode", func(c *gin.Context) {
 		var request decodeTestRequest
 		if !DecodeJSON(c, &request) {

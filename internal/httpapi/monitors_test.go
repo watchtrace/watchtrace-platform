@@ -38,7 +38,7 @@ func TestCreateMonitorUsesAuthenticatedTenantAndReturnsConfiguration(t *testing.
 		CreatedAt:         createdAt,
 		UpdatedAt:         createdAt,
 	}}
-	router := NewRouter(Options{
+	router := newTestRouter(testRouterOptions{
 		Logger:         discardLogger(),
 		Authenticator:  &fakeSessionAuthenticator{user: auth.User{ID: monitorTestUserID}},
 		MonitorService: service,
@@ -75,7 +75,7 @@ func TestCreateMonitorUsesAuthenticatedTenantAndReturnsConfiguration(t *testing.
 func TestListMonitorsReturnsNonNullArray(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service := &fakeMonitorService{listed: []monitor.Monitor{}}
-	router := NewRouter(Options{
+	router := newTestRouter(testRouterOptions{
 		Logger:         discardLogger(),
 		Authenticator:  &fakeSessionAuthenticator{user: auth.User{ID: monitorTestUserID}},
 		MonitorService: service,
@@ -127,7 +127,7 @@ func TestGetMonitorReturnsStateAndRecentChecks(t *testing.T) {
 			TotalDurationMicroseconds: 500000,
 		}},
 	}}
-	router := NewRouter(Options{
+	router := newTestRouter(testRouterOptions{
 		Logger:         discardLogger(),
 		Authenticator:  &fakeSessionAuthenticator{user: auth.User{ID: monitorTestUserID}},
 		MonitorService: service,
@@ -171,7 +171,7 @@ func TestMonitorRoutesRequireSessionAndMapSafeErrors(t *testing.T) {
 
 	t.Run("missing session", func(t *testing.T) {
 		service := &fakeMonitorService{}
-		router := NewRouter(Options{
+		router := newTestRouter(testRouterOptions{
 			Logger:         discardLogger(),
 			Authenticator:  &fakeSessionAuthenticator{},
 			MonitorService: service,
@@ -198,7 +198,7 @@ func TestMonitorRoutesRequireSessionAndMapSafeErrors(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service := &fakeMonitorService{err: test.err}
-			router := NewRouter(Options{
+			router := newTestRouter(testRouterOptions{
 				Logger:         discardLogger(),
 				Authenticator:  &fakeSessionAuthenticator{user: auth.User{ID: monitorTestUserID}},
 				MonitorService: service,
@@ -274,4 +274,47 @@ func (service *fakeMonitorService) Get(
 	service.environmentID = environmentID
 	service.monitorID = monitorID
 	return service.detail, service.err
+}
+
+func (service *fakeMonitorService) Update(
+	_ context.Context,
+	userID string,
+	environmentID string,
+	monitorID string,
+	input monitor.UpdateInput,
+) (monitor.Monitor, error) {
+	service.calls++
+	service.userID = userID
+	service.environmentID = environmentID
+	service.monitorID = monitorID
+	service.input = input
+	return service.created, service.err
+}
+
+func (service *fakeMonitorService) Delete(_ context.Context, userID, environmentID, monitorID string) error {
+	service.calls++
+	service.userID = userID
+	service.environmentID = environmentID
+	service.monitorID = monitorID
+	return service.err
+}
+
+func (service *fakeMonitorService) Pause(_ context.Context, userID, environmentID, monitorID string) (monitor.Monitor, error) {
+	service.calls++
+	service.userID = userID
+	service.environmentID = environmentID
+	service.monitorID = monitorID
+	return service.created, service.err
+}
+
+func (service *fakeMonitorService) Resume(ctx context.Context, userID, environmentID, monitorID string) (monitor.Monitor, error) {
+	return service.Pause(ctx, userID, environmentID, monitorID)
+}
+
+func (service *fakeMonitorService) TestNow(_ context.Context, userID, environmentID, monitorID string) (string, error) {
+	service.calls++
+	service.userID = userID
+	service.environmentID = environmentID
+	service.monitorID = monitorID
+	return "00000000-0000-0000-0000-000000000001", service.err
 }

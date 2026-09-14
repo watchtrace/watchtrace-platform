@@ -804,7 +804,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
   **Completion:** Finished on 2026-09-14. All specified verification passed. No schema migration was changed.
 
-- [ ] **Task 2 — Make API and service composition explicit**
+- [x] **Task 2 — Make API and service composition explicit**
 
   **Goal:** Ensure the complete API is determined at compile/startup time.
 
@@ -815,6 +815,21 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
   **Risk:** Medium. Test fixtures and route availability are affected.
 
   **Verification:** OpenAPI route comparison, router tests, authorization tests, monitor lifecycle tests, and startup configuration tests.
+
+  **Completion:** Finished on 2026-09-14. The API now rejects incomplete composition before opening its listener, and every customer route is registered unconditionally.
+
+  **Implementation report:**
+
+  - `httpapi.Options` now contains the concrete production services. `NewRouter` validates every required dependency, returns an error for incomplete startup configuration, and registers the entire API without optional route branches.
+  - The monitor API boundary now includes CRUD and lifecycle operations in one interface. The runtime lifecycle type assertion and its silently missing routes were removed.
+  - The monitor service now has one validated constructor with an explicit encryption/signing configuration. The database-only, headers-only, and queue-enabled constructor variants were removed.
+  - The ownership service now requires its account-action sender explicitly and validates it during construction. The variadic optional-sender mode and its later runtime failure were removed.
+  - The FIFO result consumer now requires its quarantine sealer explicitly. Valid conflicting results are always encrypted and quarantined; the optional-quarantine mode was removed.
+  - The DLQ reconciler now owns its database dependency directly instead of creating a partially configured result consumer, and it validates all of its dependencies when constructed.
+  - Focused HTTP unit tests use a test-only route assembler, while PostgreSQL integration tests build the same complete service graph as production. This keeps partial fixtures out of runtime code.
+  - A route contract test compares every registered `/api/v1` method/path with `api/customer-v1.openapi.yaml`, and constructor tests cover missing startup dependencies.
+
+  **Verification completed:** Exact OpenAPI route comparison; focused router/service tests; complete PostgreSQL integration script; `go test -race ./... -count=1`; `go vet ./...`; `go build ./...`; and `git diff --check` all passed. No database schema or customer API contract changed.
 
 - [ ] **Task 3 — Split large files without changing behavior**
 

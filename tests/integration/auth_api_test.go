@@ -47,7 +47,7 @@ func TestSignupAndLoginAPIWithPostgreSQL(t *testing.T) {
 
 	service := auth.NewService(pool, &recordingVerificationSender{})
 	var logs bytes.Buffer
-	router := httpapi.NewRouter(httpapi.Options{
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{
 		Logger:        slog.New(slog.NewJSONHandler(&logs, nil)),
 		AuthService:   service,
 		SecureCookies: true,
@@ -252,7 +252,7 @@ func TestLogoutRevocationAndSessionCleanupWithPostgreSQL(t *testing.T) {
 
 	service := auth.NewService(pool, &recordingVerificationSender{})
 	var logs bytes.Buffer
-	router := httpapi.NewRouter(httpapi.Options{
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{
 		Logger:        slog.New(slog.NewJSONHandler(&logs, nil)),
 		AuthService:   service,
 		SecureCookies: true,
@@ -389,7 +389,7 @@ func TestEmailVerificationWithPostgreSQL(t *testing.T) {
 	delivery := &recordingVerificationSender{}
 	service := auth.NewService(pool, delivery)
 	var logs bytes.Buffer
-	router := httpapi.NewRouter(httpapi.Options{
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{
 		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
 		AuthService: service,
 	})
@@ -447,7 +447,7 @@ func TestEmailVerificationWithPostgreSQL(t *testing.T) {
 	assertAuthAPIError(t, expired, http.StatusBadRequest, "invalid_verification_token")
 
 	failingService := auth.NewService(pool, &recordingVerificationSender{err: errors.New("local SMTP unavailable")})
-	failingRouter := httpapi.NewRouter(httpapi.Options{Logger: discardIntegrationLogger(), AuthService: failingService})
+	failingRouter := newIntegrationAPIRouter(t, pool, httpapi.Options{Logger: discardIntegrationLogger(), AuthService: failingService})
 	failedSignup := performAuthRequest(t, failingRouter, "/api/v1/auth/signup", emails[2], "P1-203-failure-password!")
 	assertAuthAPIError(t, failedSignup, http.StatusInternalServerError, "internal_error")
 	var strandedRows int
@@ -487,7 +487,7 @@ func TestPasswordResetWithPostgreSQL(t *testing.T) {
 	delivery := &recordingVerificationSender{}
 	service := auth.NewService(pool, delivery)
 	var logs bytes.Buffer
-	router := httpapi.NewRouter(httpapi.Options{
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{
 		Logger: slog.New(slog.NewJSONHandler(&logs, nil)), AuthService: service, SecureCookies: true,
 	})
 	signup := performAuthRequest(t, router, "/api/v1/auth/signup", email, oldPassword)
@@ -573,7 +573,7 @@ func TestPasswordResetWithPostgreSQL(t *testing.T) {
 	}
 	preservedToken := delivery.resetTokens[3]
 	failing := &recordingVerificationSender{err: errors.New("local SMTP unavailable")}
-	failingRouter := httpapi.NewRouter(httpapi.Options{Logger: discardIntegrationLogger(), AuthService: auth.NewService(pool, failing)})
+	failingRouter := newIntegrationAPIRouter(t, pool, httpapi.Options{Logger: discardIntegrationLogger(), AuthService: auth.NewService(pool, failing)})
 	failed := performForgotPasswordRequest(t, failingRouter, email)
 	if failed.Status != http.StatusAccepted || failed.RawBody != "" {
 		t.Fatalf("delivery failure disclosed state: %d %q", failed.Status, failed.RawBody)

@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
 	"github.com/watchtrace/watchtrace-platform/internal/httpapi"
-	"github.com/watchtrace/watchtrace-platform/internal/ownership"
 )
 
 func TestDefaultOwnershipAPIWithPostgreSQL(t *testing.T) {
@@ -42,12 +41,11 @@ func TestDefaultOwnershipAPIWithPostgreSQL(t *testing.T) {
 	})
 
 	authService := auth.NewService(pool, &recordingVerificationSender{})
-	ownershipService := ownership.NewService(pool)
+	ownershipService := newIntegrationOwnershipService(t, pool, &recordingVerificationSender{})
 	var logs bytes.Buffer
-	router := httpapi.NewRouter(httpapi.Options{
+	router := newIntegrationAPIRouter(t, pool, httpapi.Options{
 		Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
 		AuthService:      authService,
-		Authenticator:    authService,
 		OwnershipService: ownershipService,
 	})
 

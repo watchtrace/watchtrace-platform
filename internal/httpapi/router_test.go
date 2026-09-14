@@ -31,7 +31,7 @@ func TestHealthEndpoints(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, test.path, nil)
 			response := httptest.NewRecorder()
 
-			NewRouter(Options{Logger: discardLogger()}).ServeHTTP(response, request)
+			newTestRouter(testRouterOptions{Logger: discardLogger()}).ServeHTTP(response, request)
 
 			if response.Code != http.StatusOK {
 				t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
@@ -66,7 +66,7 @@ func TestReadinessFailureIsSafe(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const secret = "database-password-must-not-escape"
 	var logs bytes.Buffer
-	router := NewRouter(Options{
+	router := newTestRouter(testRouterOptions{
 		Logger: testLogger(&logs),
 		ReadinessCheck: func(_ context.Context) error {
 			return errors.New(secret)
@@ -90,7 +90,7 @@ func TestReadinessFailureIsSafe(t *testing.T) {
 
 func TestRoutingErrorsUseStandardEnvelope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	router := NewRouter(Options{Logger: discardLogger()})
+	router := newTestRouter(testRouterOptions{Logger: discardLogger()})
 
 	tests := []struct {
 		name       string

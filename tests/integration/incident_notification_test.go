@@ -175,7 +175,10 @@ RETURNING id::text`, fixture.organizationID, fixture.environmentID, fixture.moni
 			t.Fatal(signErr)
 		}
 		source := &capturedResultSource{body: body}
-		consumer := fifo.NewResultConsumer(pool, source)
+		consumer, consumerErr := fifo.NewResultConsumer(pool, source, newTestQuarantineSealer(t))
+		if consumerErr != nil {
+			t.Fatal(consumerErr)
+		}
 		if worked, consumeErr := consumer.ConsumeNext(ctx); consumeErr != nil || !worked || source.acked != 1 {
 			t.Fatalf("result %d worked=%t acknowledged=%d error=%v", index+1, worked, source.acked, consumeErr)
 		}

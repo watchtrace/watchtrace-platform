@@ -28,19 +28,19 @@ type DLQSource interface {
 }
 
 type DLQReconciler struct {
-	consumer *ResultConsumer
-	source   DLQSource
-	sealer   *quarantine.Sealer
+	db     DB
+	source DLQSource
+	sealer *quarantine.Sealer
 }
 
-func NewDLQReconciler(db DB, source DLQSource, sealer *quarantine.Sealer) *DLQReconciler {
-	return &DLQReconciler{consumer: NewResultConsumer(db, nil), source: source, sealer: sealer}
+func NewDLQReconciler(db DB, source DLQSource, sealer *quarantine.Sealer) (*DLQReconciler, error) {
+	if db == nil || source == nil || sealer == nil {
+		return nil, errors.New("fifo: DLQ database, source, and quarantine sealer are required")
+	}
+	return &DLQReconciler{db: db, source: source, sealer: sealer}, nil
 }
 
 func (r *DLQReconciler) ReconcileNext(ctx context.Context) (bool, error) {
-	if r.source == nil || r.sealer == nil {
-		return false, errors.New("invalid DLQ reconciler")
-	}
 	for _, kind := range []string{"job", "result"} {
 		delivery, err := r.source.PullDLQ(ctx, kind, time.Second)
 		if errors.Is(err, workqueue.ErrNoMessage) {
@@ -50,7 +50,7 @@ func (r *DLQReconciler) ReconcileNext(ctx context.Context) (bool, error) {
 			return false, err
 		}
 		if kind == "job" {
-			if err = r.consumer.ReconcileJobDLQ(ctx, delivery.Attributes.JobID, delivery.Attributes.WorkerPoolID); err != nil {
+			if err = reconcileJobDLQ(ctx, r.db, delivery.Attributes.JobID, delivery.Attributes.WorkerPoolID); err != nil {
 				return true, err
 			}
 			return true, r.source.AcknowledgeDLQ(ctx, delivery)
@@ -64,7 +64,7 @@ func (r *DLQReconciler) ReconcileNext(ctx context.Context) (bool, error) {
 		if err != nil {
 			return true, err
 		}
-		tx, err := r.consumer.db.Begin(ctx)
+		tx, err := r.db.Begin(ctx)
 		if err != nil {
 			return true, err
 		}
@@ -86,6 +86,23 @@ func (r *DLQReconciler) ReconcileNext(ctx context.Context) (bool, error) {
 		return true, r.source.AcknowledgeDLQ(ctx, delivery)
 	}
 	return false, nil
+}
+
+func reconcileJobDLQ(ctx context.Context, db DB, jobID, poolID string) error {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+	tag, err := tx.Exec(ctx, `UPDATE check_jobs SET state='dead',completed_at=CURRENT_TIMESTAMP,last_safe_error='job_dlq' WHERE id=$1::uuid AND worker_pool_id=$2 AND state<>'completed'`, jobID, poolID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		_, _ = tx.Exec(ctx, `INSERT INTO monitoring_coverage_gaps(organization_id,environment_id,monitor_id,scheduled_at,reason) SELECT organization_id,environment_id,monitor_id,scheduled_at,'dead' FROM check_jobs WHERE id=$1::uuid ON CONFLICT DO NOTHING`, jobID)
+		_, _ = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('job_dlq',$1::uuid,$2,'job receive limit')`, jobID, poolID)
+	}
+	return tx.Commit(ctx)
 }
 
 type SQSDLQSource struct {

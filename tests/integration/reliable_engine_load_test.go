@@ -193,7 +193,10 @@ func TestHundredTimeoutsAcrossQueueJournalsAndLedger(t *testing.T) {
 	}
 	t.Logf("100 one-second timeout checks completed in %s at 20-worker concurrency (%.2f checks/second)", elapsed, rate)
 
-	consumer := fifo.NewResultConsumer(db, fifo.ResultSQS{Client: client, QueueURL: results.url})
+	consumer, err := fifo.NewResultConsumer(db, fifo.ResultSQS{Client: client, QueueURL: results.url}, newTestQuarantineSealer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for index := 0; index < 100; index++ {
 		worked, consumeErr := consumer.ConsumeNext(ctx)
 		if consumeErr != nil || !worked {

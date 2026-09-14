@@ -31,12 +31,13 @@ type ResultConsumer struct {
 	sealer *quarantine.Sealer
 }
 
-func NewResultConsumer(db DB, source ResultSource) *ResultConsumer {
-	return &ResultConsumer{db: db, source: source, now: time.Now}
-}
-
-func NewResultConsumerWithQuarantine(db DB, source ResultSource, sealer *quarantine.Sealer) *ResultConsumer {
-	return &ResultConsumer{db: db, source: source, now: time.Now, sealer: sealer}
+// NewResultConsumer constructs a result consumer with all dependencies needed
+// to safely preserve conflicting valid results.
+func NewResultConsumer(db DB, source ResultSource, sealer *quarantine.Sealer) (*ResultConsumer, error) {
+	if db == nil || source == nil || sealer == nil {
+		return nil, errors.New("fifo: result database, source, and quarantine sealer are required")
+	}
+	return &ResultConsumer{db: db, source: source, now: time.Now, sealer: sealer}, nil
 }
 func (c *ResultConsumer) ConsumeNext(ctx context.Context) (bool, error) {
 	ready, err := c.databaseReady(ctx)
@@ -84,17 +85,12 @@ j.state,j.job_type,j.organization_id::text,j.environment_id::text,j.monitor_id::
 	existingErr := tx.QueryRow(ctx, `SELECT snapshot_hash,execution_attempt_id::text,result_id::text FROM health_checks WHERE job_id=$1::uuid`, result.JobID).Scan(&existingHash, &existingAttempt, &existingResultID)
 	if existingErr == nil {
 		if fmt.Sprintf("%x", existingHash) != result.SnapshotHash || existingAttempt != result.AttemptID || existingResultID != result.ResultID {
-			var encrypted []byte
-			if c.sealer != nil {
-				encrypted, err = c.sealer.Seal(delivery.Body, []byte("result:"+result.ResultID))
-				if err != nil {
-					return true, err
-				}
+			encrypted, err := c.sealer.Seal(delivery.Body, []byte("result:"+result.ResultID))
+			if err != nil {
+				return true, err
 			}
 			_, _ = tx.Exec(ctx, `INSERT INTO check_result_conflicts(job_id,result_id,worker_pool_id,snapshot_hash,safe_reason,encrypted_payload) VALUES($1::uuid,$2::uuid,$3,$4,'conflicting valid result',$5) ON CONFLICT(result_id) DO NOTHING`, result.JobID, result.ResultID, poolID, hash, encrypted)
-			if encrypted != nil {
-				_, _ = tx.Exec(ctx, `INSERT INTO monitoring_quarantine(queue_kind,job_id,result_id,worker_pool_id,snapshot_hash,safe_reason,encrypted_payload) VALUES('result',$1::uuid,$2::uuid,$3,$4,'conflicting valid result',$5)`, result.JobID, result.ResultID, poolID, hash, encrypted)
-			}
+			_, _ = tx.Exec(ctx, `INSERT INTO monitoring_quarantine(queue_kind,job_id,result_id,worker_pool_id,snapshot_hash,safe_reason,encrypted_payload) VALUES('result',$1::uuid,$2::uuid,$3,$4,'conflicting valid result',$5)`, result.JobID, result.ResultID, poolID, hash, encrypted)
 			_, _ = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('result_conflict',$1::uuid,$2,'conflicting valid result')`, result.JobID, poolID)
 			if err = tx.Commit(ctx); err != nil {
 				return true, err
@@ -194,22 +190,6 @@ func (c *ResultConsumer) SweepDeadlines(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
-}
-func (c *ResultConsumer) ReconcileJobDLQ(ctx context.Context, jobID, poolID string) error {
-	tx, err := c.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(context.Background())
-	tag, err := tx.Exec(ctx, `UPDATE check_jobs SET state='dead',completed_at=CURRENT_TIMESTAMP,last_safe_error='job_dlq' WHERE id=$1::uuid AND worker_pool_id=$2 AND state<>'completed'`, jobID, poolID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() > 0 {
-		_, _ = tx.Exec(ctx, `INSERT INTO monitoring_coverage_gaps(organization_id,environment_id,monitor_id,scheduled_at,reason) SELECT organization_id,environment_id,monitor_id,scheduled_at,'dead' FROM check_jobs WHERE id=$1::uuid ON CONFLICT DO NOTHING`, jobID)
-		_, _ = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('job_dlq',$1::uuid,$2,'job receive limit')`, jobID, poolID)
-	}
-	return tx.Commit(ctx)
 }
 func (c *ResultConsumer) RecordResultDLQ(ctx context.Context, jobID, poolID string) error {
 	tx, err := c.db.Begin(ctx)
