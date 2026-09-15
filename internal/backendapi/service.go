@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/authorization"
 	"github.com/watchtrace/watchtrace-platform/internal/incident"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 )
 
@@ -124,32 +125,29 @@ func normalizeQuery(q PageQuery, maxWindow time.Duration) (PageQuery, error) {
 	return q, nil
 }
 func (s *Service) authorizeEnvironment(ctx context.Context, tx pgx.Tx, userID, environmentID string, permission authorization.Permission) (string, authorization.Role, error) {
-	var org string
-	var role authorization.Role
-	err := tx.QueryRow(ctx, `SELECT e.organization_id::text,m.role FROM environments e JOIN organizations o ON o.id=e.organization_id AND o.deleted_at IS NULL JOIN org_members m ON m.organization_id=e.organization_id AND m.user_id=$1::uuid WHERE e.id=$2::uuid`, userID, environmentID).Scan(&org, &role)
+	row, err := database.New(tx).GetAccessibleEnvironmentOrganization(ctx, database.GetAccessibleEnvironmentOrganizationParams{UserID: userID, EnvironmentID: environmentID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
 	}
 	if err != nil {
 		return "", "", err
 	}
+	role := authorization.Role(row.Role)
 	if !authorization.Allows(role, permission) {
 		return "", "", ErrForbidden
 	}
-	return org, role, nil
+	return row.OrganizationID, role, nil
 }
 func authorizeMonitor(ctx context.Context, tx pgx.Tx, userID, environmentID, monitorID string) (string, error) {
-	var org string
-	var role authorization.Role
-	err := tx.QueryRow(ctx, `SELECT m.organization_id::text,om.role FROM monitors m JOIN organizations o ON o.id=m.organization_id AND o.deleted_at IS NULL JOIN org_members om ON om.organization_id=m.organization_id AND om.user_id=$1::uuid WHERE m.environment_id=$2::uuid AND m.id=$3::uuid AND m.deleted_at IS NULL`, userID, environmentID, monitorID).Scan(&org, &role)
+	row, err := database.New(tx).AuthorizeBackendMonitor(ctx, database.AuthorizeBackendMonitorParams{UserID: userID, EnvironmentID: environmentID, MonitorID: monitorID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}
 	if err != nil {
 		return "", err
 	}
-	if !authorization.Allows(role, authorization.PermissionMonitorsRead) {
+	if !authorization.Allows(authorization.Role(row.Role), authorization.PermissionMonitorsRead) {
 		return "", ErrForbidden
 	}
-	return org, nil
+	return row.OrganizationID, nil
 }

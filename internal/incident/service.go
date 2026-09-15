@@ -8,9 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/watchtrace/watchtrace-platform/internal/authorization"
 	"github.com/watchtrace/watchtrace-platform/internal/notification"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 var (
@@ -67,46 +70,40 @@ func NewService(db DB, options ...Option) *Service {
 // result transaction. The monitor reliability row is already locked by the
 // caller, while the partial unique index remains the final concurrency guard.
 func ApplyEvaluationTx(ctx context.Context, tx pgx.Tx, monitorID, sourceJobID string, corrected bool, now time.Time) error {
-	if _, err := tx.Exec(ctx, `INSERT INTO alert_rules(organization_id,environment_id,monitor_id)
-SELECT organization_id,environment_id,id FROM monitors WHERE id=$1::uuid
-ON CONFLICT(monitor_id,rule_key) DO NOTHING`, monitorID); err != nil {
+	queries := database.New(tx)
+	if err := queries.EnsureDefaultAlertRule(ctx, monitorID); err != nil {
 		return err
 	}
-	var ruleID, organizationID, environmentID, observedState string
-	var failureThreshold int
-	err := tx.QueryRow(ctx, `SELECT a.id::text,a.organization_id::text,a.environment_id::text,
- a.failure_threshold,r.observed_state
-FROM alert_rules a JOIN monitor_reliability_states r ON r.monitor_id=a.monitor_id
-WHERE a.monitor_id=$1::uuid AND a.rule_key='consecutive_failures' AND a.enabled`, monitorID).Scan(
-		&ruleID, &organizationID, &environmentID, &failureThreshold, &observedState)
+	rule, err := queries.GetEnabledMonitorAlertRule(ctx, monitorID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	openID, hasOpen, err := openIncidentID(ctx, tx, monitorID, ruleID)
+	openID, hasOpen, err := openIncidentID(ctx, tx, monitorID, rule.RuleID)
 	if err != nil {
 		return err
 	}
-	if observedState == "down" {
+	if rule.ObservedState == "down" {
 		if hasOpen {
 			return nil
 		}
 		startedAt := now.UTC()
-		if err = tx.QueryRow(ctx, `SELECT COALESCE(min(scheduled_at),$3) FROM (
- SELECT scheduled_at FROM monitor_result_evaluations
- WHERE monitor_id=$1::uuid ORDER BY scheduled_at DESC,job_id DESC LIMIT $2
-) recent`, monitorID, failureThreshold, startedAt).Scan(&startedAt); err != nil {
-			return err
+		evaluationTimes, evaluationErr := queries.ListRecentIncidentEvaluationTimes(ctx, database.ListRecentIncidentEvaluationTimesParams{MonitorID: monitorID, FailureThreshold: int32(rule.FailureThreshold)})
+		if evaluationErr != nil {
+			return evaluationErr
 		}
-		return openIncident(ctx, tx, organizationID, environmentID, monitorID, ruleID, sourceJobID, startedAt, now.UTC())
+		if len(evaluationTimes) > 0 {
+			startedAt = evaluationTimes[len(evaluationTimes)-1].Time
+		}
+		return openIncident(ctx, tx, rule.OrganizationID, rule.EnvironmentID, monitorID, rule.RuleID, sourceJobID, startedAt, now.UTC())
 	}
 	if corrected && hasOpen {
 		return resolveIncident(ctx, tx, openID, sourceJobID, "late_result_correction", nil,
 			"late result correction invalidated the open threshold", now.UTC())
 	}
-	if observedState == "healthy" && hasOpen {
+	if rule.ObservedState == "healthy" && hasOpen {
 		return resolveIncident(ctx, tx, openID, sourceJobID, "automatic_recovery", nil,
 			"recovery threshold reached", now.UTC())
 	}
@@ -114,9 +111,7 @@ WHERE a.monitor_id=$1::uuid AND a.rule_key='consecutive_failures' AND a.enabled`
 }
 
 func openIncidentID(ctx context.Context, tx pgx.Tx, monitorID, ruleID string) (string, bool, error) {
-	var incidentID string
-	err := tx.QueryRow(ctx, `SELECT id::text FROM incidents
-WHERE monitor_id=$1::uuid AND alert_rule_id=$2::uuid AND status='open' FOR UPDATE`, monitorID, ruleID).Scan(&incidentID)
+	incidentID, err := database.New(tx).LockOpenIncident(ctx, database.LockOpenIncidentParams{MonitorID: monitorID, RuleID: ruleID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
@@ -124,12 +119,7 @@ WHERE monitor_id=$1::uuid AND alert_rule_id=$2::uuid AND status='open' FOR UPDAT
 }
 
 func openIncident(ctx context.Context, tx pgx.Tx, organizationID, environmentID, monitorID, ruleID, sourceJobID string, startedAt, now time.Time) error {
-	var incidentID string
-	err := tx.QueryRow(ctx, `INSERT INTO incidents(
- organization_id,environment_id,monitor_id,alert_rule_id,started_at,opened_at)
-VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6)
-ON CONFLICT(monitor_id,alert_rule_id) WHERE status='open' DO NOTHING
-RETURNING id::text`, organizationID, environmentID, monitorID, ruleID, startedAt, now).Scan(&incidentID)
+	incidentID, err := database.New(tx).CreateOpenIncident(ctx, database.CreateOpenIncidentParams{OrganizationID: organizationID, EnvironmentID: environmentID, MonitorID: monitorID, RuleID: ruleID, StartedAt: databaseTimestamp(startedAt), OpenedAt: databaseTimestamp(now)})
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, _, err = openIncidentID(ctx, tx, monitorID, ruleID)
 		return err
@@ -147,20 +137,19 @@ RETURNING id::text`, organizationID, environmentID, monitorID, ruleID, startedAt
 }
 
 func resolveIncident(ctx context.Context, tx pgx.Tx, incidentID, sourceJobID, kind string, actorUserID *string, reason string, now time.Time) error {
-	var organizationID, environmentID string
-	tag, err := tx.Exec(ctx, `UPDATE incidents SET status='resolved',resolved_at=$2,
- resolved_by_user_id=$3::uuid,resolution_kind=$4,resolution_reason=$5,updated_at=$2
-WHERE id=$1::uuid AND status='open'`, incidentID, now, actorUserID, kind, nullableReason(reason))
+	queries := database.New(tx)
+	rowsAffected, err := queries.ResolveOpenIncident(ctx, database.ResolveOpenIncidentParams{ResolvedAt: databaseTimestamp(now), ActorUserID: optionalString(actorUserID), ResolutionKind: pgtype.Text{String: kind, Valid: true}, ResolutionReason: reason, IncidentID: incidentID})
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		return nil
 	}
-	if err = tx.QueryRow(ctx, `SELECT organization_id::text,environment_id::text FROM incidents WHERE id=$1::uuid`, incidentID).Scan(&organizationID, &environmentID); err != nil {
+	tenant, err := queries.GetIncidentTenant(ctx, incidentID)
+	if err != nil {
 		return err
 	}
-	eventID, err := insertEvent(ctx, tx, organizationID, environmentID, incidentID,
+	eventID, err := insertEvent(ctx, tx, tenant.OrganizationID, tenant.EnvironmentID, incidentID,
 		"resolved", kind, actorUserID, sourceJobID, reason, now)
 	if err != nil {
 		return err
@@ -170,21 +159,16 @@ WHERE id=$1::uuid AND status='open'`, incidentID, now, actorUserID, kind, nullab
 }
 
 func insertEvent(ctx context.Context, tx pgx.Tx, organizationID, environmentID, incidentID, eventKey, eventType string, actorUserID *string, sourceJobID, reason string, now time.Time) (string, error) {
-	var eventID string
-	var source any
-	if strings.TrimSpace(sourceJobID) != "" {
-		source = sourceJobID
-	}
-	err := tx.QueryRow(ctx, `INSERT INTO incident_events(
- organization_id,environment_id,incident_id,event_key,event_type,actor_user_id,source_job_id,safe_reason,occurred_at)
-VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::uuid,$7::uuid,$8,$9)
-ON CONFLICT(incident_id,event_key) DO UPDATE SET event_key=EXCLUDED.event_key
-RETURNING id::text`, organizationID, environmentID, incidentID, eventKey, eventType,
-		actorUserID, source, nullableReason(reason), now).Scan(&eventID)
+	queries := database.New(tx)
+	eventID, err := queries.UpsertIncidentEvent(ctx, database.UpsertIncidentEventParams{
+		OrganizationID: organizationID, EnvironmentID: environmentID, IncidentID: incidentID,
+		EventKey: eventKey, EventType: eventType, ActorUserID: optionalString(actorUserID),
+		SourceJobID: strings.TrimSpace(sourceJobID), SafeReason: reason, OccurredAt: databaseTimestamp(now),
+	})
 	if err != nil {
 		return "", err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO api_refresh_events(organization_id,environment_id,event_type,resource_type,resource_id) VALUES($1::uuid,$2::uuid,'incident.changed','incident',$3::uuid)`, organizationID, environmentID, incidentID)
+	err = queries.InsertIncidentRefreshEvent(ctx, database.InsertIncidentRefreshEventParams{OrganizationID: organizationID, EnvironmentID: environmentID, IncidentID: incidentID})
 	return eventID, err
 }
 
@@ -209,8 +193,7 @@ func (service *Service) Acknowledge(ctx context.Context, userID, environmentID, 
 	}
 	now := service.now().UTC()
 	if incident.AcknowledgedAt == nil {
-		if _, err = tx.Exec(ctx, `UPDATE incidents SET acknowledged_at=$2,acknowledged_by_user_id=$3::uuid,updated_at=$2
-WHERE id=$1::uuid AND status='open' AND acknowledged_at IS NULL`, incidentID, now, userID); err != nil {
+		if err = database.New(tx).AcknowledgeOpenIncident(ctx, database.AcknowledgeOpenIncidentParams{AcknowledgedAt: databaseTimestamp(now), UserID: userID, IncidentID: incidentID}); err != nil {
 			return Incident{}, err
 		}
 		actor := userID
@@ -274,24 +257,19 @@ func (service *Service) Get(ctx context.Context, userID, environmentID, incident
 }
 
 func loadAuthorizedIncident(ctx context.Context, tx pgx.Tx, userID, environmentID, incidentID string) (Incident, authorization.Role, error) {
-	var incident Incident
-	var role string
-	err := tx.QueryRow(ctx, `SELECT i.id::text,i.organization_id::text,i.environment_id::text,i.monitor_id::text,
- i.status,i.started_at,i.opened_at,i.acknowledged_at,i.acknowledged_by_user_id::text,
- i.resolved_at,i.resolved_by_user_id::text,i.resolution_kind,i.resolution_reason,m.role
-FROM incidents i JOIN org_members m ON m.organization_id=i.organization_id AND m.user_id=$1::uuid
-WHERE i.environment_id=$2::uuid AND i.id=$3::uuid FOR UPDATE OF i`, userID, environmentID, incidentID).Scan(
-		&incident.ID, &incident.OrganizationID, &incident.EnvironmentID, &incident.MonitorID,
-		&incident.Status, &incident.StartedAt, &incident.OpenedAt, &incident.AcknowledgedAt,
-		&incident.AcknowledgedByUserID, &incident.ResolvedAt, &incident.ResolvedByUserID,
-		&incident.ResolutionKind, &incident.ResolutionReason, &role)
+	row, err := database.New(tx).LoadAuthorizedIncident(ctx, database.LoadAuthorizedIncidentParams{UserID: userID, EnvironmentID: environmentID, IncidentID: incidentID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Incident{}, "", ErrIncidentNotFound
 	}
 	if err != nil {
 		return Incident{}, "", fmt.Errorf("load incident: %w", err)
 	}
-	return incident, authorization.Role(role), nil
+	incident := Incident{ID: row.ID, OrganizationID: row.OrganizationID, EnvironmentID: row.EnvironmentID,
+		MonitorID: row.MonitorID, Status: row.Status, StartedAt: row.StartedAt.Time, OpenedAt: row.OpenedAt.Time,
+		AcknowledgedAt: optionalTimestamp(row.AcknowledgedAt), AcknowledgedByUserID: optionalUUID(row.AcknowledgedByUserID),
+		ResolvedAt: optionalTimestamp(row.ResolvedAt), ResolvedByUserID: optionalUUID(row.ResolvedByUserID),
+		ResolutionKind: optionalText(row.ResolutionKind), ResolutionReason: optionalText(row.ResolutionReason)}
+	return incident, authorization.Role(row.Role), nil
 }
 
 func validActionInput(userID, environmentID, incidentID, reason string) bool {
@@ -316,10 +294,35 @@ func validUUID(value string) bool {
 	return true
 }
 
-func nullableReason(reason string) any {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
+func databaseTimestamp(value time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: value, Valid: true}
+}
+
+func optionalString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func optionalTimestamp(value pgtype.Timestamptz) *time.Time {
+	if !value.Valid {
 		return nil
 	}
-	return reason
+	return &value.Time
+}
+
+func optionalText(value pgtype.Text) *string {
+	if !value.Valid {
+		return nil
+	}
+	return &value.String
+}
+
+func optionalUUID(value pgtype.UUID) *string {
+	if !value.Valid {
+		return nil
+	}
+	text := uuid.UUID(value.Bytes).String()
+	return &text
 }

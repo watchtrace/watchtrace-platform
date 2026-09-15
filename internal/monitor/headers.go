@@ -23,11 +23,11 @@ func (s *Service) headerNames(ciphertext []byte, version pgtype.Int4) []string {
 	return names
 }
 
-func nullableInt32(value int32) any {
+func nullableInt32(value int32) pgtype.Int4 {
 	if value == 0 {
-		return nil
+		return pgtype.Int4{}
 	}
-	return value
+	return pgtype.Int4{Int32: value, Valid: true}
 }
 func (s *Service) encryptHeaders(headers map[string]string) ([]byte, int32, []string, error) {
 	if len(headers) == 0 {

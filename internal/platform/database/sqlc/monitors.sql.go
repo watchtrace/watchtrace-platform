@@ -11,6 +11,41 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const acquireManualTestQueueLock = `-- name: AcquireManualTestQueueLock :exec
+SELECT pg_advisory_xact_lock(742019205)
+`
+
+func (q *Queries) AcquireManualTestQueueLock(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, acquireManualTestQueueLock)
+	return err
+}
+
+const closeMonitorSchedulePeriod = `-- name: CloseMonitorSchedulePeriod :exec
+UPDATE monitor_schedule_periods
+SET ends_at = CURRENT_TIMESTAMP
+WHERE monitor_id = $1::text::uuid
+  AND ends_at IS NULL
+`
+
+func (q *Queries) CloseMonitorSchedulePeriod(ctx context.Context, monitorID string) error {
+	_, err := q.db.Exec(ctx, closeMonitorSchedulePeriod, monitorID)
+	return err
+}
+
+const countActiveManualTestJobs = `-- name: CountActiveManualTestJobs :one
+SELECT count(*)
+FROM check_jobs
+WHERE job_type = 'manual_test'
+  AND state IN ('pending', 'pending_publish', 'published', 'running')
+`
+
+func (q *Queries) CountActiveManualTestJobs(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveManualTestJobs)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countOrganizationMonitors = `-- name: CountOrganizationMonitors :one
 SELECT count(*) AS monitor_count
 FROM monitors
@@ -23,6 +58,104 @@ func (q *Queries) CountOrganizationMonitors(ctx context.Context, organizationID 
 	var monitor_count int64
 	err := row.Scan(&monitor_count)
 	return monitor_count, err
+}
+
+const createManualCheckJob = `-- name: CreateManualCheckJob :one
+INSERT INTO check_jobs (
+    id, organization_id, environment_id, monitor_id, job_type, state,
+    scheduled_at, monitor_version, worker_pool_id, snapshot_hash, expires_at
+)
+VALUES (
+    $1::text::uuid,
+    $2::text::uuid,
+    $3::text::uuid,
+    $4::text::uuid,
+    'manual_test',
+    'pending_publish',
+    $5,
+    $6,
+    $7,
+    $8,
+    $9
+)
+RETURNING id::text AS id
+`
+
+type CreateManualCheckJobParams struct {
+	JobID          string
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+	ScheduledAt    pgtype.Timestamptz
+	MonitorVersion int64
+	WorkerPoolID   string
+	SnapshotHash   []byte
+	ExpiresAt      pgtype.Timestamptz
+}
+
+func (q *Queries) CreateManualCheckJob(ctx context.Context, arg CreateManualCheckJobParams) (string, error) {
+	row := q.db.QueryRow(ctx, createManualCheckJob,
+		arg.JobID,
+		arg.OrganizationID,
+		arg.EnvironmentID,
+		arg.MonitorID,
+		arg.ScheduledAt,
+		arg.MonitorVersion,
+		arg.WorkerPoolID,
+		arg.SnapshotHash,
+		arg.ExpiresAt,
+	)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
+const createManualDispatchOutbox = `-- name: CreateManualDispatchOutbox :exec
+INSERT INTO check_dispatch_outbox (
+    job_id, worker_pool_id, queue_url, message_body, schema_version,
+    platform_key_id, worker_encryption_key_id, snapshot_hash,
+    message_deduplication_id, message_group_id, expires_at
+)
+VALUES (
+    $1::text::uuid,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $1,
+    $1,
+    $9
+)
+`
+
+type CreateManualDispatchOutboxParams struct {
+	JobID                 string
+	WorkerPoolID          string
+	QueueUrl              string
+	MessageBody           []byte
+	SchemaVersion         int16
+	PlatformKeyID         string
+	WorkerEncryptionKeyID string
+	SnapshotHash          []byte
+	ExpiresAt             pgtype.Timestamptz
+}
+
+func (q *Queries) CreateManualDispatchOutbox(ctx context.Context, arg CreateManualDispatchOutboxParams) error {
+	_, err := q.db.Exec(ctx, createManualDispatchOutbox,
+		arg.JobID,
+		arg.WorkerPoolID,
+		arg.QueueUrl,
+		arg.MessageBody,
+		arg.SchemaVersion,
+		arg.PlatformKeyID,
+		arg.WorkerEncryptionKeyID,
+		arg.SnapshotHash,
+		arg.ExpiresAt,
+	)
+	return err
 }
 
 const createMonitor = `-- name: CreateMonitor :one
@@ -159,6 +292,34 @@ func (q *Queries) GetAccessibleEnvironmentOrganization(ctx context.Context, arg 
 	return i, err
 }
 
+const getDurableMonitorState = `-- name: GetDurableMonitorState :one
+SELECT monitor_reliability_states.display_state,
+       monitor_reliability_states.last_observed_scheduled_at
+FROM monitor_reliability_states
+JOIN monitors ON monitors.id = monitor_reliability_states.monitor_id
+WHERE monitors.organization_id = $1::text::uuid
+  AND monitors.environment_id = $2::text::uuid
+  AND monitors.id = $3::text::uuid
+`
+
+type GetDurableMonitorStateParams struct {
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+}
+
+type GetDurableMonitorStateRow struct {
+	DisplayState            string
+	LastObservedScheduledAt pgtype.Timestamptz
+}
+
+func (q *Queries) GetDurableMonitorState(ctx context.Context, arg GetDurableMonitorStateParams) (GetDurableMonitorStateRow, error) {
+	row := q.db.QueryRow(ctx, getDurableMonitorState, arg.OrganizationID, arg.EnvironmentID, arg.MonitorID)
+	var i GetDurableMonitorStateRow
+	err := row.Scan(&i.DisplayState, &i.LastObservedScheduledAt)
+	return i, err
+}
+
 const getEnvironmentMonitor = `-- name: GetEnvironmentMonitor :one
 SELECT
     id::text AS id,
@@ -258,6 +419,97 @@ func (q *Queries) GetLatestScheduledMonitorResult(ctx context.Context, arg GetLa
 	var succeeded bool
 	err := row.Scan(&succeeded)
 	return succeeded, err
+}
+
+const getManualDispatchWorkerPool = `-- name: GetManualDispatchWorkerPool :one
+SELECT encryption_key_id, encryption_public_key, network_policy_version, job_queue_url
+FROM worker_pools
+WHERE id = $1
+  AND enabled
+  AND lifecycle_state = 'active'
+  AND schema_min <= $2
+  AND schema_max >= $2
+FOR SHARE
+`
+
+type GetManualDispatchWorkerPoolParams struct {
+	WorkerPoolID  string
+	SchemaVersion int16
+}
+
+type GetManualDispatchWorkerPoolRow struct {
+	EncryptionKeyID      pgtype.Text
+	EncryptionPublicKey  []byte
+	NetworkPolicyVersion int32
+	JobQueueUrl          pgtype.Text
+}
+
+func (q *Queries) GetManualDispatchWorkerPool(ctx context.Context, arg GetManualDispatchWorkerPoolParams) (GetManualDispatchWorkerPoolRow, error) {
+	row := q.db.QueryRow(ctx, getManualDispatchWorkerPool, arg.WorkerPoolID, arg.SchemaVersion)
+	var i GetManualDispatchWorkerPoolRow
+	err := row.Scan(
+		&i.EncryptionKeyID,
+		&i.EncryptionPublicKey,
+		&i.NetworkPolicyVersion,
+		&i.JobQueueUrl,
+	)
+	return i, err
+}
+
+const hasScheduledQueuePressure = `-- name: HasScheduledQueuePressure :one
+SELECT
+    EXISTS (
+        SELECT 1
+        FROM monitors
+        WHERE paused_at IS NULL
+          AND deleted_at IS NULL
+          AND next_check_at < CURRENT_TIMESTAMP - INTERVAL '30 seconds'
+    )
+    OR (
+        SELECT count(*) >= 900
+        FROM check_jobs
+        WHERE job_type = 'scheduled'
+          AND state IN ('pending', 'pending_publish', 'published', 'running')
+    ) AS has_pressure
+`
+
+func (q *Queries) HasScheduledQueuePressure(ctx context.Context) (pgtype.Bool, error) {
+	row := q.db.QueryRow(ctx, hasScheduledQueuePressure)
+	var has_pressure pgtype.Bool
+	err := row.Scan(&has_pressure)
+	return has_pressure, err
+}
+
+const insertMonitorRefreshEvent = `-- name: InsertMonitorRefreshEvent :exec
+INSERT INTO api_refresh_events (
+    organization_id, environment_id, event_type, resource_type, resource_id
+)
+VALUES (
+    $1::text::uuid,
+    $2::text::uuid,
+    $3,
+    $4,
+    $5::text::uuid
+)
+`
+
+type InsertMonitorRefreshEventParams struct {
+	OrganizationID string
+	EnvironmentID  string
+	EventType      string
+	ResourceType   string
+	ResourceID     string
+}
+
+func (q *Queries) InsertMonitorRefreshEvent(ctx context.Context, arg InsertMonitorRefreshEventParams) error {
+	_, err := q.db.Exec(ctx, insertMonitorRefreshEvent,
+		arg.OrganizationID,
+		arg.EnvironmentID,
+		arg.EventType,
+		arg.ResourceType,
+		arg.ResourceID,
+	)
+	return err
 }
 
 const listEnvironmentMonitors = `-- name: ListEnvironmentMonitors :many
@@ -443,5 +695,338 @@ func (q *Queries) LockEnvironmentForMonitorCreation(ctx context.Context, arg Loc
 	row := q.db.QueryRow(ctx, lockEnvironmentForMonitorCreation, arg.UserID, arg.EnvironmentID)
 	var i LockEnvironmentForMonitorCreationRow
 	err := row.Scan(&i.OrganizationID, &i.Role)
+	return i, err
+}
+
+const lockManagedMonitor = `-- name: LockManagedMonitor :one
+SELECT monitors.id::text AS id,
+       monitors.organization_id::text AS organization_id,
+       monitors.environment_id::text AS environment_id,
+       monitors.version,
+       monitors.worker_pool_id,
+       monitors.target_url,
+       monitors.method,
+       monitors.timeout_seconds,
+       monitors.expected_status_min,
+       monitors.expected_status_max,
+       monitors.headers_ciphertext,
+       monitors.header_key_version,
+       org_members.role
+FROM monitors
+JOIN org_members
+  ON org_members.organization_id = monitors.organization_id
+ AND org_members.user_id = $1::text::uuid
+WHERE monitors.environment_id = $2::text::uuid
+  AND monitors.id = $3::text::uuid
+  AND monitors.deleted_at IS NULL
+FOR UPDATE OF monitors
+`
+
+type LockManagedMonitorParams struct {
+	UserID        string
+	EnvironmentID string
+	MonitorID     string
+}
+
+type LockManagedMonitorRow struct {
+	ID                string
+	OrganizationID    string
+	EnvironmentID     string
+	Version           int64
+	WorkerPoolID      string
+	TargetUrl         string
+	Method            string
+	TimeoutSeconds    int32
+	ExpectedStatusMin int16
+	ExpectedStatusMax int16
+	HeadersCiphertext []byte
+	HeaderKeyVersion  pgtype.Int4
+	Role              string
+}
+
+func (q *Queries) LockManagedMonitor(ctx context.Context, arg LockManagedMonitorParams) (LockManagedMonitorRow, error) {
+	row := q.db.QueryRow(ctx, lockManagedMonitor, arg.UserID, arg.EnvironmentID, arg.MonitorID)
+	var i LockManagedMonitorRow
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.EnvironmentID,
+		&i.Version,
+		&i.WorkerPoolID,
+		&i.TargetUrl,
+		&i.Method,
+		&i.TimeoutSeconds,
+		&i.ExpectedStatusMin,
+		&i.ExpectedStatusMax,
+		&i.HeadersCiphertext,
+		&i.HeaderKeyVersion,
+		&i.Role,
+	)
+	return i, err
+}
+
+const newManualJobID = `-- name: NewManualJobID :one
+SELECT gen_random_uuid()::text AS id
+`
+
+func (q *Queries) NewManualJobID(ctx context.Context) (string, error) {
+	row := q.db.QueryRow(ctx, newManualJobID)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
+const openMonitorSchedulePeriod = `-- name: OpenMonitorSchedulePeriod :exec
+INSERT INTO monitor_schedule_periods (
+    organization_id, environment_id, monitor_id, monitor_version,
+    interval_seconds, worker_pool_id, starts_at, first_slot_at
+)
+SELECT organization_id, environment_id, id, version, interval_seconds,
+       worker_pool_id, CURRENT_TIMESTAMP, next_check_at
+FROM monitors
+WHERE id = $1::text::uuid
+`
+
+func (q *Queries) OpenMonitorSchedulePeriod(ctx context.Context, monitorID string) error {
+	_, err := q.db.Exec(ctx, openMonitorSchedulePeriod, monitorID)
+	return err
+}
+
+const setManagedMonitorPaused = `-- name: SetManagedMonitorPaused :one
+UPDATE monitors
+SET paused_at = CASE
+      WHEN $1::boolean THEN CURRENT_TIMESTAMP
+      ELSE NULL
+    END,
+    next_check_at = CASE
+      WHEN $1::boolean THEN next_check_at
+      ELSE CURRENT_TIMESTAMP
+        + mod(hashtextextended(id::text, 0) & 2147483647,
+              interval_seconds::bigint) * INTERVAL '1 second'
+    END,
+    version = version + 1,
+    updated_at = CURRENT_TIMESTAMP
+WHERE organization_id = $2::text::uuid
+  AND environment_id = $3::text::uuid
+  AND id = $4::text::uuid
+  AND deleted_at IS NULL
+RETURNING id::text AS id, organization_id::text AS organization_id,
+          environment_id::text AS environment_id, name, target_url, method,
+          interval_seconds, timeout_seconds, expected_status_min,
+          expected_status_max, version, paused_at, worker_pool_id,
+          headers_ciphertext, header_key_version, created_at, updated_at
+`
+
+type SetManagedMonitorPausedParams struct {
+	Paused         bool
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+}
+
+type SetManagedMonitorPausedRow struct {
+	ID                string
+	OrganizationID    string
+	EnvironmentID     string
+	Name              string
+	TargetUrl         string
+	Method            string
+	IntervalSeconds   int32
+	TimeoutSeconds    int32
+	ExpectedStatusMin int16
+	ExpectedStatusMax int16
+	Version           int64
+	PausedAt          pgtype.Timestamptz
+	WorkerPoolID      string
+	HeadersCiphertext []byte
+	HeaderKeyVersion  pgtype.Int4
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+func (q *Queries) SetManagedMonitorPaused(ctx context.Context, arg SetManagedMonitorPausedParams) (SetManagedMonitorPausedRow, error) {
+	row := q.db.QueryRow(ctx, setManagedMonitorPaused,
+		arg.Paused,
+		arg.OrganizationID,
+		arg.EnvironmentID,
+		arg.MonitorID,
+	)
+	var i SetManagedMonitorPausedRow
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.EnvironmentID,
+		&i.Name,
+		&i.TargetUrl,
+		&i.Method,
+		&i.IntervalSeconds,
+		&i.TimeoutSeconds,
+		&i.ExpectedStatusMin,
+		&i.ExpectedStatusMax,
+		&i.Version,
+		&i.PausedAt,
+		&i.WorkerPoolID,
+		&i.HeadersCiphertext,
+		&i.HeaderKeyVersion,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const softDeleteMonitor = `-- name: SoftDeleteMonitor :execrows
+UPDATE monitors
+SET deleted_at = CURRENT_TIMESTAMP, version = version + 1,
+    updated_at = CURRENT_TIMESTAMP
+WHERE organization_id = $1::text::uuid
+  AND environment_id = $2::text::uuid
+  AND id = $3::text::uuid
+  AND deleted_at IS NULL
+`
+
+type SoftDeleteMonitorParams struct {
+	OrganizationID string
+	EnvironmentID  string
+	MonitorID      string
+}
+
+func (q *Queries) SoftDeleteMonitor(ctx context.Context, arg SoftDeleteMonitorParams) (int64, error) {
+	result, err := q.db.Exec(ctx, softDeleteMonitor, arg.OrganizationID, arg.EnvironmentID, arg.MonitorID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const storeSecureMonitorConfiguration = `-- name: StoreSecureMonitorConfiguration :exec
+UPDATE monitors
+SET method = $1,
+    headers_ciphertext = $2,
+    header_key_version = $3,
+    worker_pool_id = $4,
+    next_check_at = CURRENT_TIMESTAMP
+      + mod(hashtextextended(id::text, 0) & 2147483647, interval_seconds::bigint)
+        * INTERVAL '1 second'
+WHERE id = $5::text::uuid
+`
+
+type StoreSecureMonitorConfigurationParams struct {
+	Method            string
+	HeadersCiphertext []byte
+	HeaderKeyVersion  pgtype.Int4
+	WorkerPoolID      string
+	MonitorID         string
+}
+
+func (q *Queries) StoreSecureMonitorConfiguration(ctx context.Context, arg StoreSecureMonitorConfigurationParams) error {
+	_, err := q.db.Exec(ctx, storeSecureMonitorConfiguration,
+		arg.Method,
+		arg.HeadersCiphertext,
+		arg.HeaderKeyVersion,
+		arg.WorkerPoolID,
+		arg.MonitorID,
+	)
+	return err
+}
+
+const updateManagedMonitor = `-- name: UpdateManagedMonitor :one
+UPDATE monitors
+SET name = $1,
+    target_url = $2,
+    method = $3,
+    interval_seconds = $4::integer,
+    timeout_seconds = $5,
+    expected_status_min = $6,
+    expected_status_max = $7,
+    headers_ciphertext = $8,
+    header_key_version = $9,
+    worker_pool_id = $10,
+    version = version + 1,
+    updated_at = CURRENT_TIMESTAMP,
+    next_check_at = CASE
+      WHEN paused_at IS NULL THEN CURRENT_TIMESTAMP
+        + mod(hashtextextended(id::text, 0) & 2147483647,
+              $4::bigint) * INTERVAL '1 second'
+      ELSE next_check_at
+    END
+WHERE organization_id = $11::text::uuid
+  AND environment_id = $12::text::uuid
+  AND id = $13::text::uuid
+  AND deleted_at IS NULL
+RETURNING id::text AS id, organization_id::text AS organization_id,
+          environment_id::text AS environment_id, name, target_url, method,
+          interval_seconds, timeout_seconds, expected_status_min,
+          expected_status_max, version, paused_at, worker_pool_id,
+          created_at, updated_at
+`
+
+type UpdateManagedMonitorParams struct {
+	Name              string
+	TargetUrl         string
+	Method            string
+	IntervalSeconds   int32
+	TimeoutSeconds    int32
+	ExpectedStatusMin int16
+	ExpectedStatusMax int16
+	HeadersCiphertext []byte
+	HeaderKeyVersion  pgtype.Int4
+	WorkerPoolID      string
+	OrganizationID    string
+	EnvironmentID     string
+	MonitorID         string
+}
+
+type UpdateManagedMonitorRow struct {
+	ID                string
+	OrganizationID    string
+	EnvironmentID     string
+	Name              string
+	TargetUrl         string
+	Method            string
+	IntervalSeconds   int32
+	TimeoutSeconds    int32
+	ExpectedStatusMin int16
+	ExpectedStatusMax int16
+	Version           int64
+	PausedAt          pgtype.Timestamptz
+	WorkerPoolID      string
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+func (q *Queries) UpdateManagedMonitor(ctx context.Context, arg UpdateManagedMonitorParams) (UpdateManagedMonitorRow, error) {
+	row := q.db.QueryRow(ctx, updateManagedMonitor,
+		arg.Name,
+		arg.TargetUrl,
+		arg.Method,
+		arg.IntervalSeconds,
+		arg.TimeoutSeconds,
+		arg.ExpectedStatusMin,
+		arg.ExpectedStatusMax,
+		arg.HeadersCiphertext,
+		arg.HeaderKeyVersion,
+		arg.WorkerPoolID,
+		arg.OrganizationID,
+		arg.EnvironmentID,
+		arg.MonitorID,
+	)
+	var i UpdateManagedMonitorRow
+	err := row.Scan(
+		&i.ID,
+		&i.OrganizationID,
+		&i.EnvironmentID,
+		&i.Name,
+		&i.TargetUrl,
+		&i.Method,
+		&i.IntervalSeconds,
+		&i.TimeoutSeconds,
+		&i.ExpectedStatusMin,
+		&i.ExpectedStatusMax,
+		&i.Version,
+		&i.PausedAt,
+		&i.WorkerPoolID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
 	return i, err
 }

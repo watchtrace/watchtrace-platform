@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/authorization"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 func (s *Service) UpdateMember(ctx context.Context, actorID, organizationID, memberID string, role authorization.Role, notifications *bool) (Member, error) {
@@ -30,14 +31,14 @@ func (s *Service) UpdateMember(ctx context.Context, actorID, organizationID, mem
 	if role != "" && actorRole != authorization.RoleOwner && role == authorization.RoleAdmin {
 		return Member{}, ErrForbidden
 	}
-	var existingRole authorization.Role
-	err = tx.QueryRow(ctx, `SELECT role FROM org_members WHERE organization_id=$1::uuid AND user_id=$2::uuid FOR UPDATE`, organizationID, memberID).Scan(&existingRole)
+	existingRoleValue, err := database.New(tx).LockOrganizationMemberRole(ctx, database.LockOrganizationMemberRoleParams{OrganizationID: organizationID, UserID: memberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Member{}, ErrMemberNotFound
 	}
 	if err != nil {
 		return Member{}, err
 	}
+	existingRole := authorization.Role(existingRoleValue)
 	if existingRole == authorization.RoleOwner {
 		return Member{}, ErrForbidden
 	}
@@ -45,17 +46,17 @@ func (s *Service) UpdateMember(ctx context.Context, actorID, organizationID, mem
 		role = existingRole
 	}
 	if notifications == nil {
-		var current bool
-		if err = tx.QueryRow(ctx, `SELECT incident_notifications_enabled FROM org_members WHERE organization_id=$1::uuid AND user_id=$2::uuid`, organizationID, memberID).Scan(&current); err != nil {
-			return Member{}, err
+		current, preferenceErr := database.New(tx).GetOrganizationMemberNotificationPreference(ctx, database.GetOrganizationMemberNotificationPreferenceParams{OrganizationID: organizationID, UserID: memberID})
+		if preferenceErr != nil {
+			return Member{}, preferenceErr
 		}
 		notifications = &current
 	}
-	var m Member
-	err = tx.QueryRow(ctx, `UPDATE org_members m SET role=$3,incident_notifications_enabled=$4,updated_at=CURRENT_TIMESTAMP FROM users u WHERE m.organization_id=$1::uuid AND m.user_id=$2::uuid AND u.id=m.user_id RETURNING m.user_id::text,u.email,m.role,m.incident_notifications_enabled,m.created_at`, organizationID, memberID, role, *notifications).Scan(&m.UserID, &m.Email, &m.Role, &m.IncidentNotificationsEnabled, &m.CreatedAt)
+	row, err := database.New(tx).UpdateOrganizationMember(ctx, database.UpdateOrganizationMemberParams{Role: string(role), IncidentNotificationsEnabled: *notifications, OrganizationID: organizationID, UserID: memberID})
 	if err != nil {
-		return m, err
+		return Member{}, err
 	}
+	m := Member{UserID: row.UserID, Email: row.Email, Role: authorization.Role(row.Role), IncidentNotificationsEnabled: row.IncidentNotificationsEnabled, CreatedAt: row.CreatedAt.Time}
 	if err = recordTenantChange(ctx, tx, organizationID, nil, actorID, "membership.updated", "membership", memberID); err != nil {
 		return m, err
 	}
@@ -81,17 +82,18 @@ func (s *Service) RemoveMember(ctx context.Context, actorID, organizationID, mem
 	if !authorization.Allows(role, authorization.PermissionMembersManage) {
 		return ErrForbidden
 	}
-	var target authorization.Role
-	if err = tx.QueryRow(ctx, `SELECT role FROM org_members WHERE organization_id=$1::uuid AND user_id=$2::uuid`, organizationID, memberID).Scan(&target); errors.Is(err, pgx.ErrNoRows) {
+	targetValue, err := database.New(tx).GetOrganizationMemberRole(ctx, database.GetOrganizationMemberRoleParams{OrganizationID: organizationID, UserID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrMemberNotFound
 	}
 	if err != nil {
 		return err
 	}
+	target := authorization.Role(targetValue)
 	if target == authorization.RoleOwner || (role != authorization.RoleOwner && target == authorization.RoleAdmin) {
 		return ErrForbidden
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM org_members WHERE organization_id=$1::uuid AND user_id=$2::uuid`, organizationID, memberID); err != nil {
+	if err = database.New(tx).DeleteOrganizationMember(ctx, database.DeleteOrganizationMemberParams{OrganizationID: organizationID, UserID: memberID}); err != nil {
 		return err
 	}
 	if err = recordTenantChange(ctx, tx, organizationID, nil, actorID, "membership.removed", "membership", memberID); err != nil {

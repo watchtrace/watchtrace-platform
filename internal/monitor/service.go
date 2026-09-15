@@ -218,15 +218,14 @@ func (s *Service) Create(
 	if err != nil {
 		return Monitor{}, fmt.Errorf("create monitor: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE monitors SET method=$1, headers_ciphertext=$2,
-header_key_version=$3, worker_pool_id=$4,
-next_check_at=CURRENT_TIMESTAMP + mod(hashtextextended(id::text,0) & 2147483647,interval_seconds::bigint)*INTERVAL '1 second'
-WHERE id=$5::uuid`, normalized.Method,
-		ciphertext, nullableInt32(keyVersion), normalized.WorkerPoolID, created.ID); err != nil {
+	if err := queries.StoreSecureMonitorConfiguration(ctx, database.StoreSecureMonitorConfigurationParams{
+		Method: normalized.Method, HeadersCiphertext: ciphertext,
+		HeaderKeyVersion: nullableInt32(keyVersion), WorkerPoolID: normalized.WorkerPoolID,
+		MonitorID: created.ID,
+	}); err != nil {
 		return Monitor{}, fmt.Errorf("store secure monitor configuration: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO monitor_schedule_periods(organization_id,environment_id,monitor_id,monitor_version,interval_seconds,worker_pool_id,starts_at,first_slot_at)
-SELECT organization_id,environment_id,id,version,interval_seconds,worker_pool_id,CURRENT_TIMESTAMP,next_check_at FROM monitors WHERE id=$1::uuid`, created.ID); err != nil {
+	if err := queries.OpenMonitorSchedulePeriod(ctx, created.ID); err != nil {
 		return Monitor{}, fmt.Errorf("record monitor schedule period: %w", err)
 	}
 	if err = recordRefresh(ctx, tx, organizationID, environmentID, "monitor.changed", "monitor", created.ID); err != nil {

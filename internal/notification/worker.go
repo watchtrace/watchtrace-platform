@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 const maximumAttempts = 4
@@ -89,20 +91,7 @@ func EnqueueIncidentEventTx(ctx context.Context, tx pgx.Tx, eventID, transition 
 	if transition != "opened" && transition != "resolved" {
 		return 0, ErrInvalidConfiguration
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO notification_outbox(
- organization_id,incident_id,incident_event_id,recipient_user_id,recipient_email,transition)
-SELECT e.organization_id,e.incident_id,e.id,m.user_id,lower(btrim(u.email)),$2
-FROM incident_events e
-JOIN org_members m ON m.organization_id=e.organization_id
-JOIN users u ON u.id=m.user_id
-WHERE e.id=$1::uuid AND u.email_verified_at IS NOT NULL
-  AND m.incident_notifications_enabled
-  AND m.role IN('owner','admin','member','viewer')
-ON CONFLICT(incident_event_id,recipient_user_id,channel) DO NOTHING`, eventID, transition)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	return database.New(tx).EnqueueIncidentNotifications(ctx, database.EnqueueIncidentNotificationsParams{Transition: transition, EventID: eventID})
 }
 
 type claimedDelivery struct {
@@ -151,17 +140,14 @@ func (worker *Worker) ReclaimExpired(ctx context.Context, now time.Time) (int64,
 		return 0, err
 	}
 	defer tx.Rollback(context.Background())
-	tag, err := tx.Exec(ctx, `UPDATE notification_outbox SET
- state='pending',next_attempt_at=LEAST(next_attempt_at,$1),lease_owner=NULL,lease_token=NULL,
- lease_expires_at=NULL,updated_at=$1
-WHERE state='leased' AND lease_expires_at<=$1`, now.UTC())
+	rowsAffected, err := database.New(tx).ReclaimExpiredNotificationLeases(ctx, notificationTimestamp(now.UTC()))
 	if err != nil {
 		return 0, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return 0, err
 	}
-	return tag.RowsAffected(), nil
+	return rowsAffected, nil
 }
 
 func (worker *Worker) claim(ctx context.Context, now time.Time) (claimedDelivery, bool, error) {
@@ -170,26 +156,19 @@ func (worker *Worker) claim(ctx context.Context, now time.Time) (claimedDelivery
 		return claimedDelivery{}, false, err
 	}
 	defer tx.Rollback(context.Background())
-	var delivery claimedDelivery
-	err = tx.QueryRow(ctx, `WITH candidate AS (
- SELECT delivery_id FROM notification_outbox
- WHERE state='pending' AND next_attempt_at<=$1 AND attempt_count<4
- ORDER BY next_attempt_at,created_at,delivery_id
- FOR UPDATE SKIP LOCKED LIMIT 1
-)
-UPDATE notification_outbox o SET state='leased',lease_owner=$2,lease_token=gen_random_uuid(),
- lease_expires_at=$3,updated_at=$1
-FROM candidate c WHERE o.delivery_id=c.delivery_id
-RETURNING o.delivery_id::text,o.incident_id::text,o.organization_id::text,(SELECT environment_id::text FROM incidents WHERE id=o.incident_id),o.recipient_email,o.transition,
- o.lease_token::text,o.attempt_count+1`, now, worker.workerID, now.Add(worker.lease)).Scan(
-		&delivery.deliveryID, &delivery.incidentID, &delivery.organizationID, &delivery.environmentID, &delivery.recipient, &delivery.transition,
-		&delivery.leaseToken, &delivery.attempt)
+	row, err := database.New(tx).ClaimNotificationDelivery(ctx, database.ClaimNotificationDeliveryParams{
+		WorkerID:       pgtype.Text{String: worker.workerID, Valid: true},
+		LeaseExpiresAt: notificationTimestamp(now.Add(worker.lease)), ClaimedAt: notificationTimestamp(now),
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return claimedDelivery{}, false, nil
 	}
 	if err != nil {
 		return claimedDelivery{}, false, err
 	}
+	delivery := claimedDelivery{deliveryID: row.DeliveryID, incidentID: row.IncidentID, organizationID: row.OrganizationID,
+		environmentID: row.EnvironmentID, recipient: row.RecipientEmail, transition: row.Transition,
+		leaseToken: row.LeaseToken, attempt: int(row.AttemptNumber)}
 	if err = tx.Commit(ctx); err != nil {
 		return claimedDelivery{}, false, err
 	}
@@ -204,20 +183,19 @@ func (worker *Worker) accept(ctx context.Context, delivery claimedDelivery, atte
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	tag, err := tx.Exec(ctx, `UPDATE notification_outbox SET state='accepted',attempt_count=$3,
- provider_message_id=$4,last_provider_status=$5,accepted_at=$6,
- lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=$6
-WHERE delivery_id=$1::uuid AND state='leased' AND lease_token=$2::uuid`,
-		delivery.deliveryID, delivery.leaseToken, delivery.attempt, messageID, status, attemptedAt)
+	queries := database.New(tx)
+	rowsAffected, err := queries.AcceptNotificationDelivery(ctx, database.AcceptNotificationDeliveryParams{
+		AttemptNumber: int16(delivery.attempt), ProviderMessageID: notificationText(messageID),
+		ProviderStatus: notificationText(status), AttemptedAt: notificationTimestamp(attemptedAt),
+		DeliveryID: delivery.deliveryID, LeaseToken: delivery.leaseToken,
+	})
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
+	if rowsAffected != 1 {
 		return ErrLeaseLost
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO notification_attempts(
- delivery_id,attempt_number,outcome,provider_status,attempted_at)
-VALUES($1::uuid,$2,'accepted',$3,$4)`, delivery.deliveryID, delivery.attempt, status, attemptedAt); err != nil {
+	if err = queries.InsertNotificationAttempt(ctx, database.InsertNotificationAttemptParams{DeliveryID: delivery.deliveryID, AttemptNumber: int16(delivery.attempt), Outcome: "accepted", ProviderStatus: status, AttemptedAt: notificationTimestamp(attemptedAt)}); err != nil {
 		return err
 	}
 	if err = insertRefreshEvent(ctx, tx, delivery); err != nil {
@@ -240,20 +218,19 @@ func (worker *Worker) retryOrFail(ctx context.Context, delivery claimedDelivery,
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	tag, err := tx.Exec(ctx, `UPDATE notification_outbox SET state=$3,attempt_count=$4,
-	 next_attempt_at=$5,last_provider_status=$6,failed_at=CASE WHEN $3::text='failed' THEN $7::timestamptz ELSE NULL END,
- lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=$7
-WHERE delivery_id=$1::uuid AND state='leased' AND lease_token=$2::uuid`,
-		delivery.deliveryID, delivery.leaseToken, state, delivery.attempt, nextAttempt, status, attemptedAt)
+	queries := database.New(tx)
+	rowsAffected, err := queries.CompleteFailedNotificationAttempt(ctx, database.CompleteFailedNotificationAttemptParams{
+		State: state, AttemptNumber: int16(delivery.attempt), NextAttemptAt: notificationTimestamp(nextAttempt),
+		ProviderStatus: notificationText(status), AttemptedAt: notificationTimestamp(attemptedAt),
+		DeliveryID: delivery.deliveryID, LeaseToken: delivery.leaseToken,
+	})
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
+	if rowsAffected != 1 {
 		return ErrLeaseLost
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO notification_attempts(
- delivery_id,attempt_number,outcome,provider_status,attempted_at)
-VALUES($1::uuid,$2,$3,$4,$5)`, delivery.deliveryID, delivery.attempt, outcome, status, attemptedAt); err != nil {
+	if err = queries.InsertNotificationAttempt(ctx, database.InsertNotificationAttemptParams{DeliveryID: delivery.deliveryID, AttemptNumber: int16(delivery.attempt), Outcome: outcome, ProviderStatus: status, AttemptedAt: notificationTimestamp(attemptedAt)}); err != nil {
 		return err
 	}
 	if err = insertRefreshEvent(ctx, tx, delivery); err != nil {
@@ -263,8 +240,15 @@ VALUES($1::uuid,$2,$3,$4,$5)`, delivery.deliveryID, delivery.attempt, outcome, s
 }
 
 func insertRefreshEvent(ctx context.Context, tx pgx.Tx, delivery claimedDelivery) error {
-	_, err := tx.Exec(ctx, `INSERT INTO api_refresh_events(organization_id,environment_id,event_type,resource_type,resource_id) VALUES($1::uuid,$2::uuid,'notification.changed','notification',$3::uuid)`, delivery.organizationID, delivery.environmentID, delivery.deliveryID)
-	return err
+	return database.New(tx).InsertNotificationRefreshEvent(ctx, database.InsertNotificationRefreshEventParams{OrganizationID: delivery.organizationID, EnvironmentID: delivery.environmentID, DeliveryID: delivery.deliveryID})
+}
+
+func notificationTimestamp(value time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: value, Valid: true}
+}
+
+func notificationText(value string) pgtype.Text {
+	return pgtype.Text{String: value, Valid: true}
 }
 
 func retryDelay(completedAttempt int) time.Duration {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func encodeCursor(at time.Time, id string) string {
@@ -26,15 +27,31 @@ func decodeCursor(value string) (time.Time, string, error) {
 	at, err := time.Parse(time.RFC3339Nano, parts[0])
 	return at, parts[1], err
 }
-func nullableTime(v time.Time) any {
-	if v.IsZero() {
-		return nil
-	}
-	return v
+func databaseTimestamp(value time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: value, Valid: !value.IsZero()}
 }
-func nullableString(v string) any {
-	if v == "" {
+func optionalTimestamp(value pgtype.Timestamptz) *time.Time {
+	if !value.Valid {
 		return nil
 	}
-	return v
+	return &value.Time
+}
+func optionalText(value pgtype.Text) *string {
+	if !value.Valid {
+		return nil
+	}
+	return &value.String
+}
+func optionalInt16(value pgtype.Int2) *int16 {
+	if !value.Valid {
+		return nil
+	}
+	return &value.Int16
+}
+func optionalUUID(value pgtype.UUID) *string {
+	if !value.Valid {
+		return nil
+	}
+	text := uuid.UUID(value.Bytes).String()
+	return &text
 }

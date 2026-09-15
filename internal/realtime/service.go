@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/authorization"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 var ErrNotFound = errors.New("event stream not found")
@@ -37,28 +38,24 @@ func (s *Service) Poll(ctx context.Context, userID, environmentID string, after 
 		return nil, err
 	}
 	defer tx.Rollback(context.Background())
-	var role authorization.Role
-	err = tx.QueryRow(ctx, `SELECT m.role FROM environments e JOIN organizations o ON o.id=e.organization_id AND o.deleted_at IS NULL JOIN org_members m ON m.organization_id=e.organization_id AND m.user_id=$1::uuid WHERE e.id=$2::uuid`, userID, environmentID).Scan(&role)
-	if errors.Is(err, pgx.ErrNoRows) || !authorization.Allows(role, authorization.PermissionTenantRead) {
+	queries := database.New(tx)
+	authorized, err := queries.GetAccessibleEnvironmentOrganization(ctx, database.GetAccessibleEnvironmentOrganizationParams{UserID: userID, EnvironmentID: environmentID})
+	if errors.Is(err, pgx.ErrNoRows) || !authorization.Allows(authorization.Role(authorized.Role), authorization.PermissionTenantRead) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(ctx, `SELECT id,event_type,resource_type,resource_id::text,occurred_at FROM api_refresh_events WHERE environment_id=$1::uuid AND id>$2 ORDER BY id LIMIT $3`, environmentID, after, limit)
+	rows, err := queries.ListEnvironmentRefreshEvents(ctx, database.ListEnvironmentRefreshEventsParams{EnvironmentID: environmentID, AfterID: after, ResultLimit: int32(limit)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	events := []Event{}
-	for rows.Next() {
-		var e Event
-		if err = rows.Scan(&e.ID, &e.Type, &e.ResourceType, &e.ResourceID, &e.OccurredAt); err != nil {
-			return nil, err
-		}
+	events := make([]Event, 0, len(rows))
+	for _, row := range rows {
+		e := Event{ID: row.ID, Type: row.EventType, ResourceType: row.ResourceType, ResourceID: row.ResourceID, OccurredAt: row.OccurredAt.Time}
 		events = append(events, e)
 	}
-	return events, rows.Err()
+	return events, nil
 }
 func ParseLastID(value string) (int64, error) {
 	if value == "" {

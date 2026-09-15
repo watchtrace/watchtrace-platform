@@ -2,9 +2,12 @@ package backendapi
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/authorization"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 )
 
@@ -23,16 +26,24 @@ func (s *Service) Dashboard(ctx context.Context, userID, environmentID string, q
 	}
 	var d Dashboard
 	d.GeneratedAt = time.Now().UTC()
-	err = tx.QueryRow(ctx, `SELECT count(*)FILTER(WHERE COALESCE(r.display_state,'unknown')='healthy'),count(*)FILTER(WHERE COALESCE(r.display_state,'unknown')='degraded'),count(*)FILTER(WHERE COALESCE(r.display_state,'unknown')='down'),count(*)FILTER(WHERE COALESCE(r.display_state,'unknown')='unknown') FROM monitors m LEFT JOIN monitor_reliability_states r ON r.monitor_id=m.id WHERE m.environment_id=$1::uuid AND m.deleted_at IS NULL`, environmentID).Scan(&d.States.Healthy, &d.States.Degraded, &d.States.Down, &d.States.Unknown)
+	queries := database.New(tx)
+	states, err := queries.GetEnvironmentMonitorStateCounts(ctx, environmentID)
 	if err != nil {
 		return d, err
 	}
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM incidents WHERE environment_id=$1::uuid AND status='open'`, environmentID).Scan(&d.OpenIncidents); err != nil {
-		return d, err
-	}
-	err = tx.QueryRow(ctx, `WITH expected AS (SELECT p.monitor_id,slot FROM monitor_schedule_periods p CROSS JOIN LATERAL generate_series(p.first_slot_at+GREATEST(0,ceil(EXTRACT(EPOCH FROM ($2-p.first_slot_at))/p.interval_seconds)::bigint)*make_interval(secs=>p.interval_seconds),LEAST(COALESCE(p.ends_at,$3),$3)-INTERVAL '1 microsecond',make_interval(secs=>p.interval_seconds)) slot WHERE p.environment_id=$1::uuid AND p.starts_at<$3 AND COALESCE(p.ends_at,$3)>$2 AND slot>=GREATEST($2,p.starts_at)),a AS(SELECT count(*)::bigint expected,count(h.job_id)::bigint observed,count(h.job_id)FILTER(WHERE h.succeeded)::bigint successful,avg(h.total_duration_microseconds)::float8/1000 latency FROM expected e LEFT JOIN health_checks h ON h.monitor_id=e.monitor_id AND h.job_type='scheduled' AND h.scheduled_at=e.slot) SELECT expected,observed,successful,latency FROM a`, environmentID, q.From, q.To).Scan(&d.Reliability.Expected, &d.Reliability.Observed, &d.Reliability.Successful, &d.Reliability.AverageLatencyMilliseconds)
+	d.States = StateCounts{Healthy: states.Healthy, Degraded: states.Degraded, Down: states.Down, Unknown: states.Unknown}
+	d.OpenIncidents, err = queries.CountOpenEnvironmentIncidents(ctx, environmentID)
 	if err != nil {
 		return d, err
+	}
+	result, err := queries.GetEnvironmentReliability(ctx, database.GetEnvironmentReliabilityParams{FromAt: databaseTimestamp(q.From), ToAt: databaseTimestamp(q.To), EnvironmentID: environmentID})
+	if err != nil {
+		return d, err
+	}
+	d.Reliability.Expected, d.Reliability.Observed, d.Reliability.Successful = result.Expected, result.Observed, result.Successful
+	if result.LatencySamples > 0 {
+		average := float64(result.LatencyTotalUs) / float64(result.LatencySamples) / 1000
+		d.Reliability.AverageLatencyMilliseconds = &average
 	}
 	normalized := reliability.Report{Expected: d.Reliability.Expected, Observed: d.Reliability.Observed, Successful: d.Reliability.Successful}.Normalize()
 	d.Reliability.From = q.From
@@ -41,13 +52,13 @@ func (s *Service) Dashboard(ctx context.Context, userID, environmentID string, q
 	d.Reliability.ObservedUptime = normalized.ObservedUptime
 	d.Reliability.Coverage = normalized.Coverage
 	d.Reliability.Fresh = true
-	var invalidated *time.Time
-	if err = tx.QueryRow(ctx, `SELECT min(i.invalidated_at) FROM monitor_rollup_invalidations i JOIN monitors m ON m.id=i.monitor_id WHERE m.environment_id=$1::uuid AND i.bucket_start<$3 AND i.bucket_start+CASE i.bucket_kind WHEN 'hourly' THEN INTERVAL '1 hour' ELSE INTERVAL '1 day' END>$2`, environmentID, q.From, q.To).Scan(&invalidated); err != nil {
+	invalidated, err := queries.GetFirstEnvironmentRollupInvalidation(ctx, database.GetFirstEnvironmentRollupInvalidationParams{EnvironmentID: environmentID, ToAt: databaseTimestamp(q.To), FromAt: databaseTimestamp(q.From)})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return d, err
 	}
-	if invalidated != nil {
+	if err == nil {
 		d.Reliability.Fresh = false
-		d.Reliability.CorrectedAt = invalidated
+		d.Reliability.CorrectedAt = &invalidated.Time
 	}
 	return d, nil
 }

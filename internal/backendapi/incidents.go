@@ -7,6 +7,7 @@ import (
 
 	"github.com/watchtrace/watchtrace-platform/internal/authorization"
 	"github.com/watchtrace/watchtrace-platform/internal/incident"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 func (s *Service) ListIncidents(ctx context.Context, userID, environmentID string, q PageQuery) (IncidentPage, error) {
@@ -33,17 +34,21 @@ func (s *Service) ListIncidents(ctx context.Context, userID, environmentID strin
 			return IncidentPage{}, ErrInvalidQuery
 		}
 	}
-	rows, err := tx.Query(ctx, `SELECT id::text,organization_id::text,environment_id::text,monitor_id::text,status,started_at,opened_at,acknowledged_at,acknowledged_by_user_id::text,resolved_at,resolved_by_user_id::text,resolution_kind,resolution_reason FROM incidents WHERE environment_id=$1::uuid AND opened_at>=$2 AND opened_at<$3 AND ($4='' OR status=$4) AND ($5::timestamptz IS NULL OR (opened_at,id)<($5,$6::uuid)) ORDER BY opened_at DESC,id DESC LIMIT $7`, environmentID, q.From, q.To, q.Status, nullableTime(cursorTime), nullableString(cursorID), q.Limit+1)
+	rows, err := database.New(tx).ListBackendIncidents(ctx, database.ListBackendIncidentsParams{
+		EnvironmentID: environmentID, FromAt: databaseTimestamp(q.From), ToAt: databaseTimestamp(q.To),
+		Status: q.Status, HasCursor: q.Cursor != "", CursorAt: databaseTimestamp(cursorTime),
+		CursorID: cursorID, ResultLimit: int32(q.Limit + 1),
+	})
 	if err != nil {
 		return IncidentPage{}, err
 	}
-	defer rows.Close()
-	items := []incident.Incident{}
-	for rows.Next() {
-		var v incident.Incident
-		if err = rows.Scan(&v.ID, &v.OrganizationID, &v.EnvironmentID, &v.MonitorID, &v.Status, &v.StartedAt, &v.OpenedAt, &v.AcknowledgedAt, &v.AcknowledgedByUserID, &v.ResolvedAt, &v.ResolvedByUserID, &v.ResolutionKind, &v.ResolutionReason); err != nil {
-			return IncidentPage{}, err
-		}
+	items := make([]incident.Incident, 0, len(rows))
+	for _, row := range rows {
+		v := incident.Incident{ID: row.ID, OrganizationID: row.OrganizationID, EnvironmentID: row.EnvironmentID,
+			MonitorID: row.MonitorID, Status: row.Status, StartedAt: row.StartedAt.Time, OpenedAt: row.OpenedAt.Time,
+			AcknowledgedAt: optionalTimestamp(row.AcknowledgedAt), AcknowledgedByUserID: optionalUUID(row.AcknowledgedByUserID),
+			ResolvedAt: optionalTimestamp(row.ResolvedAt), ResolvedByUserID: optionalUUID(row.ResolvedByUserID),
+			ResolutionKind: optionalText(row.ResolutionKind), ResolutionReason: optionalText(row.ResolutionReason)}
 		items = append(items, v)
 	}
 	page := IncidentPage{Items: items}
@@ -53,7 +58,7 @@ func (s *Service) ListIncidents(ctx context.Context, userID, environmentID strin
 		page.NextCursor = &c
 		page.Items = items[:q.Limit]
 	}
-	return page, rows.Err()
+	return page, nil
 }
 
 func (s *Service) GetIncident(ctx context.Context, userID, environmentID, incidentID string) (IncidentSummary, error) {
@@ -67,32 +72,27 @@ func (s *Service) GetIncident(ctx context.Context, userID, environmentID, incide
 	}
 	defer tx.Rollback(context.Background())
 	result := IncidentSummary{Incident: base, Events: []IncidentEvent{}, Deliveries: []Delivery{}}
-	rows, err := tx.Query(ctx, `SELECT id::text,event_type,actor_user_id::text,source_job_id::text,safe_reason,occurred_at FROM incident_events WHERE incident_id=$1::uuid ORDER BY occurred_at,id LIMIT 200`, incidentID)
+	queries := database.New(tx)
+	rows, err := queries.ListBackendIncidentEvents(ctx, incidentID)
 	if err != nil {
 		return result, err
 	}
-	for rows.Next() {
-		var v IncidentEvent
-		if err = rows.Scan(&v.ID, &v.Type, &v.ActorUserID, &v.SourceJobID, &v.Reason, &v.OccurredAt); err != nil {
-			rows.Close()
-			return result, err
-		}
+	for _, row := range rows {
+		v := IncidentEvent{ID: row.ID, Type: row.EventType, ActorUserID: optionalUUID(row.ActorUserID),
+			SourceJobID: optionalUUID(row.SourceJobID), Reason: optionalText(row.SafeReason), OccurredAt: row.OccurredAt.Time}
 		result.Events = append(result.Events, v)
 	}
-	rows.Close()
-	rows, err = tx.Query(ctx, `SELECT delivery_id::text,transition,state,attempt_count,next_attempt_at,last_provider_status,accepted_at,failed_at FROM notification_outbox WHERE incident_id=$1::uuid ORDER BY created_at,delivery_id LIMIT 200`, incidentID)
+	deliveries, err := queries.ListBackendNotificationDeliveries(ctx, incidentID)
 	if err != nil {
 		return result, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var v Delivery
-		if err = rows.Scan(&v.ID, &v.Transition, &v.State, &v.Attempts, &v.NextAttemptAt, &v.ProviderStatus, &v.AcceptedAt, &v.FailedAt); err != nil {
-			return result, err
-		}
+	for _, row := range deliveries {
+		v := Delivery{ID: row.DeliveryID, Transition: row.Transition, State: row.State, Attempts: row.AttemptCount,
+			NextAttemptAt: row.NextAttemptAt.Time, ProviderStatus: optionalText(row.LastProviderStatus),
+			AcceptedAt: optionalTimestamp(row.AcceptedAt), FailedAt: optionalTimestamp(row.FailedAt)}
 		result.Deliveries = append(result.Deliveries, v)
 	}
-	return result, rows.Err()
+	return result, nil
 }
 func (s *Service) Acknowledge(ctx context.Context, userID, environmentID, incidentID, reason string) (IncidentSummary, error) {
 	if _, err := s.incidents.Acknowledge(ctx, userID, environmentID, incidentID, reason); err != nil {

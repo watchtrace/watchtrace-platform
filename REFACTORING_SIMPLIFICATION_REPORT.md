@@ -858,7 +858,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
   **Verification completed:** An AST/declaration audit confirmed all 174 declarations from the original large files were moved without changes; affected-package tests; exact OpenAPI route comparison through the HTTP API tests; complete PostgreSQL integration script; `go test -race ./... -count=1`; `go vet ./...`; `go build ./...`; and `git diff --check` all passed.
 
-- [ ] **Task 4 — Move API/domain SQL into SQLC**
+- [x] **Task 4 — Move API/domain SQL into SQLC**
 
   **Goal:** Put customer-facing database queries in one predictable location.
 
@@ -869,6 +869,20 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
   **Risk:** High. Tenant predicates, row locks, and not-found behavior must remain exact.
 
   **Verification:** Fresh PostgreSQL integration database, tenant-isolation tests, RBAC tests, monitor CRUD/lifecycle tests, and incident/notification tests.
+
+  **Completion:** Finished on 2026-09-15. All stable SQL statements were removed from the six Task 4 Go packages and are now named, typed SQLC queries.
+
+  **Implementation report:**
+
+  - Added focused query groups for ownership management, backend reads, incidents, notifications, and realtime events; extended the existing monitor query group for lifecycle and manual-dispatch operations.
+  - Moved 69 stable statements into SQLC across authorization, tenant CRUD, monitor CRUD/lifecycle, checks and dashboards, incident transitions, notification leasing/retries, and realtime polling.
+  - Regenerated the SQLC implementation and shared `Querier` interface. The generated files are intentionally larger, but customer-facing SQL now has one predictable source location under `db/queries`.
+  - Kept transaction begin/commit/rollback decisions in Go. Authorization ordering, tenant predicates, `FOR UPDATE`, `FOR SHARE`, advisory locking, `SKIP LOCKED`, conflict handling, and `RowsAffected` checks remain explicit at the service level.
+  - Kept queue and reliability-engine SQL out of this task because their concurrency-sensitive state machines are the separate scope of Task 5.
+  - Replaced manual `Rows` and `Scan` loops with typed SQLC results and small conversions for nullable PostgreSQL values. No repository layer, ORM, generic data abstraction, schema migration, route, or public API was added.
+  - Preserved report semantics while giving SQLC predictable types: latency is calculated from typed count/sum results, the earliest matching invalidation is selected directly, and the incident threshold start is selected from the same bounded newest-result set.
+
+  **Verification completed:** Reproducible SQLC generation; zero inline SQL statements in the six scoped packages; focused package tests; fresh PostgreSQL integration tests covering tenant isolation, RBAC, monitor CRUD/lifecycle, incidents, realtime events, and notification retry/lease concurrency; `go test -race ./... -count=1`; `go vet ./...`; `go build ./...`; `go mod verify`; `go mod tidy -diff`; and `git diff --check` all passed.
 
 - [ ] **Task 5 — Move monitoring-engine SQL into SQLC**
 

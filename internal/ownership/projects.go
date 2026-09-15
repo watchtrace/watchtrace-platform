@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/authorization"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 func (s *Service) ListProjects(ctx context.Context, userID, organizationID string) ([]TenantProject, error) {
@@ -17,22 +18,18 @@ func (s *Service) ListProjects(ctx context.Context, userID, organizationID strin
 	if !authorization.Allows(role, authorization.PermissionTenantRead) {
 		return nil, ErrForbidden
 	}
-	rows, err := s.db.Query(ctx, `SELECT id::text,organization_id::text,name,description,created_at,updated_at FROM projects WHERE organization_id=$1::uuid ORDER BY created_at,id LIMIT 100`, organizationID)
+	rows, err := database.New(s.db).ListTenantProjects(ctx, organizationID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	items := []TenantProject{}
-	for rows.Next() {
-		var v TenantProject
-		if err = rows.Scan(&v.ID, &v.OrganizationID, &v.Name, &v.Description, &v.CreatedAt, &v.UpdatedAt); err != nil {
-			return nil, err
-		}
+	items := make([]TenantProject, 0, len(rows))
+	for _, row := range rows {
+		v := TenantProject{ID: row.ID, OrganizationID: row.OrganizationID, Name: row.Name, Description: row.Description, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
 		v.Role = role
 		v.AllowedActions = authorization.AllowedActions(role)
 		items = append(items, v)
 	}
-	return items, rows.Err()
+	return items, nil
 }
 
 func (s *Service) GetProject(ctx context.Context, userID, projectID string) (TenantProject, error) {
@@ -45,14 +42,14 @@ func (s *Service) GetProject(ctx context.Context, userID, projectID string) (Ten
 	if err != nil {
 		return TenantProject{}, err
 	}
-	var item TenantProject
-	err = tx.QueryRow(ctx, `SELECT id::text,organization_id::text,name,description,created_at,updated_at FROM projects WHERE id=$1::uuid`, projectID).Scan(&item.ID, &item.OrganizationID, &item.Name, &item.Description, &item.CreatedAt, &item.UpdatedAt)
+	row, err := database.New(tx).GetTenantProject(ctx, projectID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TenantProject{}, ErrProjectNotFound
 	}
 	if err != nil {
 		return TenantProject{}, err
 	}
+	item := TenantProject{ID: row.ID, OrganizationID: row.OrganizationID, Name: row.Name, Description: row.Description, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
 	item.Role = role
 	item.AllowedActions = authorization.AllowedActions(role)
 	return item, nil
@@ -75,11 +72,11 @@ func (s *Service) CreateProject(ctx context.Context, userID, organizationID, nam
 	if !authorization.Allows(role, authorization.PermissionTenantManage) {
 		return TenantProject{}, ErrForbidden
 	}
-	var p TenantProject
-	err = tx.QueryRow(ctx, `INSERT INTO projects(organization_id,name,description) VALUES($1::uuid,$2,$3) RETURNING id::text,organization_id::text,name,description,created_at,updated_at`, organizationID, name, description).Scan(&p.ID, &p.OrganizationID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
+	row, err := database.New(tx).CreateTenantProject(ctx, database.CreateTenantProjectParams{OrganizationID: organizationID, Name: name, Description: description})
 	if err != nil {
-		return p, err
+		return TenantProject{}, err
 	}
+	p := TenantProject{ID: row.ID, OrganizationID: row.OrganizationID, Name: row.Name, Description: row.Description, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
 	if err = recordTenantChange(ctx, tx, organizationID, nil, userID, "project.created", "project", p.ID); err != nil {
 		return p, err
 	}
@@ -108,11 +105,11 @@ func (s *Service) UpdateProject(ctx context.Context, userID, projectID, name, de
 	if !authorization.Allows(role, authorization.PermissionTenantManage) {
 		return TenantProject{}, ErrForbidden
 	}
-	var p TenantProject
-	err = tx.QueryRow(ctx, `UPDATE projects SET name=$2,description=$3,updated_at=CURRENT_TIMESTAMP WHERE id=$1::uuid RETURNING id::text,organization_id::text,name,description,created_at,updated_at`, projectID, name, description).Scan(&p.ID, &p.OrganizationID, &p.Name, &p.Description, &p.CreatedAt, &p.UpdatedAt)
+	row, err := database.New(tx).UpdateTenantProject(ctx, database.UpdateTenantProjectParams{Name: name, Description: description, ProjectID: projectID})
 	if err != nil {
-		return p, err
+		return TenantProject{}, err
 	}
+	p := TenantProject{ID: row.ID, OrganizationID: row.OrganizationID, Name: row.Name, Description: row.Description, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
 	if err = recordTenantChange(ctx, tx, org, nil, userID, "project.updated", "project", projectID); err != nil {
 		return p, err
 	}
@@ -137,11 +134,11 @@ func (s *Service) DeleteProject(ctx context.Context, userID, projectID string) e
 	if !authorization.Allows(role, authorization.PermissionTenantManage) {
 		return ErrForbidden
 	}
-	tag, err := tx.Exec(ctx, `DELETE FROM projects p WHERE p.id=$1::uuid AND NOT EXISTS(SELECT 1 FROM environments e WHERE e.project_id=p.id)`, projectID)
+	rowsAffected, err := database.New(tx).DeleteEmptyTenantProject(ctx, projectID)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		return ErrDeleteConflict
 	}
 	if err = recordTenantChange(ctx, tx, org, nil, userID, "project.deleted", "project", projectID); err != nil {

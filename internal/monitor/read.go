@@ -96,15 +96,11 @@ func (s *Service) Get(ctx context.Context, userID, environmentID, monitorID stri
 	}
 
 	state := StateUnknown
-	var durableState string
-	var hasEvaluatedResult bool
-	err = s.db.QueryRow(ctx, `SELECT r.display_state,r.last_observed_scheduled_at IS NOT NULL
-FROM monitor_reliability_states r
-JOIN monitors m ON m.id=r.monitor_id
-WHERE m.organization_id=$1::uuid AND m.environment_id=$2::uuid AND m.id=$3::uuid`,
-		organizationID, environmentID, monitorID).Scan(&durableState, &hasEvaluatedResult)
-	if err == nil && hasEvaluatedResult {
-		state = State(durableState)
+	durable, err := queries.GetDurableMonitorState(ctx, database.GetDurableMonitorStateParams{
+		OrganizationID: organizationID, EnvironmentID: environmentID, MonitorID: monitorID,
+	})
+	if err == nil && durable.LastObservedScheduledAt.Valid {
+		state = State(durable.DisplayState)
 	} else if err == nil || errors.Is(err, pgx.ErrNoRows) {
 		// Compatibility for results created before the ordered evaluator first
 		// runs. Once an evaluation exists, an explicit unknown state caused by

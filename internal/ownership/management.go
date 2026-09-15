@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/authorization"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 var (
@@ -54,39 +55,33 @@ func (s *Service) ListOrganizations(ctx context.Context, userID string) ([]Organ
 	if !uuidPattern.MatchString(userID) {
 		return nil, ErrInvalidInput
 	}
-	rows, err := s.db.Query(ctx, `SELECT o.id::text,o.name,o.slug,m.role,o.created_at
-FROM organizations o JOIN org_members m ON m.organization_id=o.id
-WHERE m.user_id=$1::uuid AND o.deleted_at IS NULL ORDER BY o.created_at,o.id LIMIT 100`, userID)
+	rows, err := database.New(s.db).ListAccessibleOrganizations(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list organizations: %w", err)
 	}
-	defer rows.Close()
-	items := []OrganizationView{}
-	for rows.Next() {
-		var item OrganizationView
-		if err = rows.Scan(&item.ID, &item.Name, &item.Slug, &item.Role, &item.CreatedAt); err != nil {
-			return nil, err
-		}
+	items := make([]OrganizationView, 0, len(rows))
+	for _, row := range rows {
+		item := OrganizationView{ID: row.ID, Name: row.Name, Slug: row.Slug, Role: authorization.Role(row.Role), CreatedAt: row.CreatedAt.Time}
 		item.AllowedActions = authorization.AllowedActions(item.Role)
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return items, nil
 }
 
 func (s *Service) GetOrganization(ctx context.Context, userID, organizationID string) (OrganizationView, error) {
 	if !uuidPattern.MatchString(userID) || !uuidPattern.MatchString(organizationID) {
 		return OrganizationView{}, ErrOrganizationNotFound
 	}
-	var item OrganizationView
-	err := s.db.QueryRow(ctx, `SELECT o.id::text,o.name,o.slug,m.role,o.created_at FROM organizations o
-JOIN org_members m ON m.organization_id=o.id AND m.user_id=$1::uuid
-WHERE o.id=$2::uuid AND o.deleted_at IS NULL`, userID, organizationID).Scan(&item.ID, &item.Name, &item.Slug, &item.Role, &item.CreatedAt)
+	row, err := database.New(s.db).GetAccessibleOrganization(ctx, database.GetAccessibleOrganizationParams{
+		UserID: userID, OrganizationID: organizationID,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OrganizationView{}, ErrOrganizationNotFound
 	}
 	if err != nil {
-		return item, err
+		return OrganizationView{}, err
 	}
+	item := OrganizationView{ID: row.ID, Name: row.Name, Slug: row.Slug, Role: authorization.Role(row.Role), CreatedAt: row.CreatedAt.Time}
 	item.AllowedActions = authorization.AllowedActions(item.Role)
 	return item, nil
 }
@@ -108,7 +103,7 @@ func (s *Service) UpdateOrganization(ctx context.Context, userID, organizationID
 	if !authorization.Allows(role, authorization.PermissionTenantManage) {
 		return OrganizationView{}, ErrForbidden
 	}
-	if _, err = tx.Exec(ctx, `UPDATE organizations SET name=$2,updated_at=CURRENT_TIMESTAMP WHERE id=$1::uuid AND deleted_at IS NULL`, organizationID, name); err != nil {
+	if err = database.New(tx).UpdateOrganizationName(ctx, database.UpdateOrganizationNameParams{Name: name, OrganizationID: organizationID}); err != nil {
 		return OrganizationView{}, err
 	}
 	if err = recordTenantChange(ctx, tx, organizationID, nil, userID, "organization.updated", "organization", organizationID); err != nil {
@@ -133,7 +128,7 @@ func (s *Service) DeleteOrganization(ctx context.Context, userID, organizationID
 	if role != authorization.RoleOwner {
 		return ErrForbidden
 	}
-	if _, err = tx.Exec(ctx, `UPDATE organizations SET deleted_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=$1::uuid AND deleted_at IS NULL`, organizationID); err != nil {
+	if err = database.New(tx).SoftDeleteOrganization(ctx, organizationID); err != nil {
 		return err
 	}
 	if err = recordAudit(ctx, tx, organizationID, userID, "organization.deleted", "organization", organizationID); err != nil {

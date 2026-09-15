@@ -2,7 +2,11 @@ package backendapi
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 func (s *Service) ListChecks(ctx context.Context, userID, environmentID, monitorID string, q PageQuery) (CheckPage, error) {
@@ -26,24 +30,24 @@ func (s *Service) ListChecks(ctx context.Context, userID, environmentID, monitor
 			return CheckPage{}, ErrInvalidQuery
 		}
 	}
-	rows, err := tx.Query(ctx, `SELECT job_id::text,job_type,scheduled_at,started_at,completed_at,succeeded,status_code,error_category,total_duration_microseconds FROM health_checks WHERE monitor_id=$1::uuid AND scheduled_at>=$2 AND scheduled_at<$3 AND ($4='' OR job_type=$4) AND ($5::timestamptz IS NULL OR (scheduled_at,job_id)<($5,$6::uuid)) ORDER BY scheduled_at DESC,job_id DESC LIMIT $7`, monitorID, q.From, q.To, q.JobType, nullableTime(cursorTime), nullableString(cursorID), q.Limit+1)
+	rows, err := database.New(tx).ListBackendChecks(ctx, database.ListBackendChecksParams{
+		MonitorID: monitorID, FromAt: databaseTimestamp(q.From), ToAt: databaseTimestamp(q.To),
+		JobType: q.JobType, HasCursor: q.Cursor != "", CursorAt: databaseTimestamp(cursorTime),
+		CursorID: cursorID, ResultLimit: int32(q.Limit + 1),
+	})
 	if err != nil {
 		return CheckPage{}, err
 	}
-	defer rows.Close()
-	items := []Check{}
-	for rows.Next() {
-		var v Check
-		if err = rows.Scan(&v.JobID, &v.JobType, &v.ScheduledAt, &v.StartedAt, &v.CompletedAt, &v.Succeeded, &v.StatusCode, &v.ErrorCategory, &v.TotalDurationMicroseconds); err != nil {
-			return CheckPage{}, err
-		}
+	items := make([]Check, 0, len(rows))
+	for _, row := range rows {
+		v := Check{JobID: row.JobID, JobType: row.JobType, ScheduledAt: row.ScheduledAt.Time,
+			StartedAt: row.StartedAt.Time, CompletedAt: row.CompletedAt.Time, Succeeded: row.Succeeded,
+			StatusCode: optionalInt16(row.StatusCode), ErrorCategory: optionalText(row.ErrorCategory),
+			TotalDurationMicroseconds: row.TotalDurationMicroseconds}
 		if v.JobType == "manual_test" {
 			v.JobType = "manual"
 		}
 		items = append(items, v)
-	}
-	if err = rows.Err(); err != nil {
-		return CheckPage{}, err
 	}
 	page := CheckPage{Items: items}
 	if len(items) > q.Limit {
@@ -79,18 +83,22 @@ func (s *Service) MonitorReport(ctx context.Context, userID, environmentID, moni
 		return report, err
 	}
 	defer tx.Rollback(context.Background())
-	var average *float64
-	if err = tx.QueryRow(ctx, `SELECT avg(total_duration_microseconds)::float8/1000 FROM health_checks WHERE monitor_id=$1::uuid AND job_type='scheduled' AND scheduled_at>=$2 AND scheduled_at<$3`, monitorID, q.From, q.To).Scan(&average); err != nil {
+	queries := database.New(tx)
+	latency, err := queries.GetMonitorLatencyTotals(ctx, database.GetMonitorLatencyTotalsParams{MonitorID: monitorID, FromAt: databaseTimestamp(q.From), ToAt: databaseTimestamp(q.To)})
+	if err != nil {
 		return report, err
 	}
-	report.AverageLatencyMilliseconds = average
-	var invalidated *time.Time
-	if err = tx.QueryRow(ctx, `SELECT min(invalidated_at) FROM monitor_rollup_invalidations WHERE monitor_id=$1::uuid AND bucket_start<$3 AND bucket_start+CASE bucket_kind WHEN 'hourly' THEN INTERVAL '1 hour' ELSE INTERVAL '1 day' END>$2`, monitorID, q.From, q.To).Scan(&invalidated); err != nil {
+	if latency.SampleCount > 0 {
+		average := float64(latency.TotalDurationUs) / float64(latency.SampleCount) / 1000
+		report.AverageLatencyMilliseconds = &average
+	}
+	invalidated, err := queries.GetFirstMonitorRollupInvalidation(ctx, database.GetFirstMonitorRollupInvalidationParams{MonitorID: monitorID, ToAt: databaseTimestamp(q.To), FromAt: databaseTimestamp(q.From)})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return report, err
 	}
-	if invalidated != nil {
+	if err == nil {
 		report.Fresh = false
-		report.CorrectedAt = invalidated
+		report.CorrectedAt = &invalidated.Time
 	}
 	return report, nil
 }
