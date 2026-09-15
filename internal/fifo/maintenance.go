@@ -80,3 +80,19 @@ func ReadMetrics(ctx context.Context, db DB, now time.Time) (Metrics, error) {
 	}
 	return m, nil
 }
+
+func (c *ResultConsumer) SweepDeadlines(ctx context.Context) (int64, error) {
+	tx, err := c.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(context.Background())
+	tag, err := tx.Exec(ctx, `WITH expired AS(UPDATE check_jobs SET state='expired',completed_at=CURRENT_TIMESTAMP,last_safe_error='start_expired' WHERE state IN('pending','pending_publish','published','running') AND expires_at<CURRENT_TIMESTAMP AND NOT EXISTS(SELECT 1 FROM health_checks h WHERE h.job_id=check_jobs.id) RETURNING organization_id,environment_id,monitor_id,scheduled_at) INSERT INTO monitoring_coverage_gaps(organization_id,environment_id,monitor_id,scheduled_at,reason) SELECT organization_id,environment_id,monitor_id,scheduled_at,'expired' FROM expired ON CONFLICT DO NOTHING`)
+	if err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}

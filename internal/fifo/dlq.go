@@ -158,3 +158,16 @@ func (s *SQSDLQSource) AcknowledgeDLQ(ctx context.Context, d DLQDelivery) error 
 	_, err := s.Client.DeleteMessage(ctx, &sqs.DeleteMessageInput{QueueUrl: aws.String(url), ReceiptHandle: aws.String(d.Receipt)})
 	return err
 }
+
+func (c *ResultConsumer) RecordResultDLQ(ctx context.Context, jobID, poolID string) error {
+	tx, err := c.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+	_, err = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('result_dlq',$1::uuid,$2,'recoverable result requires redrive')`, jobID, poolID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}

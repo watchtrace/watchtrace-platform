@@ -5,13 +5,14 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/envelope"
 	"github.com/watchtrace/watchtrace-platform/internal/incident"
 	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
 	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
-	"time"
 )
 
 type ResultDelivery struct {
@@ -174,32 +175,4 @@ func (c *ResultConsumer) databaseReady(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return one == 1, nil
-}
-
-func (c *ResultConsumer) SweepDeadlines(ctx context.Context) (int64, error) {
-	tx, err := c.db.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback(context.Background())
-	tag, err := tx.Exec(ctx, `WITH expired AS(UPDATE check_jobs SET state='expired',completed_at=CURRENT_TIMESTAMP,last_safe_error='start_expired' WHERE state IN('pending','pending_publish','published','running') AND expires_at<CURRENT_TIMESTAMP AND NOT EXISTS(SELECT 1 FROM health_checks h WHERE h.job_id=check_jobs.id) RETURNING organization_id,environment_id,monitor_id,scheduled_at) INSERT INTO monitoring_coverage_gaps(organization_id,environment_id,monitor_id,scheduled_at,reason) SELECT organization_id,environment_id,monitor_id,scheduled_at,'expired' FROM expired ON CONFLICT DO NOTHING`)
-	if err != nil {
-		return 0, err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
-}
-func (c *ResultConsumer) RecordResultDLQ(ctx context.Context, jobID, poolID string) error {
-	tx, err := c.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(context.Background())
-	_, err = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('result_dlq',$1::uuid,$2,'recoverable result requires redrive')`, jobID, poolID)
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
 }

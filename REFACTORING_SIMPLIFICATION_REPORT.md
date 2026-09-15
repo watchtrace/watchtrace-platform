@@ -831,7 +831,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
   **Verification completed:** Exact OpenAPI route comparison; focused router/service tests; complete PostgreSQL integration script; `go test -race ./... -count=1`; `go vet ./...`; `go build ./...`; and `git diff --check` all passed. No database schema or customer API contract changed.
 
-- [ ] **Task 3 — Split large files without changing behavior**
+- [x] **Task 3 — Split large files without changing behavior**
 
   **Goal:** Make each package readable one use case at a time.
 
@@ -842,6 +842,21 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
   **Risk:** Low for moves; medium for mapper cleanup.
 
   **Verification:** No public API changes, full unit tests, `go vet`, race tests, and API contract tests.
+
+  **Completion:** Finished on 2026-09-15. The largest affected production file is now under 300 lines; before this task, `internal/monitor/service.go` was about 800 lines.
+
+  **Implementation report:**
+
+  - Monitor code is separated into construction/creation, reads and row mapping, lifecycle/manual dispatch, and encrypted-header helpers.
+  - Authentication code is separated into account signup/login, access-token authentication, email verification, password reset, session rotation/cleanup, and token-family persistence.
+  - Ownership code is separated into shared types/construction, organization management, default hierarchy creation, invitations/membership, projects, environments, member management, and shared authorization/audit helpers.
+  - Reliability code is separated into reporting, hourly/daily rollups, ordered state evaluation, and repair/retention maintenance.
+  - Backend read-model code is separated into shared types/authorization, checks and reports, dashboard reads, incidents, and pagination helpers.
+  - FIFO deadline sweeping now lives with maintenance operations, and result-DLQ recording lives with DLQ handling. The central result-consumption transaction remains intact because splitting that transaction would be a behavioral refactor rather than a file move.
+  - No package boundaries, public names, function signatures, SQL statements, transaction boundaries, state-transition order, or customer API routes changed.
+  - Monitor row mappers were moved together into `read.go` but intentionally not consolidated. That higher-risk cleanup is better paired with the SQLC work in Task 4.
+
+  **Verification completed:** An AST/declaration audit confirmed all 174 declarations from the original large files were moved without changes; affected-package tests; exact OpenAPI route comparison through the HTTP API tests; complete PostgreSQL integration script; `go test -race ./... -count=1`; `go vet ./...`; `go build ./...`; and `git diff --check` all passed.
 
 - [ ] **Task 4 — Move API/domain SQL into SQLC**
 
