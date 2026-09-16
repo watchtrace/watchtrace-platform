@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	platformmail "github.com/watchtrace/watchtrace-platform/internal/platform/mail"
 )
 
 func TestRetrySchedule(t *testing.T) {
@@ -14,6 +16,28 @@ func TestRetrySchedule(t *testing.T) {
 	for _, test := range tests {
 		if got := retryDelay(test.attempt); got != test.want {
 			t.Errorf("attempt %d delay=%s want=%s", test.attempt, got, test.want)
+		}
+	}
+}
+
+func TestSMTPFailureStagesKeepProviderStatusStable(t *testing.T) {
+	tests := map[platformmail.FailureStage]string{
+		platformmail.StageInvalidMessage: "invalid_message",
+		platformmail.StageConnect:        "connect_failed",
+		platformmail.StageDeadline:       "deadline_failed",
+		platformmail.StageHandshake:      "smtp_handshake_failed",
+		platformmail.StageSTARTTLS:       "starttls_failed",
+		platformmail.StageAuthentication: "authentication_failed",
+		platformmail.StageSender:         "sender_rejected",
+		platformmail.StageRecipient:      "recipient_rejected",
+		platformmail.StageData:           "data_rejected",
+		platformmail.StageWrite:          "write_failed",
+		platformmail.StageAcceptance:     "acceptance_failed",
+		platformmail.StageCompletion:     "completion_failed",
+	}
+	for stage, want := range tests {
+		if got := smtpProviderFailure(platformmail.DeliveryError{Stage: stage}).Status; got != want {
+			t.Errorf("stage %q status=%q want=%q", stage, got, want)
 		}
 	}
 }

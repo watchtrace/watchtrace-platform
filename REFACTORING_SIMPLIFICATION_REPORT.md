@@ -910,7 +910,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
   **Verification completed:** Reproducible SQLC generation; zero inline SQL statements in the scoped Go packages; focused and full unit tests; a fresh PostgreSQL integration suite covering concurrent scheduling/publishing, duplicate and conflicting results, DLQ/redrive, late-result correction, ordered state, rollups/retention, worker-pool lifecycle, and operational cleanup; `go test -race ./... -count=1`; `go vet ./...`; `go build ./...`; `go mod verify`; `go mod tidy -diff`; and `git diff --check` all passed.
 
-- [ ] **Task 6 — Consolidate SMTP transport**
+- [x] **Task 6 — Consolidate SMTP transport**
 
   **Goal:** Maintain one secure SMTP implementation.
 
@@ -921,6 +921,20 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
   **Risk:** Medium. Authentication delivery and alerts can both be affected.
 
   **Verification:** Local SMTP capture tests, OCI configuration validation, STARTTLS/authentication failure tests, header-injection tests, and log/credential-redaction tests.
+
+  **Completion:** Finished on 2026-09-16. Account-action and incident-notification email now use one secure SMTP transport implementation.
+
+  **Implementation report:**
+
+  - Added `internal/platform/mail` as the single owner of SMTP connection setup, deadlines, TLS policy, authentication, SMTP envelope commands, message formatting, mailbox validation, header safety, and body newline normalization.
+  - Kept the local adapter restricted to loopback SMTP capture services. Kept OCI delivery restricted to authenticated STARTTLS with TLS 1.2 or newer, a DNS endpoint, bounded credentials, and a valid sender mailbox.
+  - Replaced raw provider errors with bounded delivery stages. SMTP responses, credentials, sender and recipient addresses, and message contents cannot enter returned transport errors or logs.
+  - Kept account-action composition in `internal/auth`: token validation, verification/reset/invitation URLs, subjects, instructions, and domain-specific error wrapping remain there.
+  - Kept notification behavior in `internal/notification`: stable delivery IDs, provider responses, retry behavior, and the existing safe status values remain unchanged through an explicit stage-to-status mapping.
+  - Removed both duplicated socket/SMTP implementations. `net/smtp`, `StartTLS`, and `PlainAuth` now appear in one production file only.
+  - Preserved all existing API and notification-worker environment variables and verified the production OCI settings rendered by the Coolify Compose configuration.
+
+  **Verification completed:** Local SMTP capture tests for both account-action and incident email; OCI configuration validation; explicit STARTTLS and authentication failure tests; recipient, sender, subject, and credential injection checks; credential/error redaction assertions; focused and repository-wide race tests; `go vet ./...`; `go build ./...`; `go mod verify`; `go mod tidy -diff`; a fresh PostgreSQL integration suite; Coolify Compose rendering; production container build/liveness/graceful-shutdown smoke testing; and `git diff --check` all passed.
 
 - [ ] **Task 7 — Standardize configuration and command startup**
 
@@ -954,7 +968,7 @@ The largest immediate improvement would come from:
 2. Removing partial runtime composition.
 3. Splitting the largest files without behavioral changes.
 4. ~~Standardizing SQL location.~~ Completed in Tasks 4 and 5.
-5. Consolidating SMTP and command configuration.
+5. Consolidating command configuration. SMTP consolidation was completed in Task 6.
 6. Removing compatibility branches only after explicit expiry/backfill checks.
 
 ## Final assessment

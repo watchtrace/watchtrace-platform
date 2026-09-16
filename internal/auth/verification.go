@@ -1,18 +1,16 @@
 package auth
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/smtp"
 	"net/url"
 	"strings"
 	"time"
+
+	platformmail "github.com/watchtrace/watchtrace-platform/internal/platform/mail"
 )
 
 const (
@@ -43,27 +41,19 @@ type OCIEmailDeliverySender struct {
 }
 
 type smtpActionSender struct {
-	address   string
-	host      string
-	from      string
+	transport *platformmail.Transport
 	baseURL   *url.URL
 	resetURL  *url.URL
 	inviteURL *url.URL
-	username  string
-	password  string
-	startTLS  bool
 }
 
 // NewLocalSMTPSender constructs a local-only plaintext SMTP adapter. Both the
 // SMTP server and verification link must use loopback hosts so this adapter
 // cannot accidentally become a production mail path.
 func NewLocalSMTPSender(address, from, baseURL, resetURL, inviteURL string) (*LocalSMTPSender, error) {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil || !isLoopbackHost(host) {
-		return nil, errors.New("verification SMTP address must be a loopback host:port")
-	}
-	if strings.TrimSpace(from) == "" || strings.ContainsAny(from, "\r\n") {
-		return nil, errors.New("verification sender address is invalid")
+	transport, err := platformmail.NewLocal(address, from, verificationSendTimeout)
+	if err != nil {
+		return nil, errors.New("verification SMTP configuration is invalid")
 	}
 	parsed, err := parseLocalActionURL(baseURL)
 	if err != nil {
@@ -78,16 +68,15 @@ func NewLocalSMTPSender(address, from, baseURL, resetURL, inviteURL string) (*Lo
 		return nil, errors.New("invitation URL must be an absolute loopback HTTP URL without query or fragment")
 	}
 	return &LocalSMTPSender{smtpActionSender: &smtpActionSender{
-		address: address, host: host, from: from, baseURL: parsed, resetURL: parsedReset, inviteURL: parsedInvite,
+		transport: transport, baseURL: parsed, resetURL: parsedReset, inviteURL: parsedInvite,
 	}}, nil
 }
 
 // NewOCIEmailDeliverySender constructs the production account-action adapter.
 // Action links must use HTTPS and credentials never enter a message or error.
 func NewOCIEmailDeliverySender(address, username, password, from, baseURL, resetURL, inviteURL string) (*OCIEmailDeliverySender, error) {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
-	if err != nil || net.ParseIP(host) != nil || strings.TrimSpace(username) == "" ||
-		strings.TrimSpace(password) == "" || strings.TrimSpace(from) == "" || strings.ContainsAny(from, "\r\n") {
+	transport, err := platformmail.NewOCI(address, username, password, from, verificationSendTimeout)
+	if err != nil {
 		return nil, errors.New("OCI verification SMTP configuration is invalid")
 	}
 	parsed, err := parseHTTPSActionURL(baseURL)
@@ -103,9 +92,7 @@ func NewOCIEmailDeliverySender(address, username, password, from, baseURL, reset
 		return nil, errors.New("invitation URL must be an absolute HTTPS URL without query or fragment")
 	}
 	return &OCIEmailDeliverySender{smtpActionSender: &smtpActionSender{
-		address: strings.TrimSpace(address), host: host, from: strings.TrimSpace(from),
-		baseURL: parsed, resetURL: parsedReset, inviteURL: parsedInvite,
-		username: strings.TrimSpace(username), password: strings.TrimSpace(password), startTLS: true,
+		transport: transport, baseURL: parsed, resetURL: parsedReset, inviteURL: parsedInvite,
 	}}, nil
 }
 
@@ -133,7 +120,7 @@ func (sender *smtpActionSender) SendVerification(ctx context.Context, recipient,
 		return errors.New("invalid verification delivery input")
 	}
 
-	return sender.send(ctx, recipient, sender.message(recipient, token, sender.baseURL,
+	return sender.send(ctx, sender.message(recipient, token, sender.baseURL,
 		"Verify your WatchTrace email", "Verify your WatchTrace email within 24 hours:"))
 }
 
@@ -141,7 +128,7 @@ func (sender *smtpActionSender) SendPasswordReset(ctx context.Context, recipient
 	if sender == nil || strings.ContainsAny(recipient, "\r\n") || !validPasswordResetToken(token) {
 		return errors.New("invalid password-reset delivery input")
 	}
-	return sender.send(ctx, recipient, sender.message(recipient, token, sender.resetURL,
+	return sender.send(ctx, sender.message(recipient, token, sender.resetURL,
 		"Reset your WatchTrace password", "Reset your WatchTrace password within 1 hour:"))
 }
 
@@ -149,81 +136,29 @@ func (sender *smtpActionSender) SendInvitation(ctx context.Context, recipient, t
 	if sender == nil || strings.ContainsAny(recipient, "\r\n") || !ValidInvitationToken(token) {
 		return errors.New("invalid invitation delivery input")
 	}
-	return sender.send(ctx, recipient, sender.message(recipient, token, sender.inviteURL,
+	return sender.send(ctx, sender.message(recipient, token, sender.inviteURL,
 		"Join a WatchTrace organization", "Accept this WatchTrace invitation within 7 days:"))
 }
 
-func (sender *smtpActionSender) send(ctx context.Context, recipient, message string) error {
-	deliveryCtx, cancel := context.WithTimeout(ctx, verificationSendTimeout)
-	defer cancel()
-	connection, err := (&net.Dialer{}).DialContext(deliveryCtx, "tcp", sender.address)
-	if err != nil {
-		return fmt.Errorf("connect to verification SMTP: %w", err)
-	}
-	defer connection.Close()
-	deadline := time.Now().Add(verificationSendTimeout)
-	if contextDeadline, ok := deliveryCtx.Deadline(); ok && contextDeadline.Before(deadline) {
-		deadline = contextDeadline
-	}
-	if err := connection.SetDeadline(deadline); err != nil {
-		return fmt.Errorf("set verification SMTP deadline: %w", err)
-	}
-
-	host, _, _ := net.SplitHostPort(sender.address)
-	client, err := smtp.NewClient(connection, host)
-	if err != nil {
-		return fmt.Errorf("start verification SMTP: %w", err)
-	}
-	defer client.Close()
-	if sender.startTLS {
-		if err = client.StartTLS(&tls.Config{ServerName: sender.host, MinVersion: tls.VersionTLS12}); err != nil {
-			return errors.New("start verification SMTP TLS")
-		}
-		if err = client.Auth(smtp.PlainAuth("", sender.username, sender.password, sender.host)); err != nil {
-			return errors.New("authenticate verification SMTP")
-		}
-	}
-	if err := client.Mail(sender.from); err != nil {
-		return fmt.Errorf("set verification sender: %w", err)
-	}
-	if err := client.Rcpt(recipient); err != nil {
-		return fmt.Errorf("set verification recipient: %w", err)
-	}
-	messageWriter, err := client.Data()
-	if err != nil {
-		return fmt.Errorf("start verification message: %w", err)
-	}
-	if _, err := io.Copy(messageWriter, strings.NewReader(message)); err != nil {
-		_ = messageWriter.Close()
-		return fmt.Errorf("write verification message: %w", err)
-	}
-	if err := messageWriter.Close(); err != nil {
-		return fmt.Errorf("finish verification message: %w", err)
-	}
-	if err := client.Quit(); err != nil {
-		return fmt.Errorf("finish local verification SMTP: %w", err)
+func (sender *smtpActionSender) send(ctx context.Context, message platformmail.Message) error {
+	if err := sender.transport.Deliver(ctx, message); err != nil {
+		return fmt.Errorf("deliver account-action email: %w", err)
 	}
 	return nil
 }
 
-func (sender *smtpActionSender) message(recipient, token string, baseURL *url.URL, subject, instruction string) string {
+func (sender *smtpActionSender) message(recipient, token string, baseURL *url.URL, subject, instruction string) platformmail.Message {
 	actionURL := *baseURL
 	query := actionURL.Query()
 	query.Set("token", token)
 	actionURL.RawQuery = query.Encode()
 
-	var message strings.Builder
-	writer := bufio.NewWriter(&message)
-	fmt.Fprintf(writer, "From: %s\r\n", sender.from)
-	fmt.Fprintf(writer, "To: %s\r\n", recipient)
-	fmt.Fprintf(writer, "Subject: %s\r\n", subject)
-	fmt.Fprint(writer, "Content-Type: text/plain; charset=UTF-8\r\n")
-	fmt.Fprint(writer, "\r\n")
-	fmt.Fprintf(writer, "%s\r\n", instruction)
-	fmt.Fprintf(writer, "%s\r\n", actionURL.String())
-	fmt.Fprint(writer, "\r\nIf you did not request this action, ignore this message.\r\n")
-	_ = writer.Flush()
-	return message.String()
+	return platformmail.Message{
+		Recipient: recipient,
+		Subject:   subject,
+		PlainTextBody: instruction + "\n" + actionURL.String() +
+			"\n\nIf you did not request this action, ignore this message.\n",
+	}
 }
 
 func newVerificationToken() (string, []byte, error) {

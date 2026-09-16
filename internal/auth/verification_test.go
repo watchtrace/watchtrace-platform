@@ -123,7 +123,7 @@ func TestOCIEmailDeliverySenderRequiresAuthenticatedSMTPAndHTTPSLinks(t *testing
 		"https://watchtrace.example.test/reset-password",
 		"https://watchtrace.example.test/accept-invitation",
 	)
-	if err != nil || sender == nil || !sender.startTLS {
+	if err != nil || sender == nil || sender.transport == nil {
 		t.Fatalf("construct OCI sender: sender=%v err=%v", sender, err)
 	}
 	for _, test := range []struct {
