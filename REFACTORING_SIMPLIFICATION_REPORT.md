@@ -884,7 +884,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
   **Verification completed:** Reproducible SQLC generation; zero inline SQL statements in the six scoped packages; focused package tests; fresh PostgreSQL integration tests covering tenant isolation, RBAC, monitor CRUD/lifecycle, incidents, realtime events, and notification retry/lease concurrency; `go test -race ./... -count=1`; `go vet ./...`; `go build ./...`; `go mod verify`; `go mod tidy -diff`; and `git diff --check` all passed.
 
-- [ ] **Task 5 — Move monitoring-engine SQL into SQLC**
+- [x] **Task 5 — Move monitoring-engine SQL into SQLC**
 
   **Goal:** Make queue and reliability persistence easier to inspect without changing state machines.
 
@@ -895,6 +895,20 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
   **Risk:** High because this includes concurrency- and idempotency-sensitive SQL.
 
   **Verification:** Race tests, concurrent scheduler/publisher tests, duplicate-result tests, DLQ/redrive tests, late-result correction tests, and rollup/retention tests.
+
+  **Completion:** Finished on 2026-09-16. All SQL statements in the Task 5 Go scope are now named, typed SQLC queries while the queue and reliability state machines remain explicit in Go.
+
+  **Implementation report:**
+
+  - Added 102 named SQLC queries in five focused files: FIFO scheduling/dispatch/result handling, reliability evaluation/rollups/retention, operational health/cleanup, worker-pool lifecycle, and controlled queue recovery.
+  - Migrated scheduler admission control, due-monitor locking, immutable job/outbox creation, publisher leasing and retry state, result idempotency/conflict handling, DLQ quarantine, deadline sweeping, ledger cleanup, and queue metrics.
+  - Migrated ordered reliability evaluation, late-result correction, alert-threshold lookup, hourly/daily rollups, invalidation repair, checkpoint advancement, reporting, and retention.
+  - Migrated maintenance status, bounded operational health metrics, expired-record cleanup, worker-pool registration/activation/reconciliation/revocation/deletion, and reviewed quarantine redrive persistence.
+  - Kept transaction begin/commit/rollback decisions and operation ordering in Go. `FOR UPDATE`, `FOR UPDATE SKIP LOCKED`, leases, compare-and-set predicates, idempotency conflicts, best-effort forensic writes, commit-before-SQS-send, and SQS-send-before-redrive-marking semantics remain unchanged.
+  - Used small PostgreSQL-null conversion helpers only at SQLC boundaries; no repository abstraction, ORM, generic query layer, schema migration, public API change, or state-machine redesign was introduced.
+  - Removed all inline SQL from `internal/fifo`, `internal/reliability`, `internal/operations`, `internal/workerpool`, and `cmd/queue-recovery`.
+
+  **Verification completed:** Reproducible SQLC generation; zero inline SQL statements in the scoped Go packages; focused and full unit tests; a fresh PostgreSQL integration suite covering concurrent scheduling/publishing, duplicate and conflicting results, DLQ/redrive, late-result correction, ordered state, rollups/retention, worker-pool lifecycle, and operational cleanup; `go test -race ./... -count=1`; `go vet ./...`; `go build ./...`; `go mod verify`; `go mod tidy -diff`; and `git diff --check` all passed.
 
 - [ ] **Task 6 — Consolidate SMTP transport**
 
@@ -939,7 +953,7 @@ The largest immediate improvement would come from:
 1. ~~Removing the old scheduler/checker.~~ Completed in Task 1.
 2. Removing partial runtime composition.
 3. Splitting the largest files without behavioral changes.
-4. Standardizing SQL location.
+4. ~~Standardizing SQL location.~~ Completed in Tasks 4 and 5.
 5. Consolidating SMTP and command configuration.
 6. Removing compatibility branches only after explicit expiry/backfill checks.
 

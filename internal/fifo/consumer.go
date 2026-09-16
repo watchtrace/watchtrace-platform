@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/envelope"
 	"github.com/watchtrace/watchtrace-platform/internal/incident"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
 	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
@@ -64,41 +65,37 @@ func (c *ResultConsumer) ConsumeNext(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	defer tx.Rollback(context.Background())
-	var poolID string
-	var hash, public []byte
-	var state, jobType, organizationID, environmentID, monitorID string
-	var scheduled, expires time.Time
-	err = tx.QueryRow(ctx, `SELECT j.worker_pool_id,j.snapshot_hash,
-COALESCE((SELECT c.public_material FROM worker_pool_credentials c WHERE c.worker_pool_id=j.worker_pool_id AND c.purpose='result_signing' AND c.key_id=$2 AND c.status IN('active','retired') ORDER BY c.activates_at DESC LIMIT 1),CASE WHEN wp.result_key_id=$2 THEN wp.result_public_key END),
-j.state,j.job_type,j.organization_id::text,j.environment_id::text,j.monitor_id::text,j.scheduled_at,j.expires_at FROM check_jobs j JOIN worker_pools wp ON wp.id=j.worker_pool_id WHERE j.id=$1::uuid FOR UPDATE OF j`, peeked.JobID, peeked.ResultKeyID).Scan(&poolID, &hash, &public, &state, &jobType, &organizationID, &environmentID, &monitorID, &scheduled, &expires)
+	queries := database.New(tx)
+	job, err := queries.LockResultCheckJob(ctx, database.LockResultCheckJobParams{ResultKeyID: peeked.ResultKeyID, JobID: peeked.JobID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return true, envelope.ErrInvalid
 	}
 	if err != nil {
 		return true, err
 	}
-	result, err := envelope.VerifyResult(delivery.Body, ed25519.PublicKey(public))
+	poolID, hash := job.WorkerPoolID, job.SnapshotHash
+	jobType, organizationID, environmentID, monitorID := job.JobType, job.OrganizationID, job.EnvironmentID, job.MonitorID
+	scheduled, expires := job.ScheduledAt.Time, job.ExpiresAt.Time
+	result, err := envelope.VerifyResult(delivery.Body, ed25519.PublicKey(job.ResultPublicKey))
 	if err != nil || result.WorkerPoolID != poolID || result.SnapshotHash != fmt.Sprintf("%x", hash) || !result.ScheduledAt.Equal(scheduled) || result.StartedAt.Before(scheduled.Add(-5*time.Second)) || result.StartedAt.After(expires.Add(5*time.Second)) || result.CompletedAt.After(c.now().UTC().Add(5*time.Second)) {
 		return true, envelope.ErrInvalid
 	}
-	var existingHash []byte
-	var existingAttempt, existingResultID string
-	existingErr := tx.QueryRow(ctx, `SELECT snapshot_hash,execution_attempt_id::text,result_id::text FROM health_checks WHERE job_id=$1::uuid`, result.JobID).Scan(&existingHash, &existingAttempt, &existingResultID)
+	existing, existingErr := queries.GetAcceptedHealthCheck(ctx, result.JobID)
 	if existingErr == nil {
-		if fmt.Sprintf("%x", existingHash) != result.SnapshotHash || existingAttempt != result.AttemptID || existingResultID != result.ResultID {
+		if fmt.Sprintf("%x", existing.SnapshotHash) != result.SnapshotHash || existing.ExecutionAttemptID != result.AttemptID || existing.ResultID != result.ResultID {
 			encrypted, err := c.sealer.Seal(delivery.Body, []byte("result:"+result.ResultID))
 			if err != nil {
 				return true, err
 			}
-			_, _ = tx.Exec(ctx, `INSERT INTO check_result_conflicts(job_id,result_id,worker_pool_id,snapshot_hash,safe_reason,encrypted_payload) VALUES($1::uuid,$2::uuid,$3,$4,'conflicting valid result',$5) ON CONFLICT(result_id) DO NOTHING`, result.JobID, result.ResultID, poolID, hash, encrypted)
-			_, _ = tx.Exec(ctx, `INSERT INTO monitoring_quarantine(queue_kind,job_id,result_id,worker_pool_id,snapshot_hash,safe_reason,encrypted_payload) VALUES('result',$1::uuid,$2::uuid,$3,$4,'conflicting valid result',$5)`, result.JobID, result.ResultID, poolID, hash, encrypted)
-			_, _ = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('result_conflict',$1::uuid,$2,'conflicting valid result')`, result.JobID, poolID)
+			_ = queries.InsertResultConflict(ctx, database.InsertResultConflictParams{JobID: result.JobID, ResultID: result.ResultID, WorkerPoolID: poolID, SnapshotHash: hash, EncryptedPayload: encrypted})
+			_ = queries.InsertConflictingResultQuarantine(ctx, database.InsertConflictingResultQuarantineParams{JobID: result.JobID, ResultID: result.ResultID, WorkerPoolID: databaseText(poolID), SnapshotHash: hash, EncryptedPayload: encrypted})
+			_ = queries.InsertMonitoringOperationalEvent(ctx, database.InsertMonitoringOperationalEventParams{EventType: "result_conflict", JobID: result.JobID, WorkerPoolID: poolID, SafeDetails: "conflicting valid result"})
 			if err = tx.Commit(ctx); err != nil {
 				return true, err
 			}
 			return true, c.source.AcknowledgeResult(ctx, delivery)
 		}
-		_, _ = tx.Exec(ctx, `UPDATE check_dispatch_outbox SET publish_state='repaired',updated_at=CURRENT_TIMESTAMP WHERE job_id=$1::uuid AND publish_state<>'published'`, result.JobID)
+		_ = queries.MarkDispatchRepaired(ctx, result.JobID)
 		if err = tx.Commit(ctx); err != nil {
 			return true, err
 		}
@@ -106,19 +103,19 @@ j.state,j.job_type,j.organization_id::text,j.environment_id::text,j.monitor_id::
 	} else if !errors.Is(existingErr, pgx.ErrNoRows) {
 		return true, existingErr
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO health_checks(job_id,result_id,organization_id,environment_id,monitor_id,job_type,scheduled_at,started_at,completed_at,succeeded,status_code,error_category,total_duration_microseconds,snapshot_hash,worker_pool_id,worker_id,execution_attempt_id,dns_duration_microseconds,connect_duration_microseconds,tls_duration_microseconds,first_byte_duration_microseconds) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::uuid,$18,$19,$20,$21)`, result.JobID, result.ResultID, organizationID, environmentID, monitorID, jobType, scheduled, result.StartedAt, result.CompletedAt, result.Succeeded, result.StatusCode, result.ErrorCategory, result.TotalMicros, hash, poolID, result.WorkerID, result.AttemptID, result.DNSMicros, result.ConnectMicros, result.TLSMicros, result.FirstByteMicros)
+	err = queries.InsertAcceptedHealthCheck(ctx, database.InsertAcceptedHealthCheckParams{JobID: result.JobID, ResultID: result.ResultID, OrganizationID: organizationID, EnvironmentID: environmentID, MonitorID: monitorID, JobType: jobType, ScheduledAt: databaseTimestamp(scheduled), StartedAt: databaseTimestamp(result.StartedAt), CompletedAt: databaseTimestamp(result.CompletedAt), Succeeded: result.Succeeded, StatusCode: optionalInt16(result.StatusCode), ErrorCategory: optionalText(result.ErrorCategory), TotalDurationMicroseconds: result.TotalMicros, SnapshotHash: hash, WorkerPoolID: databaseText(poolID), WorkerID: databaseText(result.WorkerID), ExecutionAttemptID: result.AttemptID, DnsDurationMicroseconds: optionalInt64(result.DNSMicros), ConnectDurationMicroseconds: optionalInt64(result.ConnectMicros), TlsDurationMicroseconds: optionalInt64(result.TLSMicros), FirstByteDurationMicroseconds: optionalInt64(result.FirstByteMicros)})
 	if err != nil {
 		return true, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE check_jobs SET state='completed',started_at=$1,completed_at=$2,worker_id=$3,execution_attempt_id=$4::uuid,last_safe_error=NULL,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL WHERE id=$5::uuid`, result.StartedAt, result.CompletedAt, result.WorkerID, result.AttemptID, result.JobID)
+	err = queries.CompleteCheckJob(ctx, database.CompleteCheckJobParams{StartedAt: databaseTimestamp(result.StartedAt), CompletedAt: databaseTimestamp(result.CompletedAt), WorkerID: databaseText(result.WorkerID), ExecutionAttemptID: result.AttemptID, JobID: result.JobID})
 	if err != nil {
 		return true, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE check_dispatch_outbox SET publish_state=CASE WHEN publish_state='published' THEN publish_state ELSE 'repaired' END,updated_at=CURRENT_TIMESTAMP WHERE job_id=$1::uuid`, result.JobID)
+	err = queries.MarkDispatchRepaired(ctx, result.JobID)
 	if err != nil {
 		return true, err
 	}
-	_, err = tx.Exec(ctx, `DELETE FROM monitoring_coverage_gaps WHERE monitor_id=$1::uuid AND scheduled_at=$2 AND reason IN('expired','dead')`, monitorID, scheduled)
+	err = queries.DeleteRecoveredCoverageGaps(ctx, database.DeleteRecoveredCoverageGapsParams{MonitorID: monitorID, ScheduledAt: databaseTimestamp(scheduled)})
 	if err != nil {
 		return true, err
 	}
@@ -140,22 +137,18 @@ j.state,j.job_type,j.organization_id::text,j.environment_id::text,j.monitor_id::
 			if !corrected {
 				details = "raw and rollup correction only"
 			}
-			if _, err = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('late_correction',$1::uuid,$2,$3)`, result.JobID, poolID, details); err != nil {
+			if err = queries.InsertMonitoringOperationalEvent(ctx, database.InsertMonitoringOperationalEventParams{EventType: "late_correction", JobID: result.JobID, WorkerPoolID: poolID, SafeDetails: details}); err != nil {
 				return true, err
 			}
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO monitor_rollup_invalidations(monitor_id,bucket_kind,bucket_start,reason)
-VALUES($1::uuid,'hourly',date_trunc('hour',$2::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',$3)
-ON CONFLICT(monitor_id,bucket_kind,bucket_start) DO UPDATE SET reason=EXCLUDED.reason,invalidated_at=CURRENT_TIMESTAMP`, monitorID, scheduled, reason); err != nil {
+		if err = queries.UpsertHourlyRollupInvalidation(ctx, database.UpsertHourlyRollupInvalidationParams{MonitorID: monitorID, ScheduledAt: databaseTimestamp(scheduled), Reason: reason}); err != nil {
 			return true, err
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO monitor_rollup_invalidations(monitor_id,bucket_kind,bucket_start,reason)
-VALUES($1::uuid,'daily',date_trunc('day',$2::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',$3)
-ON CONFLICT(monitor_id,bucket_kind,bucket_start) DO UPDATE SET reason=EXCLUDED.reason,invalidated_at=CURRENT_TIMESTAMP`, monitorID, scheduled, reason); err != nil {
+		if err = queries.UpsertDailyRollupInvalidation(ctx, database.UpsertDailyRollupInvalidationParams{MonitorID: monitorID, ScheduledAt: databaseTimestamp(scheduled), Reason: reason}); err != nil {
 			return true, err
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO api_refresh_events(organization_id,environment_id,event_type,resource_type,resource_id) VALUES($1::uuid,$2::uuid,'check.accepted','check',$3::uuid)`, organizationID, environmentID, result.JobID); err != nil {
+	if err = queries.InsertAcceptedCheckRefreshEvent(ctx, database.InsertAcceptedCheckRefreshEventParams{OrganizationID: organizationID, EnvironmentID: environmentID, JobID: result.JobID}); err != nil {
 		return true, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -170,8 +163,8 @@ func (c *ResultConsumer) databaseReady(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	defer tx.Rollback(context.Background())
-	var one int
-	if err = tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil {
+	one, err := database.New(tx).DatabasePing(ctx)
+	if err != nil {
 		return false, err
 	}
 	return one == 1, nil

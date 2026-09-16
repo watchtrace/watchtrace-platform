@@ -15,8 +15,11 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/envelope"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
 )
 
@@ -58,15 +61,17 @@ func run(ctx context.Context, id string, execute bool, approver, reason string) 
 		return err
 	}
 	defer db.Close()
-	var kind, jobID, resultID, poolID, status string
-	var encrypted []byte
-	var count int
-	var expires time.Time
-	err = db.QueryRow(ctx, `SELECT queue_kind,COALESCE(job_id::text,''),COALESCE(result_id::text,''),COALESCE(worker_pool_id,''),status,encrypted_payload,redrive_count,expires_at FROM monitoring_quarantine WHERE id=$1::uuid`, id).Scan(&kind, &jobID, &resultID, &poolID, &status, &encrypted, &count, &expires)
+	quarantineID, err := databaseUUID(id)
 	if err != nil {
 		return err
 	}
-	if status != "quarantined" || count >= 3 || time.Now().UTC().After(expires) {
+	queries := database.New(db)
+	record, err := queries.GetQuarantineRecord(ctx, quarantineID)
+	if err != nil {
+		return err
+	}
+	kind, jobID, resultID, poolID := record.QueueKind, record.JobID, record.ResultID, record.WorkerPoolID
+	if record.Status != "quarantined" || record.RedriveCount >= 3 || time.Now().UTC().After(record.ExpiresAt.Time) {
 		return errors.New("quarantine record is not recoverable")
 	}
 	if kind == "job" {
@@ -75,7 +80,7 @@ func run(ctx context.Context, id string, execute bool, approver, reason string) 
 	if resultID == "" || jobID == "" {
 		return errors.New("result identity is unavailable")
 	}
-	plain, err := sealer.Open(encrypted, []byte("result:"+resultID))
+	plain, err := sealer.Open(record.EncryptedPayload, []byte("result:"+resultID))
 	if err != nil {
 		return err
 	}
@@ -83,16 +88,18 @@ func run(ctx context.Context, id string, execute bool, approver, reason string) 
 	if err != nil || result.ResultID != resultID || result.JobID != jobID || result.WorkerPoolID != poolID {
 		return envelope.ErrInvalid
 	}
-	var public []byte
-	var state string
-	err = db.QueryRow(ctx, `SELECT COALESCE((SELECT public_material FROM worker_pool_credentials WHERE worker_pool_id=j.worker_pool_id AND purpose='result_signing' AND key_id=$2 AND status IN('active','retired') ORDER BY activates_at DESC LIMIT 1),wp.result_public_key),j.state FROM check_jobs j JOIN worker_pools wp ON wp.id=j.worker_pool_id WHERE j.id=$1::uuid AND j.worker_pool_id=$3`, jobID, result.ResultKeyID, poolID).Scan(&public, &state)
+	jobUUID, err := databaseUUID(jobID)
 	if err != nil {
 		return err
 	}
-	if _, err = envelope.VerifyResult(plain, ed25519.PublicKey(public)); err != nil {
+	verification, err := queries.GetRecoveryResultVerification(ctx, database.GetRecoveryResultVerificationParams{Column1: jobUUID, KeyID: result.ResultKeyID, WorkerPoolID: poolID})
+	if err != nil {
 		return err
 	}
-	if state == "completed" { /* idempotent replay remains safe */
+	if _, err = envelope.VerifyResult(plain, ed25519.PublicKey(verification.PublicKey)); err != nil {
+		return err
+	}
+	if verification.State == "completed" { /* idempotent replay remains safe */
 	}
 	fmt.Printf("quarantine %s: result %s for job %s is recoverable (dry_run=%t)\n", id, resultID, jobID, !execute)
 	if !execute {
@@ -121,17 +128,28 @@ func run(ctx context.Context, id string, execute bool, approver, reason string) 
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	tag, err := tx.Exec(ctx, `UPDATE monitoring_quarantine SET status='redriven',redrive_count=redrive_count+1,approver=$2,redrive_reason=$3,reviewed_at=CURRENT_TIMESTAMP WHERE id=$1::uuid AND status='quarantined' AND redrive_count<3`, id, approver, reason)
-	if err != nil || tag.RowsAffected() != 1 {
+	txQueries := database.New(tx)
+	rowsAffected, err := txQueries.MarkQuarantineRedriven(ctx, database.MarkQuarantineRedrivenParams{Column1: quarantineID, Approver: databaseText(approver), RedriveReason: databaseText(reason)})
+	if err != nil || rowsAffected != 1 {
 		return errors.New("quarantine state changed")
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO worker_pool_audit_events(worker_pool_id,action,actor,reason,safe_details) VALUES($1,'redrive',$2,$3,jsonb_build_object('quarantine_id',$4::text,'count',1))`, poolID, approver, reason, id)
-	if err != nil {
+	if err = txQueries.InsertQueueRecoveryAudit(ctx, database.InsertQueueRecoveryAuditParams{WorkerPoolID: poolID, Actor: approver, Reason: reason, Column4: id}); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('redrive',$1::uuid,$2,'controlled result redrive')`, jobID, poolID)
-	if err != nil {
+	if err = txQueries.InsertQueueRecoveryOperationalEvent(ctx, database.InsertQueueRecoveryOperationalEventParams{Column1: jobUUID, WorkerPoolID: databaseText(poolID)}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func databaseUUID(value string) (pgtype.UUID, error) {
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	return pgtype.UUID{Bytes: parsed, Valid: true}, nil
+}
+
+func databaseText(value string) pgtype.Text {
+	return pgtype.Text{String: value, Valid: true}
 }

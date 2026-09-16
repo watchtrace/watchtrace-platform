@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/watchtrace/watchtrace-platform/internal/fifo"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 type DB interface {
@@ -58,41 +60,45 @@ func (s *Service) Read(ctx context.Context) (Health, error) {
 	}
 	defer tx.Rollback(context.Background())
 	h := Health{GeneratedAt: started.UTC(), Maintenance: []Maintenance{}, Disk: readDiskHealth()}
-	if err = tx.QueryRow(ctx, `SELECT COALESCE(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP-min(next_check_at)))::bigint,0) FROM monitors WHERE deleted_at IS NULL AND paused_at IS NULL AND next_check_at<CURRENT_TIMESTAMP`).Scan(&h.SchedulerDelaySeconds); err != nil {
+	queries := database.New(tx)
+	if h.SchedulerDelaySeconds, err = queries.GetSchedulerDelaySeconds(ctx); err != nil {
 		return h, err
 	}
-	if err = tx.QueryRow(ctx, `SELECT COALESCE(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP-max(created_at)))::bigint,0) FROM health_checks`).Scan(&h.ResultConsumerDelaySeconds); err != nil {
+	if h.ResultConsumerDelaySeconds, err = queries.GetResultConsumerDelaySeconds(ctx); err != nil {
 		return h, err
 	}
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM monitoring_coverage_gaps WHERE scheduled_at>CURRENT_TIMESTAMP-INTERVAL '24 hours'`).Scan(&h.MissedChecks); err != nil {
+	if h.MissedChecks, err = queries.CountRecentCoverageGaps(ctx); err != nil {
 		return h, err
 	}
-	if err = tx.QueryRow(ctx, `SELECT count(*),count(*)FILTER(WHERE NOT succeeded) FROM health_checks WHERE completed_at>CURRENT_TIMESTAMP-INTERVAL '24 hours'`).Scan(&h.CompletedChecks, &h.FailedChecks); err != nil {
+	checkCounts, err := queries.GetRecentCheckCounts(ctx)
+	if err != nil {
 		return h, err
 	}
-	var oldest *time.Time
-	if err = tx.QueryRow(ctx, `SELECT count(*),min(created_at) FROM notification_outbox WHERE state IN('pending','leased')`).Scan(&h.NotificationPending, &oldest); err != nil {
+	h.CompletedChecks, h.FailedChecks = checkCounts.CompletedChecks, checkCounts.FailedChecks
+	if h.NotificationPending, err = queries.CountPendingNotifications(ctx); err != nil {
 		return h, err
 	}
-	if oldest != nil {
-		h.NotificationOldestAgeSeconds = int64(started.Sub(*oldest).Seconds())
+	oldest, err := queries.GetOldestPendingNotification(ctx)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return h, err
+	}
+	if err == nil && oldest.Valid {
+		h.NotificationOldestAgeSeconds = int64(started.Sub(oldest.Time).Seconds())
 		if h.NotificationOldestAgeSeconds < 0 {
 			h.NotificationOldestAgeSeconds = 0
 		}
 	}
-	rows, err := tx.Query(ctx, `SELECT task_name,last_started_at,last_success_at,last_failure_at,last_safe_error,rows_affected FROM maintenance_status ORDER BY task_name`)
+	maintenance, err := queries.ListMaintenanceStatuses(ctx)
 	if err != nil {
 		return h, err
 	}
-	for rows.Next() {
-		var m Maintenance
-		if err = rows.Scan(&m.Task, &m.LastStartedAt, &m.LastSuccessAt, &m.LastFailureAt, &m.LastSafeError, &m.RowsAffected); err != nil {
-			rows.Close()
-			return h, err
-		}
-		h.Maintenance = append(h.Maintenance, m)
+	for _, row := range maintenance {
+		h.Maintenance = append(h.Maintenance, Maintenance{
+			Task: row.TaskName, LastStartedAt: optionalTime(row.LastStartedAt),
+			LastSuccessAt: optionalTime(row.LastSuccessAt), LastFailureAt: optionalTime(row.LastFailureAt),
+			LastSafeError: optionalText(row.LastSafeError), RowsAffected: row.RowsAffected,
+		})
 	}
-	rows.Close()
 	if err = tx.Commit(ctx); err != nil {
 		return h, err
 	}
@@ -110,22 +116,25 @@ func (s *Service) Record(ctx context.Context, task string, started time.Time, co
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	safe := any(nil)
-	success, failure := any(nil), any(nil)
+	var safe pgtype.Text
+	var success, failure pgtype.Timestamptz
 	if runErr == nil {
-		success = s.now().UTC()
+		success = timestamp(s.now().UTC())
 	} else {
-		failure = s.now().UTC()
-		safe = "maintenance_failed"
+		failure = timestamp(s.now().UTC())
+		safe = pgtype.Text{String: "maintenance_failed", Valid: true}
 	}
 	if count < 0 {
 		return errors.New("invalid maintenance count")
 	}
-	tag, err := tx.Exec(ctx, `UPDATE maintenance_status SET last_started_at=$2,last_success_at=COALESCE($3,last_success_at),last_failure_at=COALESCE($4,last_failure_at),last_safe_error=$5,rows_affected=$6,updated_at=CURRENT_TIMESTAMP WHERE task_name=$1`, task, started.UTC(), success, failure, safe, count)
+	rowsAffected, err := database.New(tx).UpdateMaintenanceStatus(ctx, database.UpdateMaintenanceStatusParams{
+		TaskName: task, LastStartedAt: timestamp(started.UTC()), RowsAffected: count,
+		LastSuccessAt: success, LastFailureAt: failure, LastSafeError: safe,
+	})
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
+	if rowsAffected != 1 {
 		return errors.New("unknown maintenance task")
 	}
 	return tx.Commit(ctx)
@@ -136,22 +145,45 @@ func (s *Service) CleanupExpired(ctx context.Context, now time.Time) (int64, err
 		return 0, err
 	}
 	defer tx.Rollback(context.Background())
-	var count int64
-	queries := []string{
-		`DELETE FROM user_action_tokens WHERE expires_at<$1::timestamptz OR used_at<($1::timestamptz-INTERVAL '7 days')`,
-		`DELETE FROM org_invitations WHERE expires_at<($1::timestamptz-INTERVAL '7 days') OR accepted_at<($1::timestamptz-INTERVAL '7 days')`,
-		`DELETE FROM notification_outbox WHERE state IN('accepted','failed') AND updated_at<($1::timestamptz-INTERVAL '30 days')`,
-		`DELETE FROM api_refresh_events WHERE occurred_at<($1::timestamptz-INTERVAL '1 day')`,
+	queries := database.New(tx)
+	cutoff := timestamp(now.UTC())
+	counts := make([]int64, 4)
+	if counts[0], err = queries.DeleteExpiredUserActionTokens(ctx, cutoff); err != nil {
+		return 0, err
 	}
-	for _, query := range queries {
-		tag, e := tx.Exec(ctx, query, now.UTC())
-		if e != nil {
-			return 0, e
-		}
-		count += tag.RowsAffected()
+	if counts[1], err = queries.DeleteExpiredOrganizationInvitations(ctx, cutoff); err != nil {
+		return 0, err
+	}
+	if counts[2], err = queries.DeleteOldNotificationDeliveries(ctx, cutoff); err != nil {
+		return 0, err
+	}
+	if counts[3], err = queries.DeleteOldRefreshEvents(ctx, cutoff); err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, n := range counts {
+		count += n
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return 0, err
 	}
 	return count, nil
+}
+
+func timestamp(value time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: value, Valid: true}
+}
+
+func optionalTime(value pgtype.Timestamptz) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+	return &value.Time
+}
+
+func optionalText(value pgtype.Text) *string {
+	if !value.Valid {
+		return nil
+	}
+	return &value.String
 }

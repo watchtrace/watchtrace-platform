@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/watchtrace/watchtrace-platform/internal/envelope"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
 )
@@ -69,12 +70,13 @@ func (r *DLQReconciler) ReconcileNext(ctx context.Context) (bool, error) {
 			return true, err
 		}
 		defer tx.Rollback(context.Background())
+		queries := database.New(tx)
 		if peekErr != nil {
-			_, err = tx.Exec(ctx, `INSERT INTO monitoring_quarantine(queue_kind,safe_reason,encrypted_payload) VALUES('result','invalid result DLQ envelope',$1)`, sealed)
+			err = queries.InsertInvalidResultQuarantine(ctx, sealed)
 		} else {
-			_, err = tx.Exec(ctx, `INSERT INTO monitoring_quarantine(queue_kind,job_id,result_id,worker_pool_id,snapshot_hash,safe_reason,encrypted_payload) VALUES('result',$1::uuid,$2::uuid,$3,decode($4,'hex'),'result DLQ recovery',$5) ON CONFLICT DO NOTHING`, result.JobID, result.ResultID, result.WorkerPoolID, result.SnapshotHash, sealed)
+			err = queries.InsertResultDLQQuarantine(ctx, database.InsertResultDLQQuarantineParams{JobID: result.JobID, ResultID: result.ResultID, WorkerPoolID: databaseText(result.WorkerPoolID), SnapshotHash: result.SnapshotHash, EncryptedPayload: sealed})
 			if err == nil {
-				_, err = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('result_dlq',$1::uuid,$2,'recoverable result quarantined')`, result.JobID, result.WorkerPoolID)
+				err = queries.InsertMonitoringOperationalEvent(ctx, database.InsertMonitoringOperationalEventParams{EventType: "result_dlq", JobID: result.JobID, WorkerPoolID: result.WorkerPoolID, SafeDetails: "recoverable result quarantined"})
 			}
 		}
 		if err != nil {
@@ -94,13 +96,14 @@ func reconcileJobDLQ(ctx context.Context, db DB, jobID, poolID string) error {
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	tag, err := tx.Exec(ctx, `UPDATE check_jobs SET state='dead',completed_at=CURRENT_TIMESTAMP,last_safe_error='job_dlq' WHERE id=$1::uuid AND worker_pool_id=$2 AND state<>'completed'`, jobID, poolID)
+	queries := database.New(tx)
+	rowsAffected, err := queries.MarkCheckJobDead(ctx, database.MarkCheckJobDeadParams{JobID: jobID, WorkerPoolID: poolID})
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() > 0 {
-		_, _ = tx.Exec(ctx, `INSERT INTO monitoring_coverage_gaps(organization_id,environment_id,monitor_id,scheduled_at,reason) SELECT organization_id,environment_id,monitor_id,scheduled_at,'dead' FROM check_jobs WHERE id=$1::uuid ON CONFLICT DO NOTHING`, jobID)
-		_, _ = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('job_dlq',$1::uuid,$2,'job receive limit')`, jobID, poolID)
+	if rowsAffected > 0 {
+		_ = queries.InsertDeadCoverageGapFromJob(ctx, jobID)
+		_ = queries.InsertMonitoringOperationalEvent(ctx, database.InsertMonitoringOperationalEventParams{EventType: "job_dlq", JobID: jobID, WorkerPoolID: poolID, SafeDetails: "job receive limit"})
 	}
 	return tx.Commit(ctx)
 }
@@ -165,8 +168,7 @@ func (c *ResultConsumer) RecordResultDLQ(ctx context.Context, jobID, poolID stri
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	_, err = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,job_id,worker_pool_id,safe_details) VALUES('result_dlq',$1::uuid,$2,'recoverable result requires redrive')`, jobID, poolID)
-	if err != nil {
+	if err = database.New(tx).InsertMonitoringOperationalEvent(ctx, database.InsertMonitoringOperationalEventParams{EventType: "result_dlq", JobID: jobID, WorkerPoolID: poolID, SafeDetails: "recoverable result requires redrive"}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

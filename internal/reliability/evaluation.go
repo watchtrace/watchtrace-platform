@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 type acceptedSlot struct {
@@ -59,22 +60,25 @@ func (s *Service) EvaluateMonitor(ctx context.Context, monitorID string, now tim
 }
 
 func evaluateTx(ctx context.Context, tx pgx.Tx, monitorID string, accepted *acceptedSlot, now time.Time) (bool, error) {
-	if _, err := tx.Exec(ctx, `INSERT INTO monitor_reliability_states(monitor_id)
-SELECT id FROM monitors WHERE id=$1::uuid ON CONFLICT DO NOTHING`, monitorID); err != nil {
+	queries := database.New(tx)
+	if err := queries.EnsureMonitorReliabilityState(ctx, monitorID); err != nil {
 		return false, err
 	}
-	var current stateSnapshot
-	err := tx.QueryRow(ctx, `SELECT display_state,observed_state,consecutive_failures,consecutive_successes,
- last_observed_scheduled_at,last_observed_job_id::text,last_evaluated_scheduled_at,last_evaluated_job_id::text
-FROM monitor_reliability_states WHERE monitor_id=$1::uuid FOR UPDATE`, monitorID).Scan(
-		&current.display, &current.observed, &current.failures, &current.successes,
-		&current.lastObservedAt, &current.lastObservedJob, &current.lastEvaluatedAt, &current.lastEvaluatedJob)
+	state, err := queries.LockMonitorReliabilityState(ctx, monitorID)
 	if err != nil {
 		return false, err
 	}
+	current := stateSnapshot{
+		display: state.DisplayState, observed: state.ObservedState,
+		failures: int(state.ConsecutiveFailures), successes: int(state.ConsecutiveSuccesses),
+		lastObservedAt: optionalTime(state.LastObservedScheduledAt), lastObservedJob: optionalString(state.LastObservedJobID),
+		lastEvaluatedAt: optionalTime(state.LastEvaluatedScheduledAt), lastEvaluatedJob: optionalString(state.LastEvaluatedJobID),
+	}
 	failureLimit, recoveryLimit := failureThreshold, recoveryThreshold
-	thresholdErr := tx.QueryRow(ctx, `SELECT failure_threshold,recovery_threshold FROM alert_rules
-WHERE monitor_id=$1::uuid AND rule_key='consecutive_failures' AND enabled`, monitorID).Scan(&failureLimit, &recoveryLimit)
+	thresholds, thresholdErr := queries.GetMonitorAlertThresholds(ctx, monitorID)
+	if thresholdErr == nil {
+		failureLimit, recoveryLimit = int(thresholds.FailureThreshold), int(thresholds.RecoveryThreshold)
+	}
 	if thresholdErr != nil && !errors.Is(thresholdErr, pgx.ErrNoRows) {
 		return false, thresholdErr
 	}
@@ -84,63 +88,56 @@ WHERE monitor_id=$1::uuid AND rule_key='consecutive_failures' AND enabled`, moni
 		!orderAfter(accepted.scheduled, accepted.jobID, *current.lastObservedAt, *current.lastObservedJob)
 	if correction {
 		baseline = stateSnapshot{display: "unknown", observed: "unknown"}
-		previousErr := tx.QueryRow(ctx, `SELECT observed_state,consecutive_failures,consecutive_successes,scheduled_at,job_id::text
-FROM monitor_result_evaluations
-WHERE monitor_id=$1::uuid AND (scheduled_at,job_id)<($2,$3::uuid)
-ORDER BY scheduled_at DESC,job_id DESC LIMIT 1`, monitorID, accepted.scheduled, accepted.jobID).Scan(
-			&baseline.observed, &baseline.failures, &baseline.successes, &baseline.lastObservedAt, &baseline.lastObservedJob)
+		previous, previousErr := queries.GetReliabilityBaselineBefore(ctx, database.GetReliabilityBaselineBeforeParams{MonitorID: monitorID, ScheduledAt: databaseTimestamp(accepted.scheduled), JobID: accepted.jobID})
+		if previousErr == nil {
+			scheduledAt, jobID := previous.ScheduledAt.Time, previous.JobID
+			baseline.observed, baseline.failures, baseline.successes = previous.ObservedState, int(previous.ConsecutiveFailures), int(previous.ConsecutiveSuccesses)
+			baseline.lastObservedAt, baseline.lastObservedJob = &scheduledAt, &jobID
+		}
 		if previousErr != nil && !errors.Is(previousErr, pgx.ErrNoRows) {
 			return false, previousErr
 		}
-		if _, err = tx.Exec(ctx, `DELETE FROM monitor_result_evaluations
-WHERE monitor_id=$1::uuid AND (scheduled_at,job_id)>=($2,$3::uuid)`, monitorID, accepted.scheduled, accepted.jobID); err != nil {
+		if err = queries.DeleteReliabilityEvaluationsFrom(ctx, database.DeleteReliabilityEvaluationsFromParams{MonitorID: monitorID, ScheduledAt: databaseTimestamp(accepted.scheduled), JobID: accepted.jobID}); err != nil {
 			return false, err
 		}
 	}
 
-	query := `SELECT job_id::text,scheduled_at,succeeded FROM health_checks
-WHERE monitor_id=$1::uuid AND job_type='scheduled'`
-	args := []any{monitorID}
-	if correction {
-		query += ` AND (scheduled_at,job_id)>=($2,$3::uuid)`
-		args = append(args, accepted.scheduled, accepted.jobID)
-	} else if current.lastObservedAt != nil && current.lastObservedJob != nil {
-		query += ` AND (scheduled_at,job_id)>($2,$3::uuid)`
-		args = append(args, *current.lastObservedAt, *current.lastObservedJob)
-	}
-	query += ` ORDER BY scheduled_at,job_id`
-	rows, err := tx.Query(ctx, query, args...)
-	if err != nil {
-		return false, err
-	}
 	type observedResult struct {
 		jobID       string
 		scheduledAt time.Time
 		succeeded   bool
 	}
 	results := []observedResult{}
-	for rows.Next() {
-		var result observedResult
-		if err = rows.Scan(&result.jobID, &result.scheduledAt, &result.succeeded); err != nil {
-			rows.Close()
-			return false, err
+	if correction {
+		rows, queryErr := queries.ListScheduledHealthChecksFrom(ctx, database.ListScheduledHealthChecksFromParams{MonitorID: monitorID, ScheduledAt: databaseTimestamp(accepted.scheduled), JobID: accepted.jobID})
+		if queryErr != nil {
+			return false, queryErr
 		}
-		results = append(results, result)
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return false, err
+		for _, row := range rows {
+			results = append(results, observedResult{jobID: row.JobID, scheduledAt: row.ScheduledAt.Time, succeeded: row.Succeeded})
+		}
+	} else if current.lastObservedAt != nil && current.lastObservedJob != nil {
+		rows, queryErr := queries.ListScheduledHealthChecksAfter(ctx, database.ListScheduledHealthChecksAfterParams{MonitorID: monitorID, ScheduledAt: databaseTimestamp(*current.lastObservedAt), JobID: *current.lastObservedJob})
+		if queryErr != nil {
+			return false, queryErr
+		}
+		for _, row := range rows {
+			results = append(results, observedResult{jobID: row.JobID, scheduledAt: row.ScheduledAt.Time, succeeded: row.Succeeded})
+		}
+	} else {
+		rows, queryErr := queries.ListAllScheduledHealthChecks(ctx, monitorID)
+		if queryErr != nil {
+			return false, queryErr
+		}
+		for _, row := range rows {
+			results = append(results, observedResult{jobID: row.JobID, scheduledAt: row.ScheduledAt.Time, succeeded: row.Succeeded})
+		}
 	}
 	observed, failures, successes := baseline.observed, baseline.failures, baseline.successes
 	lastObservedAt, lastObservedJob := baseline.lastObservedAt, baseline.lastObservedJob
 	for _, result := range results {
 		observed, failures, successes = advanceObservedState(observed, failures, successes, result.succeeded, failureLimit, recoveryLimit)
-		if _, err = tx.Exec(ctx, `INSERT INTO monitor_result_evaluations(
- monitor_id,job_id,scheduled_at,succeeded,observed_state,consecutive_failures,consecutive_successes)
-VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7)
-ON CONFLICT(job_id) DO UPDATE SET observed_state=EXCLUDED.observed_state,
- consecutive_failures=EXCLUDED.consecutive_failures,consecutive_successes=EXCLUDED.consecutive_successes,
- evaluated_at=CURRENT_TIMESTAMP`, monitorID, result.jobID, result.scheduledAt, result.succeeded, observed, failures, successes); err != nil {
+		if err = queries.UpsertMonitorResultEvaluation(ctx, database.UpsertMonitorResultEvaluationParams{MonitorID: monitorID, JobID: result.jobID, ScheduledAt: databaseTimestamp(result.scheduledAt), Succeeded: result.succeeded, ObservedState: observed, ConsecutiveFailures: int16(failures), ConsecutiveSuccesses: int16(successes)}); err != nil {
 			return false, err
 		}
 		scheduledCopy, jobCopy := result.scheduledAt.UTC(), result.jobID
@@ -148,24 +145,20 @@ ON CONFLICT(job_id) DO UPDATE SET observed_state=EXCLUDED.observed_state,
 	}
 
 	var newestExpected *time.Time
-	err = tx.QueryRow(ctx, `SELECT max(slot) FROM monitor_schedule_periods p
-CROSS JOIN LATERAL generate_series(
- p.first_slot_at,
- LEAST(COALESCE(p.ends_at-INTERVAL '1 microsecond',$2),$2),
- make_interval(secs=>p.interval_seconds)) AS slots(slot)
-WHERE p.monitor_id=$1::uuid AND p.starts_at<=$2`, monitorID, now).Scan(&newestExpected)
-	if err != nil {
-		return false, err
+	newest, newestErr := queries.GetNewestExpectedMonitorSlot(ctx, database.GetNewestExpectedMonitorSlotParams{EvaluatedAt: databaseTimestamp(now), MonitorID: monitorID})
+	if newestErr == nil {
+		newestTime := newest.Time
+		newestExpected = &newestTime
+	} else if !errors.Is(newestErr, pgx.ErrNoRows) {
+		return false, newestErr
 	}
 	display := "unknown"
 	var evaluatedJob *string
 	if newestExpected != nil {
 		var evaluatedState, job string
-		evaluationErr := tx.QueryRow(ctx, `SELECT e.observed_state,e.job_id::text
-FROM monitor_result_evaluations e
-WHERE e.monitor_id=$1::uuid AND e.scheduled_at=$2
-ORDER BY e.job_id DESC LIMIT 1`, monitorID, *newestExpected).Scan(&evaluatedState, &job)
+		evaluation, evaluationErr := queries.GetMonitorEvaluationAtSlot(ctx, database.GetMonitorEvaluationAtSlotParams{MonitorID: monitorID, ScheduledAt: databaseTimestamp(*newestExpected)})
 		if evaluationErr == nil {
+			evaluatedState, job = evaluation.ObservedState, evaluation.JobID
 			display = evaluatedState
 			evaluatedJob = &job
 		} else if !errors.Is(evaluationErr, pgx.ErrNoRows) {
@@ -175,29 +168,18 @@ ORDER BY e.job_id DESC LIMIT 1`, monitorID, *newestExpected).Scan(&evaluatedStat
 	if observed == "" {
 		observed = "unknown"
 	}
-	_, err = tx.Exec(ctx, `UPDATE monitor_reliability_states SET
- display_state=$2,observed_state=$3,consecutive_failures=$4,consecutive_successes=$5,
- last_observed_scheduled_at=$6,last_observed_job_id=$7::uuid,newest_expected_scheduled_at=$8,
- last_evaluated_scheduled_at=$8,last_evaluated_job_id=$9::uuid,updated_at=CURRENT_TIMESTAMP
-WHERE monitor_id=$1::uuid`, monitorID, display, observed, failures, successes,
-		lastObservedAt, lastObservedJob, newestExpected, evaluatedJob)
+	err = queries.UpdateMonitorReliabilityState(ctx, database.UpdateMonitorReliabilityStateParams{DisplayState: display, ObservedState: observed, ConsecutiveFailures: int16(failures), ConsecutiveSuccesses: int16(successes), LastObservedScheduledAt: optionalDatabaseTimestamp(lastObservedAt), LastObservedJobID: optionalDatabaseString(lastObservedJob), NewestExpectedScheduledAt: optionalDatabaseTimestamp(newestExpected), LastEvaluatedJobID: optionalDatabaseString(evaluatedJob), MonitorID: monitorID})
 	if err != nil {
 		return false, err
 	}
 	if newestExpected != nil {
-		_, err = tx.Exec(ctx, `INSERT INTO monitor_evaluation_positions(monitor_id,last_scheduled_at,last_job_id,invalidated_from)
-VALUES($1::uuid,$2,$3::uuid,NULL)
-ON CONFLICT(monitor_id) DO UPDATE SET last_scheduled_at=EXCLUDED.last_scheduled_at,
- last_job_id=EXCLUDED.last_job_id,invalidated_from=NULL,updated_at=CURRENT_TIMESTAMP`, monitorID, *newestExpected, evaluatedJob)
+		err = queries.UpsertMonitorEvaluationPosition(ctx, database.UpsertMonitorEvaluationPositionParams{MonitorID: monitorID, LastScheduledAt: databaseTimestamp(*newestExpected), LastJobID: optionalDatabaseString(evaluatedJob)})
 		if err != nil {
 			return false, err
 		}
 	}
 	if correction {
-		_, err = tx.Exec(ctx, `INSERT INTO monitor_state_correction_events(
- monitor_id,accepted_job_id,corrected_from,previous_display_state,corrected_display_state)
-VALUES($1::uuid,$2::uuid,$3,$4,$5) ON CONFLICT(monitor_id,accepted_job_id) DO NOTHING`,
-			monitorID, accepted.jobID, accepted.scheduled, current.display, display)
+		err = queries.InsertMonitorStateCorrection(ctx, database.InsertMonitorStateCorrectionParams{MonitorID: monitorID, AcceptedJobID: accepted.jobID, CorrectedFrom: databaseTimestamp(accepted.scheduled), PreviousDisplayState: current.display, CorrectedDisplayState: display})
 		if err != nil {
 			return false, err
 		}
@@ -242,26 +224,8 @@ func (s *Service) RefreshDueStates(ctx context.Context, now time.Time, limit int
 	if err != nil {
 		return 0, err
 	}
-	rows, err := tx.Query(ctx, `SELECT DISTINCT m.id::text AS monitor_id FROM monitors m
-JOIN monitor_schedule_periods p ON p.monitor_id=m.id
-WHERE m.deleted_at IS NULL AND p.starts_at<=$1
-ORDER BY monitor_id LIMIT $2`, now.UTC(), limit)
+	ids, err := database.New(tx).ListMonitorsDueForStateRefresh(ctx, database.ListMonitorsDueForStateRefreshParams{EvaluatedAt: databaseTimestamp(now.UTC()), ResultLimit: int32(limit)})
 	if err != nil {
-		tx.Rollback(context.Background())
-		return 0, err
-	}
-	ids := []string{}
-	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
-			rows.Close()
-			tx.Rollback(context.Background())
-			return 0, err
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
 		tx.Rollback(context.Background())
 		return 0, err
 	}

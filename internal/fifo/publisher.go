@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/watchtrace/watchtrace-platform/internal/envelope"
-	"time"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 type SendInput struct {
@@ -42,21 +44,22 @@ func (p *Publisher) PublishNext(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	defer tx.Rollback(context.Background())
-	var row outbox
-	err = tx.QueryRow(ctx, `WITH candidate AS(SELECT job_id FROM check_dispatch_outbox WHERE publish_state='pending' AND publish_attempts<3 AND next_attempt_at<=CURRENT_TIMESTAMP ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) UPDATE check_dispatch_outbox o SET publish_state='publishing',publish_attempts=publish_attempts+1,publish_lease_token=gen_random_uuid(),publish_lease_expires_at=CURRENT_TIMESTAMP+INTERVAL '45 seconds',updated_at=CURRENT_TIMESTAMP FROM candidate WHERE o.job_id=candidate.job_id RETURNING o.job_id::text,o.worker_pool_id,o.queue_url,o.message_body,o.snapshot_hash,o.message_deduplication_id,o.message_group_id,o.expires_at,o.publish_attempts,o.schema_version,o.platform_key_id,o.worker_encryption_key_id,o.publish_lease_token::text`).Scan(&row.JobID, &row.Pool, &row.Queue, &row.Body, &row.Hash, &row.Dedup, &row.Group, &row.Expiry, &row.Attempts, &row.Schema, &row.PlatformKeyID, &row.WorkerKeyID, &row.Token)
+	claimed, err := database.New(tx).ClaimDispatchOutbox(ctx)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
+	row := outbox{JobID: claimed.JobID, Pool: claimed.WorkerPoolID, Queue: claimed.QueueUrl, Body: claimed.MessageBody, Hash: claimed.SnapshotHash, Dedup: claimed.MessageDeduplicationID, Group: claimed.MessageGroupID, Expiry: claimed.ExpiresAt.Time, Attempts: claimed.PublishAttempts, Schema: claimed.SchemaVersion, PlatformKeyID: claimed.PlatformKeyID, WorkerKeyID: claimed.WorkerEncryptionKeyID, Token: claimed.PublishLeaseToken}
+	queries := database.New(tx)
 	if p.now().UTC().After(row.Expiry) {
-		_, err = tx.Exec(ctx, `UPDATE check_dispatch_outbox SET publish_state='expired',publish_lease_token=NULL,publish_lease_expires_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE job_id=$1::uuid AND publish_lease_token=$2::uuid`, row.JobID, row.Token)
+		err = queries.ExpireClaimedDispatch(ctx, database.ExpireClaimedDispatchParams{JobID: row.JobID, LeaseToken: row.Token})
 		if err == nil {
-			_, err = tx.Exec(ctx, `UPDATE check_jobs SET state='expired',completed_at=CURRENT_TIMESTAMP,last_safe_error='dispatch_expired' WHERE id=$1::uuid AND state IN('pending','pending_publish')`, row.JobID)
+			err = queries.ExpireUnpublishedCheckJob(ctx, row.JobID)
 		}
 		if err == nil {
-			_, err = tx.Exec(ctx, `INSERT INTO monitoring_coverage_gaps(organization_id,environment_id,monitor_id,scheduled_at,reason) SELECT organization_id,environment_id,monitor_id,scheduled_at,'expired' FROM check_jobs WHERE id=$1::uuid ON CONFLICT DO NOTHING`, row.JobID)
+			err = queries.InsertExpiredCoverageGapFromJob(ctx, row.JobID)
 		}
 		if err != nil {
 			return true, err
@@ -73,10 +76,11 @@ func (p *Publisher) PublishNext(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	defer tx.Rollback(context.Background())
+	queries = database.New(tx)
 	if sendErr == nil {
-		_, err = tx.Exec(ctx, `UPDATE check_dispatch_outbox SET publish_state='published',sqs_message_id=$1,published_at=CURRENT_TIMESTAMP,publish_lease_token=NULL,publish_lease_expires_at=NULL,last_safe_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE job_id=$2::uuid AND publish_lease_token=$3::uuid`, messageID, row.JobID, row.Token)
+		err = queries.MarkDispatchPublished(ctx, database.MarkDispatchPublishedParams{MessageID: databaseText(messageID), JobID: row.JobID, LeaseToken: row.Token})
 		if err == nil {
-			_, err = tx.Exec(ctx, `UPDATE check_jobs SET state='published',sqs_message_id=$1 WHERE id=$2::uuid AND state IN('pending','pending_publish')`, messageID, row.JobID)
+			err = queries.MarkCheckJobPublished(ctx, database.MarkCheckJobPublishedParams{MessageID: databaseText(messageID), JobID: row.JobID})
 		}
 	} else {
 		state := "pending"
@@ -88,7 +92,7 @@ func (p *Publisher) PublishNext(ctx context.Context) (bool, error) {
 			state = "ambiguous"
 			delay = 120
 		}
-		_, err = tx.Exec(ctx, `UPDATE check_dispatch_outbox SET publish_state=$1,next_attempt_at=CURRENT_TIMESTAMP+$2::int*INTERVAL '1 second',publish_lease_token=NULL,publish_lease_expires_at=NULL,last_safe_error='sqs_send_failed',updated_at=CURRENT_TIMESTAMP WHERE job_id=$3::uuid AND publish_lease_token=$4::uuid`, state, delay, row.JobID, row.Token)
+		err = queries.MarkDispatchPublishFailure(ctx, database.MarkDispatchPublishFailureParams{PublishState: state, DelaySeconds: int32(delay), JobID: row.JobID, LeaseToken: row.Token})
 	}
 	if err != nil {
 		return true, err

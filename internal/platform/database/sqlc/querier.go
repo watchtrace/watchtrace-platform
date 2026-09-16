@@ -15,17 +15,26 @@ type Querier interface {
 	AcceptOrganizationInvitation(ctx context.Context, arg AcceptOrganizationInvitationParams) (int64, error)
 	AcknowledgeOpenIncident(ctx context.Context, arg AcknowledgeOpenIncidentParams) error
 	AcquireManualTestQueueLock(ctx context.Context) error
+	ActivatePendingWorkerPoolCredentials(ctx context.Context, workerPoolID string) error
+	ActivateWorkerPool(ctx context.Context, arg ActivateWorkerPoolParams) error
+	AdvanceDailyRollupCheckpoint(ctx context.Context, dailyThrough string) error
+	AdvanceHourlyRollupCheckpoint(ctx context.Context, hourlyThrough pgtype.Timestamptz) error
 	AuthorizeBackendMonitor(ctx context.Context, arg AuthorizeBackendMonitorParams) (AuthorizeBackendMonitorRow, error)
 	AuthorizeEnvironmentMembership(ctx context.Context, arg AuthorizeEnvironmentMembershipParams) (AuthorizeEnvironmentMembershipRow, error)
 	AuthorizeProjectMembership(ctx context.Context, arg AuthorizeProjectMembershipParams) (AuthorizeProjectMembershipRow, error)
+	ClaimDispatchOutbox(ctx context.Context) (ClaimDispatchOutboxRow, error)
 	ClaimNotificationDelivery(ctx context.Context, arg ClaimNotificationDeliveryParams) (ClaimNotificationDeliveryRow, error)
 	CloseMonitorSchedulePeriod(ctx context.Context, monitorID string) error
+	CompleteCheckJob(ctx context.Context, arg CompleteCheckJobParams) error
 	CompleteEmailVerification(ctx context.Context, tokenID string) (CompleteEmailVerificationRow, error)
 	CompleteFailedNotificationAttempt(ctx context.Context, arg CompleteFailedNotificationAttemptParams) (int64, error)
 	CompletePasswordReset(ctx context.Context, arg CompletePasswordResetParams) (int64, error)
 	CountActiveManualTestJobs(ctx context.Context) (int64, error)
+	CountActiveScheduledJobs(ctx context.Context) (int64, error)
 	CountOpenEnvironmentIncidents(ctx context.Context, environmentID string) (int64, error)
 	CountOrganizationMonitors(ctx context.Context, organizationID string) (int64, error)
+	CountPendingNotifications(ctx context.Context) (int64, error)
+	CountRecentCoverageGaps(ctx context.Context) (int64, error)
 	CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) error
 	CreateEmailVerificationToken(ctx context.Context, arg CreateEmailVerificationTokenParams) error
 	CreateManualCheckJob(ctx context.Context, arg CreateManualCheckJobParams) (string, error)
@@ -40,20 +49,45 @@ type Querier interface {
 	CreateProject(ctx context.Context, arg CreateProjectParams) (CreateProjectRow, error)
 	CreateRefreshTokenFamily(ctx context.Context, arg CreateRefreshTokenFamilyParams) (CreateRefreshTokenFamilyRow, error)
 	CreateRotatedRefreshToken(ctx context.Context, arg CreateRotatedRefreshTokenParams) (string, error)
+	CreateScheduledCheckJob(ctx context.Context, arg CreateScheduledCheckJobParams) (int64, error)
+	CreateScheduledDispatchOutbox(ctx context.Context, arg CreateScheduledDispatchOutboxParams) error
 	CreateTenantEnvironment(ctx context.Context, arg CreateTenantEnvironmentParams) (CreateTenantEnvironmentRow, error)
 	CreateTenantProject(ctx context.Context, arg CreateTenantProjectParams) (CreateTenantProjectRow, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
+	DatabasePing(ctx context.Context) (int32, error)
+	DeleteDailyRollupInvalidations(ctx context.Context, bucketDate string) error
 	DeleteEmptyTenantEnvironment(ctx context.Context, environmentID string) (int64, error)
 	DeleteEmptyTenantProject(ctx context.Context, projectID string) (int64, error)
 	DeleteExpiredOrRevokedAccessTokens(ctx context.Context, batchSize int32) (int64, error)
+	DeleteExpiredOrganizationInvitations(ctx context.Context, dollar_1 pgtype.Timestamptz) (int64, error)
 	DeleteExpiredRefreshTokenFamilies(ctx context.Context, batchSize int32) (int64, error)
+	DeleteExpiredUserActionTokens(ctx context.Context, dollar_1 pgtype.Timestamptz) (int64, error)
+	DeleteHourlyRollupInvalidations(ctx context.Context, bucketStart pgtype.Timestamptz) error
+	DeleteOldLedgerJobs(ctx context.Context, arg DeleteOldLedgerJobsParams) (int64, error)
+	DeleteOldNotificationDeliveries(ctx context.Context, dollar_1 pgtype.Timestamptz) (int64, error)
+	DeleteOldRefreshEvents(ctx context.Context, dollar_1 pgtype.Timestamptz) (int64, error)
 	DeleteOrganizationMember(ctx context.Context, arg DeleteOrganizationMemberParams) error
+	DeleteRecoveredCoverageGaps(ctx context.Context, arg DeleteRecoveredCoverageGapsParams) error
+	DeleteReliabilityEvaluationsFrom(ctx context.Context, arg DeleteReliabilityEvaluationsFromParams) error
+	DeleteRetainedCheckJobs(ctx context.Context, arg DeleteRetainedCheckJobsParams) (int64, error)
+	DeleteRetainedCoverageGaps(ctx context.Context, deleteBefore pgtype.Timestamptz) (int64, error)
+	DeleteRetainedDailyRollups(ctx context.Context, deleteBefore string) (int64, error)
+	DeleteRetainedHealthChecks(ctx context.Context, deleteBefore pgtype.Timestamptz) (int64, error)
+	DeleteRetainedHourlyRollups(ctx context.Context, deleteBefore pgtype.Timestamptz) (int64, error)
+	DeleteWorkerPool(ctx context.Context, id string) error
 	EnqueueIncidentNotifications(ctx context.Context, arg EnqueueIncidentNotificationsParams) (int64, error)
 	EnsureDefaultAlertRule(ctx context.Context, monitorID string) error
+	EnsureMonitorReliabilityState(ctx context.Context, monitorID string) error
 	ExistingOrganizationMemberByEmail(ctx context.Context, arg ExistingOrganizationMemberByEmailParams) (bool, error)
+	ExpireClaimedDispatch(ctx context.Context, arg ExpireClaimedDispatchParams) error
+	ExpireUnpublishedCheckJob(ctx context.Context, jobID string) error
+	FailWorkerPool(ctx context.Context, id string) error
+	GetAcceptedHealthCheck(ctx context.Context, jobID string) (GetAcceptedHealthCheckRow, error)
 	GetAccessibleEnvironmentOrganization(ctx context.Context, arg GetAccessibleEnvironmentOrganizationParams) (GetAccessibleEnvironmentOrganizationRow, error)
 	GetAccessibleOrganization(ctx context.Context, arg GetAccessibleOrganizationParams) (GetAccessibleOrganizationRow, error)
+	GetCheckJobStateCounts(ctx context.Context) (GetCheckJobStateCountsRow, error)
 	GetDatabaseTime(ctx context.Context) (pgtype.Timestamptz, error)
+	GetDispatchStateCounts(ctx context.Context) (GetDispatchStateCountsRow, error)
 	GetDurableMonitorState(ctx context.Context, arg GetDurableMonitorStateParams) (GetDurableMonitorStateRow, error)
 	GetEnabledMonitorAlertRule(ctx context.Context, monitorID string) (GetEnabledMonitorAlertRuleRow, error)
 	GetEnvironmentMonitor(ctx context.Context, arg GetEnvironmentMonitorParams) (GetEnvironmentMonitorRow, error)
@@ -64,64 +98,132 @@ type Querier interface {
 	GetIncidentTenant(ctx context.Context, incidentID string) (GetIncidentTenantRow, error)
 	GetLatestScheduledMonitorResult(ctx context.Context, arg GetLatestScheduledMonitorResultParams) (bool, error)
 	GetManualDispatchWorkerPool(ctx context.Context, arg GetManualDispatchWorkerPoolParams) (GetManualDispatchWorkerPoolRow, error)
+	GetMonitorAlertThresholds(ctx context.Context, monitorID string) (GetMonitorAlertThresholdsRow, error)
+	GetMonitorEvaluationAtSlot(ctx context.Context, arg GetMonitorEvaluationAtSlotParams) (GetMonitorEvaluationAtSlotRow, error)
 	GetMonitorLatencyTotals(ctx context.Context, arg GetMonitorLatencyTotalsParams) (GetMonitorLatencyTotalsRow, error)
+	GetMonitorReliabilityReport(ctx context.Context, arg GetMonitorReliabilityReportParams) (GetMonitorReliabilityReportRow, error)
+	GetNewestExpectedMonitorSlot(ctx context.Context, arg GetNewestExpectedMonitorSlotParams) (pgtype.Timestamptz, error)
+	GetNextRepairableRollupInvalidation(ctx context.Context) (GetNextRepairableRollupInvalidationRow, error)
+	GetOldestActiveCheckJob(ctx context.Context) (pgtype.Timestamptz, error)
+	GetOldestNonterminalDispatch(ctx context.Context) (pgtype.Timestamptz, error)
+	GetOldestPendingNotification(ctx context.Context) (pgtype.Timestamptz, error)
 	GetOrganizationMemberNotificationPreference(ctx context.Context, arg GetOrganizationMemberNotificationPreferenceParams) (bool, error)
 	GetOrganizationMemberRole(ctx context.Context, arg GetOrganizationMemberRoleParams) (string, error)
 	GetOrganizationMembershipRole(ctx context.Context, arg GetOrganizationMembershipRoleParams) (string, error)
+	GetQuarantineRecord(ctx context.Context, dollar_1 pgtype.UUID) (GetQuarantineRecordRow, error)
+	GetRecentCheckCounts(ctx context.Context) (GetRecentCheckCountsRow, error)
+	GetRecoveryResultVerification(ctx context.Context, arg GetRecoveryResultVerificationParams) (GetRecoveryResultVerificationRow, error)
+	GetReliabilityBaselineBefore(ctx context.Context, arg GetReliabilityBaselineBeforeParams) (GetReliabilityBaselineBeforeRow, error)
+	GetResultConsumerDelaySeconds(ctx context.Context) (int64, error)
+	GetSchedulerDelaySeconds(ctx context.Context) (int64, error)
 	GetTenantEnvironment(ctx context.Context, environmentID string) (GetTenantEnvironmentRow, error)
 	GetTenantProject(ctx context.Context, projectID string) (GetTenantProjectRow, error)
 	GetUserByAuthSession(ctx context.Context, tokenDigest []byte) (GetUserByAuthSessionRow, error)
 	GetUserForLogin(ctx context.Context, email string) (GetUserForLoginRow, error)
 	GetUserForPasswordReset(ctx context.Context, email string) (GetUserForPasswordResetRow, error)
+	HasHourlyRollupInvalidationsForDay(ctx context.Context, bucketDate string) (bool, error)
 	HasScheduledQueuePressure(ctx context.Context) (pgtype.Bool, error)
+	InsertAcceptedCheckRefreshEvent(ctx context.Context, arg InsertAcceptedCheckRefreshEventParams) error
+	InsertAcceptedHealthCheck(ctx context.Context, arg InsertAcceptedHealthCheckParams) error
 	InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) error
+	InsertConflictingResultQuarantine(ctx context.Context, arg InsertConflictingResultQuarantineParams) error
+	InsertDeadCoverageGapFromJob(ctx context.Context, jobID string) error
+	InsertExpiredCoverageGapFromJob(ctx context.Context, jobID string) error
 	InsertIncidentRefreshEvent(ctx context.Context, arg InsertIncidentRefreshEventParams) error
+	InsertInvalidResultQuarantine(ctx context.Context, encryptedPayload []byte) error
 	InsertMonitorRefreshEvent(ctx context.Context, arg InsertMonitorRefreshEventParams) error
+	InsertMonitorStateCorrection(ctx context.Context, arg InsertMonitorStateCorrectionParams) error
+	InsertMonitoringCoverageGap(ctx context.Context, arg InsertMonitoringCoverageGapParams) error
+	InsertMonitoringOperationalEvent(ctx context.Context, arg InsertMonitoringOperationalEventParams) error
 	InsertNotificationAttempt(ctx context.Context, arg InsertNotificationAttemptParams) error
 	InsertNotificationRefreshEvent(ctx context.Context, arg InsertNotificationRefreshEventParams) error
+	InsertQueueRecoveryAudit(ctx context.Context, arg InsertQueueRecoveryAuditParams) error
+	InsertQueueRecoveryOperationalEvent(ctx context.Context, arg InsertQueueRecoveryOperationalEventParams) error
+	InsertResultConflict(ctx context.Context, arg InsertResultConflictParams) error
+	InsertResultDLQQuarantine(ctx context.Context, arg InsertResultDLQQuarantineParams) error
 	InsertTenantRefreshEvent(ctx context.Context, arg InsertTenantRefreshEventParams) error
+	InsertWorkerPoolAudit(ctx context.Context, arg InsertWorkerPoolAuditParams) error
+	InsertWorkerPoolCredential(ctx context.Context, arg InsertWorkerPoolCredentialParams) error
+	InsertWorkerPoolDriftEvent(ctx context.Context, arg InsertWorkerPoolDriftEventParams) error
+	InsertWorkerPoolMTLSCredential(ctx context.Context, arg InsertWorkerPoolMTLSCredentialParams) error
 	InvalidateActivePasswordResetTokens(ctx context.Context, userID string) (int64, error)
 	InvalidatePendingInvitation(ctx context.Context, arg InvalidatePendingInvitationParams) (int64, error)
 	ListAccessibleOrganizations(ctx context.Context, userID string) ([]ListAccessibleOrganizationsRow, error)
+	ListAllScheduledHealthChecks(ctx context.Context, monitorID string) ([]ListAllScheduledHealthChecksRow, error)
 	ListBackendChecks(ctx context.Context, arg ListBackendChecksParams) ([]ListBackendChecksRow, error)
 	ListBackendIncidentEvents(ctx context.Context, incidentID string) ([]ListBackendIncidentEventsRow, error)
 	ListBackendIncidents(ctx context.Context, arg ListBackendIncidentsParams) ([]ListBackendIncidentsRow, error)
 	ListBackendNotificationDeliveries(ctx context.Context, incidentID string) ([]ListBackendNotificationDeliveriesRow, error)
+	ListDueScheduledMonitors(ctx context.Context, batchSize int32) ([]ListDueScheduledMonitorsRow, error)
 	ListEnvironmentMonitors(ctx context.Context, arg ListEnvironmentMonitorsParams) ([]ListEnvironmentMonitorsRow, error)
 	ListEnvironmentRefreshEvents(ctx context.Context, arg ListEnvironmentRefreshEventsParams) ([]ListEnvironmentRefreshEventsRow, error)
+	ListMaintenanceStatuses(ctx context.Context) ([]ListMaintenanceStatusesRow, error)
+	ListMonitorsDueForStateRefresh(ctx context.Context, arg ListMonitorsDueForStateRefreshParams) ([]string, error)
 	ListOrganizationMembers(ctx context.Context, organizationID string) ([]ListOrganizationMembersRow, error)
 	ListRecentIncidentEvaluationTimes(ctx context.Context, arg ListRecentIncidentEvaluationTimesParams) ([]pgtype.Timestamptz, error)
 	ListRecentMonitorResults(ctx context.Context, arg ListRecentMonitorResultsParams) ([]ListRecentMonitorResultsRow, error)
+	ListScheduledHealthChecksAfter(ctx context.Context, arg ListScheduledHealthChecksAfterParams) ([]ListScheduledHealthChecksAfterRow, error)
+	ListScheduledHealthChecksFrom(ctx context.Context, arg ListScheduledHealthChecksFromParams) ([]ListScheduledHealthChecksFromRow, error)
 	ListTenantEnvironments(ctx context.Context, projectID string) ([]ListTenantEnvironmentsRow, error)
 	ListTenantProjects(ctx context.Context, organizationID string) ([]ListTenantProjectsRow, error)
 	LoadAuthorizedIncident(ctx context.Context, arg LoadAuthorizedIncidentParams) (LoadAuthorizedIncidentRow, error)
+	LockDailyRollupCheckpoint(ctx context.Context) (pgtype.Date, error)
 	LockEmailVerificationToken(ctx context.Context, tokenDigest []byte) (LockEmailVerificationTokenRow, error)
 	LockEnvironmentForMonitorCreation(ctx context.Context, arg LockEnvironmentForMonitorCreationParams) (LockEnvironmentForMonitorCreationRow, error)
+	LockHourlyRollupCheckpoint(ctx context.Context) (pgtype.Timestamptz, error)
 	LockManagedMonitor(ctx context.Context, arg LockManagedMonitorParams) (LockManagedMonitorRow, error)
+	LockMonitorReliabilityState(ctx context.Context, monitorID string) (LockMonitorReliabilityStateRow, error)
 	LockOpenIncident(ctx context.Context, arg LockOpenIncidentParams) (string, error)
 	LockOrganizationInvitation(ctx context.Context, tokenDigest []byte) (LockOrganizationInvitationRow, error)
 	LockOrganizationMemberRole(ctx context.Context, arg LockOrganizationMemberRoleParams) (string, error)
 	LockPasswordResetToken(ctx context.Context, tokenDigest []byte) (LockPasswordResetTokenRow, error)
 	LockRefreshTokenForRotation(ctx context.Context, tokenDigest []byte) (LockRefreshTokenForRotationRow, error)
+	LockResultCheckJob(ctx context.Context, arg LockResultCheckJobParams) (LockResultCheckJobRow, error)
+	LockWorkerPoolActivationReadiness(ctx context.Context, id string) (pgtype.Bool, error)
+	LockWorkerPoolDeletionState(ctx context.Context, workerPoolID string) (LockWorkerPoolDeletionStateRow, error)
+	LockWorkerPoolLifecycleState(ctx context.Context, id string) (string, error)
+	LockWorkerPoolManifestDigest(ctx context.Context, id string) ([]byte, error)
+	MarkCheckJobDead(ctx context.Context, arg MarkCheckJobDeadParams) (int64, error)
+	MarkCheckJobPublished(ctx context.Context, arg MarkCheckJobPublishedParams) error
+	MarkDispatchPublishFailure(ctx context.Context, arg MarkDispatchPublishFailureParams) error
+	MarkDispatchPublished(ctx context.Context, arg MarkDispatchPublishedParams) error
+	MarkDispatchRepaired(ctx context.Context, jobID string) error
+	MarkQuarantineRedriven(ctx context.Context, arg MarkQuarantineRedrivenParams) (int64, error)
 	MarkRefreshTokenRotated(ctx context.Context, arg MarkRefreshTokenRotatedParams) (int64, error)
 	NewManualJobID(ctx context.Context) (string, error)
+	NewScheduledJobID(ctx context.Context) (string, error)
 	OpenMonitorSchedulePeriod(ctx context.Context, monitorID string) error
+	ReclaimDispatchPublisherLeases(ctx context.Context) (int64, error)
 	ReclaimExpiredNotificationLeases(ctx context.Context, reclaimedAt pgtype.Timestamptz) (int64, error)
+	RecordRetentionCheckpoint(ctx context.Context, retainedAt pgtype.Timestamptz) error
+	RegisterWorkerPool(ctx context.Context, arg RegisterWorkerPoolParams) error
 	ResolveOpenIncident(ctx context.Context, arg ResolveOpenIncidentParams) (int64, error)
 	RevokeAccessTokenFamily(ctx context.Context, familyID string) (int64, error)
 	RevokeAccessTokensForUser(ctx context.Context, userID string) (int64, error)
 	RevokeRefreshTokenFamily(ctx context.Context, familyID string) (int64, error)
 	RevokeRefreshTokensForUser(ctx context.Context, userID string) (int64, error)
+	RevokeWorkerPoolCredentials(ctx context.Context, workerPoolID string) error
 	SetManagedMonitorPaused(ctx context.Context, arg SetManagedMonitorPausedParams) (SetManagedMonitorPausedRow, error)
 	SoftDeleteMonitor(ctx context.Context, arg SoftDeleteMonitorParams) (int64, error)
 	SoftDeleteOrganization(ctx context.Context, organizationID string) error
 	StoreSecureMonitorConfiguration(ctx context.Context, arg StoreSecureMonitorConfigurationParams) error
+	SweepExpiredCheckJobs(ctx context.Context) (int64, error)
+	UpdateMaintenanceStatus(ctx context.Context, arg UpdateMaintenanceStatusParams) (int64, error)
 	UpdateManagedMonitor(ctx context.Context, arg UpdateManagedMonitorParams) (UpdateManagedMonitorRow, error)
+	UpdateMonitorNextCheck(ctx context.Context, arg UpdateMonitorNextCheckParams) error
+	UpdateMonitorReliabilityState(ctx context.Context, arg UpdateMonitorReliabilityStateParams) error
 	UpdateOrganizationMember(ctx context.Context, arg UpdateOrganizationMemberParams) (UpdateOrganizationMemberRow, error)
 	UpdateOrganizationName(ctx context.Context, arg UpdateOrganizationNameParams) error
 	UpdateTenantEnvironment(ctx context.Context, arg UpdateTenantEnvironmentParams) (UpdateTenantEnvironmentRow, error)
 	UpdateTenantProject(ctx context.Context, arg UpdateTenantProjectParams) (UpdateTenantProjectRow, error)
+	UpdateWorkerPoolLifecycle(ctx context.Context, arg UpdateWorkerPoolLifecycleParams) error
+	UpsertDailyMonitorRollups(ctx context.Context, bucketDate string) (int64, error)
+	UpsertDailyRollupInvalidation(ctx context.Context, arg UpsertDailyRollupInvalidationParams) error
+	UpsertHourlyMonitorRollups(ctx context.Context, bucketStart pgtype.Timestamptz) (int64, error)
+	UpsertHourlyRollupInvalidation(ctx context.Context, arg UpsertHourlyRollupInvalidationParams) error
 	UpsertIncidentEvent(ctx context.Context, arg UpsertIncidentEventParams) (string, error)
+	UpsertMonitorEvaluationPosition(ctx context.Context, arg UpsertMonitorEvaluationPositionParams) error
+	UpsertMonitorResultEvaluation(ctx context.Context, arg UpsertMonitorResultEvaluationParams) error
 }
 
 var _ Querier = (*Queries)(nil)

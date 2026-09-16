@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 func (s *Service) RepairInvalidated(ctx context.Context, limit int) (int, error) {
@@ -19,14 +20,7 @@ func (s *Service) RepairInvalidated(ctx context.Context, limit int) (int, error)
 		if err != nil {
 			return repaired, err
 		}
-		var kind string
-		var bucket time.Time
-		err = tx.QueryRow(ctx, `SELECT bucket_kind,bucket_start
-FROM monitor_rollup_invalidations i
-WHERE bucket_kind='hourly' OR NOT EXISTS(
- SELECT 1 FROM monitor_rollup_invalidations h
- WHERE h.bucket_kind='hourly' AND h.bucket_start>=i.bucket_start AND h.bucket_start<i.bucket_start+INTERVAL '1 day')
-ORDER BY CASE bucket_kind WHEN 'hourly' THEN 0 ELSE 1 END,bucket_start LIMIT 1`).Scan(&kind, &bucket)
+		invalidation, err := database.New(tx).GetNextRepairableRollupInvalidation(ctx)
 		tx.Rollback(context.Background())
 		if errors.Is(err, pgx.ErrNoRows) {
 			return repaired, nil
@@ -34,10 +28,10 @@ ORDER BY CASE bucket_kind WHEN 'hourly' THEN 0 ELSE 1 END,bucket_start LIMIT 1`)
 		if err != nil {
 			return repaired, err
 		}
-		if kind == "hourly" {
-			_, err = s.RollupHour(ctx, bucket)
+		if invalidation.BucketKind == "hourly" {
+			_, err = s.RollupHour(ctx, invalidation.BucketStart.Time)
 		} else {
-			_, err = s.RollupDay(ctx, bucket)
+			_, err = s.RollupDay(ctx, invalidation.BucketStart.Time)
 		}
 		if err != nil {
 			return repaired, err
@@ -53,17 +47,16 @@ func (s *Service) AdvanceRollups(ctx context.Context, now time.Time, maxHours, m
 	}
 	now = now.UTC()
 	for index := 0; index < maxHours; index++ {
-		var through time.Time
 		tx, err := s.db.Begin(ctx)
 		if err != nil {
 			return err
 		}
-		err = tx.QueryRow(ctx, `SELECT hourly_through FROM monitoring_rollup_checkpoint WHERE singleton FOR UPDATE`).Scan(&through)
+		throughValue, err := database.New(tx).LockHourlyRollupCheckpoint(ctx)
 		tx.Rollback(context.Background())
 		if err != nil {
 			return err
 		}
-		next := through.UTC().Add(time.Hour)
+		next := throughValue.Time.UTC().Add(time.Hour)
 		if !next.Before(now.Truncate(time.Hour)) {
 			break
 		}
@@ -74,7 +67,7 @@ func (s *Service) AdvanceRollups(ctx context.Context, now time.Time, maxHours, m
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE monitoring_rollup_checkpoint SET hourly_through=GREATEST(hourly_through,$1),updated_at=CURRENT_TIMESTAMP WHERE singleton`, next)
+		err = database.New(tx).AdvanceHourlyRollupCheckpoint(ctx, databaseTimestamp(next))
 		if err == nil {
 			err = tx.Commit(ctx)
 		} else {
@@ -85,17 +78,16 @@ func (s *Service) AdvanceRollups(ctx context.Context, now time.Time, maxHours, m
 		}
 	}
 	for index := 0; index < maxDays; index++ {
-		var through time.Time
 		tx, err := s.db.Begin(ctx)
 		if err != nil {
 			return err
 		}
-		err = tx.QueryRow(ctx, `SELECT daily_through::timestamptz FROM monitoring_rollup_checkpoint WHERE singleton FOR UPDATE`).Scan(&through)
+		throughValue, err := database.New(tx).LockDailyRollupCheckpoint(ctx)
 		tx.Rollback(context.Background())
 		if err != nil {
 			return err
 		}
-		next := through.UTC().AddDate(0, 0, 1)
+		next := throughValue.Time.UTC().AddDate(0, 0, 1)
 		if !next.Before(now.Truncate(24 * time.Hour)) {
 			break
 		}
@@ -110,7 +102,7 @@ func (s *Service) AdvanceRollups(ctx context.Context, now time.Time, maxHours, m
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE monitoring_rollup_checkpoint SET daily_through=GREATEST(daily_through,$1::date),updated_at=CURRENT_TIMESTAMP WHERE singleton`, next)
+		err = database.New(tx).AdvanceDailyRollupCheckpoint(ctx, next.Format("2006-01-02"))
 		if err == nil {
 			err = tx.Commit(ctx)
 		} else {
@@ -130,38 +122,28 @@ func (s *Service) ApplyRetention(ctx context.Context, now time.Time) (int64, err
 		return 0, err
 	}
 	defer tx.Rollback(context.Background())
+	queries := database.New(tx)
 	var total int64
-	commands := []struct {
-		sql string
-		arg any
-	}{
-		{`DELETE FROM health_checks h WHERE h.scheduled_at<$1
-AND EXISTS(SELECT 1 FROM monitor_rollups_hourly r WHERE r.monitor_id=h.monitor_id AND r.bucket_start=date_trunc('hour',h.scheduled_at))
-AND NOT EXISTS(SELECT 1 FROM monitor_rollup_invalidations i WHERE i.monitor_id=h.monitor_id AND i.bucket_kind='hourly' AND i.bucket_start=date_trunc('hour',h.scheduled_at))`, now.Add(-7 * 24 * time.Hour)},
-		{`DELETE FROM monitoring_coverage_gaps g WHERE g.scheduled_at<$1
-AND EXISTS(SELECT 1 FROM monitor_rollups_hourly r WHERE r.monitor_id=g.monitor_id AND r.bucket_start=date_trunc('hour',g.scheduled_at))
-AND NOT EXISTS(SELECT 1 FROM monitor_rollup_invalidations i WHERE i.monitor_id=g.monitor_id AND i.bucket_kind='hourly' AND i.bucket_start=date_trunc('hour',g.scheduled_at))`, now.Add(-7 * 24 * time.Hour)},
-		{`DELETE FROM monitor_rollups_hourly h WHERE h.bucket_start<$1
-AND EXISTS(SELECT 1 FROM monitor_rollups_daily d WHERE d.monitor_id=h.monitor_id AND d.bucket_start=h.bucket_start::date)
-AND NOT EXISTS(SELECT 1 FROM monitor_rollup_invalidations i WHERE i.monitor_id=h.monitor_id AND i.bucket_kind='daily' AND i.bucket_start=h.bucket_start::date)`, now.Add(-90 * 24 * time.Hour)},
-		{`DELETE FROM monitor_rollups_daily WHERE bucket_start<$1::date`, now.AddDate(-1, 0, 0)},
-	}
-	for _, command := range commands {
-		tag, execErr := tx.Exec(ctx, command.sql, command.arg)
-		if execErr != nil {
-			return 0, execErr
-		}
-		total += tag.RowsAffected()
-	}
-	tag, err := tx.Exec(ctx, `DELETE FROM check_jobs j WHERE
- ((state='completed' AND completed_at<$1) OR
-  (state IN('dead','expired','cancelled','quarantined') AND completed_at<$2))
-AND NOT EXISTS(SELECT 1 FROM health_checks h WHERE h.job_id=j.id)`, now.Add(-48*time.Hour), now.Add(-7*24*time.Hour))
-	if err != nil {
+	counts := make([]int64, 5)
+	if counts[0], err = queries.DeleteRetainedHealthChecks(ctx, databaseTimestamp(now.Add(-7*24*time.Hour))); err != nil {
 		return 0, err
 	}
-	total += tag.RowsAffected()
-	if _, err = tx.Exec(ctx, `UPDATE monitoring_rollup_checkpoint SET last_retention_at=$1,updated_at=CURRENT_TIMESTAMP WHERE singleton`, now); err != nil {
+	if counts[1], err = queries.DeleteRetainedCoverageGaps(ctx, databaseTimestamp(now.Add(-7*24*time.Hour))); err != nil {
+		return 0, err
+	}
+	if counts[2], err = queries.DeleteRetainedHourlyRollups(ctx, databaseTimestamp(now.Add(-90*24*time.Hour))); err != nil {
+		return 0, err
+	}
+	if counts[3], err = queries.DeleteRetainedDailyRollups(ctx, now.AddDate(-1, 0, 0).Format("2006-01-02")); err != nil {
+		return 0, err
+	}
+	if counts[4], err = queries.DeleteRetainedCheckJobs(ctx, database.DeleteRetainedCheckJobsParams{CompletedBefore: databaseTimestamp(now.Add(-48 * time.Hour)), NonterminalBefore: databaseTimestamp(now.Add(-7 * 24 * time.Hour))}); err != nil {
+		return 0, err
+	}
+	for _, count := range counts {
+		total += count
+	}
+	if err = queries.RecordRetentionCheckpoint(ctx, databaseTimestamp(now)); err != nil {
 		return 0, err
 	}
 	if err = tx.Commit(ctx); err != nil {

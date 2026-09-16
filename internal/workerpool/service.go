@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	database "github.com/watchtrace/watchtrace-platform/internal/platform/database/sqlc"
 )
 
 type DB interface {
@@ -43,8 +45,14 @@ func (s *Service) Register(ctx context.Context, r Registration, actor, reason st
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	_, err = tx.Exec(ctx, `INSERT INTO worker_pools(id,mode,enabled,lifecycle_state,schema_min,schema_max,encryption_key_id,encryption_public_key,result_key_id,result_public_key,job_queue_url,job_queue_arn,job_dlq_url,job_dlq_arn)
-VALUES($1,$2,false,'provisioning',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, r.ID, r.Mode, r.SchemaMin, r.SchemaMax, r.EncryptionKeyID, r.EncryptionPublic, r.ResultKeyID, r.ResultPublic, r.JobQueueURL, r.JobQueueARN, r.JobDLQURL, r.JobDLQARN)
+	queries := database.New(tx)
+	err = queries.RegisterWorkerPool(ctx, database.RegisterWorkerPoolParams{
+		ID: r.ID, Mode: r.Mode, SchemaMin: int16(r.SchemaMin), SchemaMax: int16(r.SchemaMax),
+		EncryptionKeyID: text(r.EncryptionKeyID), EncryptionPublicKey: r.EncryptionPublic,
+		ResultKeyID: text(r.ResultKeyID), ResultPublicKey: r.ResultPublic,
+		JobQueueUrl: text(r.JobQueueURL), JobQueueArn: text(r.JobQueueARN),
+		JobDlqUrl: text(r.JobDLQURL), JobDlqArn: text(r.JobDLQARN),
+	})
 	if err != nil {
 		return fmt.Errorf("register pool: %w", err)
 	}
@@ -53,12 +61,12 @@ VALUES($1,$2,false,'provisioning',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, r.ID, r.Mo
 		public         []byte
 	}{{"job_encryption", r.EncryptionKeyID, r.EncryptionPublic}, {"result_signing", r.ResultKeyID, r.ResultPublic}} {
 		fingerprint := fmt.Sprintf("%x", sha256.Sum256(credential.public))
-		if _, err = tx.Exec(ctx, `INSERT INTO worker_pool_credentials(worker_pool_id,purpose,key_id,public_material,fingerprint,status,activates_at) VALUES($1,$2,$3,$4,$5,'pending',CURRENT_TIMESTAMP)`, r.ID, credential.purpose, credential.keyID, credential.public, fingerprint); err != nil {
+		if err = queries.InsertWorkerPoolCredential(ctx, database.InsertWorkerPoolCredentialParams{WorkerPoolID: r.ID, Purpose: credential.purpose, KeyID: credential.keyID, PublicMaterial: credential.public, Fingerprint: fingerprint}); err != nil {
 			return err
 		}
 	}
 	if r.Mode == "customer_vpc" {
-		if _, err = tx.Exec(ctx, `INSERT INTO worker_pool_credentials(worker_pool_id,purpose,key_id,fingerprint,status,activates_at,not_after) VALUES($1,'mtls_certificate',$2,$3,'pending',CURRENT_TIMESTAMP,$4)`, r.ID, "mtls-"+r.EncryptionKeyID, r.MTLSFingerprint, r.MTLSNotAfter); err != nil {
+		if err = queries.InsertWorkerPoolMTLSCredential(ctx, database.InsertWorkerPoolMTLSCredentialParams{WorkerPoolID: r.ID, KeyID: "mtls-" + r.EncryptionKeyID, Fingerprint: r.MTLSFingerprint, NotAfter: timestamp(r.MTLSNotAfter)}); err != nil {
 			return err
 		}
 	}
@@ -77,18 +85,18 @@ func (s *Service) Activate(ctx context.Context, id string, manifestDigest []byte
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	var ready bool
-	err = tx.QueryRow(ctx, `SELECT lifecycle_state='provisioning' AND job_queue_url IS NOT NULL AND job_queue_arn IS NOT NULL AND job_dlq_url IS NOT NULL AND job_dlq_arn IS NOT NULL AND encryption_public_key IS NOT NULL AND result_public_key IS NOT NULL AND (SELECT count(*)=CASE WHEN worker_pools.mode='customer_vpc' THEN 3 ELSE 2 END FROM worker_pool_credentials c WHERE c.worker_pool_id=worker_pools.id AND c.status='pending' AND (c.purpose<>'mtls_certificate' OR c.not_after>CURRENT_TIMESTAMP+INTERVAL '10 days')) FROM worker_pools WHERE id=$1 FOR UPDATE`, id).Scan(&ready)
-	if err != nil || !ready {
+	queries := database.New(tx)
+	ready, err := queries.LockWorkerPoolActivationReadiness(ctx, id)
+	if err != nil || !ready.Valid || !ready.Bool {
 		if err == nil {
 			err = errors.New("pool is incomplete")
 		}
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE worker_pools SET enabled=true,lifecycle_state='active',manifest_digest=$2,updated_at=CURRENT_TIMESTAMP WHERE id=$1`, id, manifestDigest); err != nil {
+	if err = queries.ActivateWorkerPool(ctx, database.ActivateWorkerPoolParams{ID: id, ManifestDigest: manifestDigest}); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE worker_pool_credentials SET status='active' WHERE worker_pool_id=$1 AND status='pending'`, id); err != nil {
+	if err = queries.ActivatePendingWorkerPoolCredentials(ctx, id); err != nil {
 		return err
 	}
 	if err = audit(ctx, tx, id, "activate", actor, reason); err != nil {
@@ -108,20 +116,21 @@ func (s *Service) Transition(ctx context.Context, id, target, actor, reason stri
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	var current string
-	if err = tx.QueryRow(ctx, `SELECT lifecycle_state FROM worker_pools WHERE id=$1 FOR UPDATE`, id).Scan(&current); err != nil {
+	queries := database.New(tx)
+	current, err := queries.LockWorkerPoolLifecycleState(ctx, id)
+	if err != nil {
 		return err
 	}
 	allowed := map[string]map[string]bool{"active": {"draining": true, "revoked": true, "failed": true}, "provisioning": {"failed": true, "revoked": true}, "draining": {"revoked": true, "deleting": true}, "revoked": {"deleting": true}, "failed": {"deleting": true}}[current][target]
 	if !allowed {
 		return errors.New("invalid lifecycle transition")
 	}
-	_, err = tx.Exec(ctx, `UPDATE worker_pools SET lifecycle_state=$2,enabled=false,updated_at=CURRENT_TIMESTAMP WHERE id=$1`, id, target)
+	err = queries.UpdateWorkerPoolLifecycle(ctx, database.UpdateWorkerPoolLifecycleParams{ID: id, LifecycleState: target})
 	if err != nil {
 		return err
 	}
 	if target == "revoked" || target == "deleting" {
-		_, err = tx.Exec(ctx, `UPDATE worker_pool_credentials SET status='revoked',revoked_at=CURRENT_TIMESTAMP WHERE worker_pool_id=$1 AND status IN('pending','active','retired')`, id)
+		err = queries.RevokeWorkerPoolCredentials(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -141,20 +150,21 @@ func (s *Service) Reconcile(ctx context.Context, id string, expectedDigest []byt
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	var current []byte
-	if err = tx.QueryRow(ctx, `SELECT manifest_digest FROM worker_pools WHERE id=$1 FOR UPDATE`, id).Scan(&current); err != nil {
+	queries := database.New(tx)
+	current, err := queries.LockWorkerPoolManifestDigest(ctx, id)
+	if err != nil {
 		return err
 	}
 	drift := !gatewayMapped || string(current) != string(expectedDigest)
 	if drift {
-		if _, err = tx.Exec(ctx, `UPDATE worker_pools SET enabled=false,lifecycle_state='failed',updated_at=CURRENT_TIMESTAMP WHERE id=$1`, id); err != nil {
+		if err = queries.FailWorkerPool(ctx, id); err != nil {
 			return err
 		}
 	}
 	if err = audit(ctx, tx, id, "reconcile", actor, reason); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO monitoring_operational_events(event_type,worker_pool_id,safe_details) VALUES('pool_drift',$1,$2)`, id, map[bool]string{true: "pool manifest drift", false: "pool manifest verified"}[drift]); err != nil {
+	if err = queries.InsertWorkerPoolDriftEvent(ctx, database.InsertWorkerPoolDriftEventParams{WorkerPoolID: text(id), SafeDetails: map[bool]string{true: "pool manifest drift", false: "pool manifest verified"}[drift]}); err != nil {
 		return err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -175,18 +185,18 @@ func (s *Service) Delete(ctx context.Context, id, confirmation, actor, reason st
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	var state string
-	var jobs, trustedCredentials int
-	if err = tx.QueryRow(ctx, `SELECT lifecycle_state,(SELECT count(*) FROM check_jobs WHERE worker_pool_id=$1 AND state IN('pending','pending_publish','published','running')),(SELECT count(*) FROM worker_pool_credentials WHERE worker_pool_id=$1 AND status<>'revoked' AND (not_after IS NULL OR not_after>CURRENT_TIMESTAMP)) FROM worker_pools WHERE id=$1 FOR UPDATE`, id).Scan(&state, &jobs, &trustedCredentials); err != nil {
+	queries := database.New(tx)
+	readinessState, err := queries.LockWorkerPoolDeletionState(ctx, id)
+	if err != nil {
 		return err
 	}
-	if state != "deleting" || jobs != 0 || trustedCredentials != 0 {
+	if readinessState.LifecycleState != "deleting" || readinessState.Jobs != 0 || readinessState.TrustedCredentials != 0 {
 		return errors.New("pool is not drained and deleting")
 	}
 	if err = audit(ctx, tx, id, "delete_complete", actor, reason); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM worker_pools WHERE id=$1`, id); err != nil {
+	if err = queries.DeleteWorkerPool(ctx, id); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -196,6 +206,11 @@ func audit(ctx context.Context, tx pgx.Tx, id, action, actor, reason string) err
 	if len(actor) == 0 || len(actor) > 128 || len(reason) == 0 || len(reason) > 240 {
 		return errors.New("invalid audit identity or reason")
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO worker_pool_audit_events(worker_pool_id,action,actor,reason) VALUES($1,$2,$3,$4)`, id, action, actor, reason)
-	return err
+	return database.New(tx).InsertWorkerPoolAudit(ctx, database.InsertWorkerPoolAuditParams{WorkerPoolID: id, Action: action, Actor: actor, Reason: reason})
+}
+
+func text(value string) pgtype.Text { return pgtype.Text{String: value, Valid: true} }
+
+func timestamp(value time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: value, Valid: true}
 }
