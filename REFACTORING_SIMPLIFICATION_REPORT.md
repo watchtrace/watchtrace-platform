@@ -936,7 +936,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
   **Verification completed:** Local SMTP capture tests for both account-action and incident email; OCI configuration validation; explicit STARTTLS and authentication failure tests; recipient, sender, subject, and credential injection checks; credential/error redaction assertions; focused and repository-wide race tests; `go vet ./...`; `go build ./...`; `go mod verify`; `go mod tidy -diff`; a fresh PostgreSQL integration suite; Coolify Compose rendering; production container build/liveness/graceful-shutdown smoke testing; and `git diff --check` all passed.
 
-- [ ] **Task 7 — Standardize configuration and command startup**
+- [x] **Task 7 — Standardize configuration and command startup**
 
   **Goal:** Make each `main` read as load config -> build dependencies -> run.
 
@@ -947,6 +947,21 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
   **Risk:** Medium. Deployment environment compatibility is sensitive.
 
   **Verification:** Environment-variable matrix tests, Docker builds, Coolify Compose validation, readiness/liveness tests, and graceful-shutdown tests.
+
+  **Completion:** Finished on 2026-09-16. The worker, monitor engine, notification worker, and queue gateway now follow the same explicit load config -> build dependencies -> run lifecycle.
+
+  **Implementation report:**
+
+  - Added one typed configuration loader per command under `internal/platform/config`. Each loader owns that command's defaults, required environment variables, validation, and file-backed secrets.
+  - Centralized environment lookup, base64 key-file decoding, key-size checks, listen-address checks, duration parsing, HTTPS gateway URL validation, and client/server mTLS construction. Configuration errors name the invalid setting without exposing secret contents or secret file paths.
+  - Removed command-local `required`, `value`, `setting`, `readKey`, keyring, certificate, and CA parsing helpers. Missing production configuration now returns a normal startup error instead of panicking.
+  - Split each command startup into three visible stages: configuration loading, dependency construction, and runtime execution. Dependency cleanup stays next to construction, while loops and background jobs stay in the runtime stage.
+  - Extended the shared `internal/platform/httpserver` lifecycle to support command-specific request timeouts. All four commands now bind listeners explicitly, fail startup when a listener cannot be opened, and use bounded graceful shutdown rather than duplicating `http.Server` shutdown goroutines.
+  - Preserved all deployed environment-variable names and defaults, including direct-SQS worker behavior, OCI notification delivery, engine queue settings, gateway mTLS, health addresses, key rotation, private CIDRs, and clock-offset readiness checks.
+  - Preserved the worker and queue-gateway database-free boundaries. Their dependency-graph tests still prove that neither binary includes `pgx` nor `lib/pq`.
+  - Added deterministic configuration-matrix tests for direct-SQS and HTTPS workers, worker keyrings, monitor-engine queue/key settings, local and OCI notification providers, queue-gateway mTLS, invalid inputs, and secret/path redaction. Added worker health separation and configurable HTTP timeout coverage.
+
+  **Verification completed:** Go 1.26.6 repository-wide race tests; `go vet ./...`; `go build ./...`; `go mod verify`; `go mod tidy -diff`; `govulncheck` with zero reachable vulnerabilities; focused command/configuration/lifecycle tests; worker and gateway no-PostgreSQL dependency tests; a fresh PostgreSQL integration suite; Coolify Compose rendering; control-plane and worker ARM64 Docker builds; API liveness and graceful-SIGTERM container smoke testing; and `git diff --check` all passed.
 
 - [ ] **Task 8 — Retire time-bounded compatibility and legacy schema**
 
@@ -968,7 +983,7 @@ The largest immediate improvement would come from:
 2. Removing partial runtime composition.
 3. Splitting the largest files without behavioral changes.
 4. ~~Standardizing SQL location.~~ Completed in Tasks 4 and 5.
-5. Consolidating command configuration. SMTP consolidation was completed in Task 6.
+5. ~~Consolidating command configuration.~~ SMTP consolidation and command startup standardization were completed in Tasks 6 and 7.
 6. Removing compatibility branches only after explicit expiry/backfill checks.
 
 ## Final assessment

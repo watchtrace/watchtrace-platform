@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -279,15 +278,5 @@ func validateDatabaseURL(value string) error {
 }
 
 func validateHTTPAddress(value string) error {
-	host, portValue, err := net.SplitHostPort(value)
-	if err != nil || strings.ContainsAny(host, " \t\r\n") {
-		return fmt.Errorf("%s must be in host:port form", httpAddressEnvironment)
-	}
-
-	port, err := strconv.Atoi(portValue)
-	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("%s contains an invalid port", httpAddressEnvironment)
-	}
-
-	return nil
+	return validateListenAddress(httpAddressEnvironment, value)
 }

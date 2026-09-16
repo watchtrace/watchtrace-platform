@@ -4,60 +4,203 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/watchtrace/watchtrace-platform/internal/checkengine"
 	"github.com/watchtrace/watchtrace-platform/internal/destination"
 	"github.com/watchtrace/watchtrace-platform/internal/modworker"
+	platformconfig "github.com/watchtrace/watchtrace-platform/internal/platform/config"
+	"github.com/watchtrace/watchtrace-platform/internal/platform/httpserver"
 	"github.com/watchtrace/watchtrace-platform/internal/workerjournal"
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
-	"log/slog"
-	"net/http"
-	"net/netip"
-	"os"
-	"os/signal"
-	"strings"
-	"syscall"
-	"time"
 )
+
+type workerRuntime struct {
+	worker        *modworker.Worker
+	healthAddress string
+	clockOffset   time.Duration
+	close         func()
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	worker, cleanup, err := build(ctx, logger)
-	if err != nil {
-		logger.Error("configure worker")
+	if err := runCommand(logger); err != nil {
+		logger.Error("worker stopped", "error", err)
 		os.Exit(1)
 	}
-	defer cleanup()
-	go health(ctx, worker)
-	go maintain(ctx, worker)
+}
+
+func runCommand(logger *slog.Logger) error {
+	configuration, err := platformconfig.LoadWorker()
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	runtime, err := build(ctx, configuration, logger)
+	if err != nil {
+		return fmt.Errorf("build worker: %w", err)
+	}
+	defer runtime.close()
+	return runtime.run(ctx, logger)
+}
+
+func build(ctx context.Context, configuration platformconfig.WorkerConfig, logger *slog.Logger) (*workerRuntime, error) {
+	encryptionKey, err := ecdh.X25519().NewPrivateKey(configuration.EncryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("configure worker encryption: %w", err)
+	}
+	workerKeys := map[string]*ecdh.PrivateKey{configuration.EncryptionKeyID: encryptionKey}
+	for id, raw := range configuration.Keyring.WorkerEncryption {
+		key, keyErr := ecdh.X25519().NewPrivateKey(raw)
+		if keyErr != nil {
+			return nil, fmt.Errorf("configure worker keyring: %w", keyErr)
+		}
+		workerKeys[id] = key
+	}
+	platformKeys := map[string]ed25519.PublicKey{configuration.PlatformKeyID: configuration.PlatformPublicKey}
+	for id, key := range configuration.Keyring.PlatformSigning {
+		platformKeys[id] = key
+	}
+
+	journal, err := workerjournal.Open(configuration.JournalPath)
+	if err != nil {
+		return nil, err
+	}
+	closeJournal := func() { _ = journal.Close() }
+
+	engine := checkengine.New(destination.Policy{MaxRedirects: 3, AllowPrivateCIDRs: configuration.PrivateCIDRs}, nil, nil)
+	transport, err := buildTransport(ctx, configuration)
+	if err != nil {
+		closeJournal()
+		return nil, err
+	}
+	transport = loggingTransport{next: transport, logger: logger, transportName: configuration.Transport}
+
+	worker, err := modworker.New(transport, journal, engine, modworker.Config{
+		WorkerID:              configuration.WorkerID,
+		WorkerPoolID:          configuration.PoolID,
+		PlatformKeyID:         configuration.PlatformKeyID,
+		WorkerEncryptionKeyID: configuration.EncryptionKeyID,
+		ResultKeyID:           configuration.ResultKeyID,
+		ClockTolerance:        5 * time.Second,
+		WorkerPrivate:         encryptionKey,
+		PlatformPublic:        configuration.PlatformPublicKey,
+		ResultPrivate:         ed25519.PrivateKey(configuration.ResultKey),
+		WorkerPrivateKeys:     workerKeys,
+		PlatformPublicKeys:    platformKeys,
+		RevokedKeyIDs:         configuration.Keyring.Revoked,
+	})
+	if err != nil {
+		closeJournal()
+		return nil, err
+	}
+	return &workerRuntime{
+		worker: worker, healthAddress: configuration.HealthAddress,
+		clockOffset: configuration.ClockOffset, close: closeJournal,
+	}, nil
+}
+
+func buildTransport(ctx context.Context, configuration platformconfig.WorkerConfig) (workqueue.Transport, error) {
+	if configuration.Transport == platformconfig.WorkerTransportDirectSQS {
+		awsConfiguration, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		client := sqs.NewFromConfig(awsConfiguration, func(options *sqs.Options) {
+			if configuration.SQSEndpoint != "" {
+				options.BaseEndpoint = aws.String(configuration.SQSEndpoint)
+			}
+		})
+		return &workqueue.DirectSQS{
+			Client: client, JobQueueURL: configuration.JobQueueURL,
+			ResultQueueURL: configuration.ResultQueueURL, WorkerPoolID: configuration.PoolID,
+		}, nil
+	}
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: configuration.ClientTLS.Clone()},
+		Timeout:   30 * time.Second,
+	}
+	return &workqueue.HTTPS{BaseURL: configuration.GatewayURL, Client: client, PoolToken: configuration.PoolToken}, nil
+}
+
+func (runtime *workerRuntime) run(ctx context.Context, logger *slog.Logger) error {
+	listener, err := net.Listen("tcp", runtime.healthAddress)
+	if err != nil {
+		return fmt.Errorf("listen for health checks: %w", err)
+	}
+	healthDone := make(chan error, 1)
+	go func() {
+		healthDone <- httpserver.New(healthHandler(runtime.worker, runtime.clockOffset), 5*time.Second).Serve(ctx, listener)
+	}()
+	go maintain(ctx, runtime.worker)
+
 	for ctx.Err() == nil {
-		worked, err := worker.RunOne(ctx)
-		if err != nil && ctx.Err() == nil {
-			logger.Warn("worker attempt failed", "category", "internal", "error", err)
+		select {
+		case healthErr := <-healthDone:
+			if healthErr != nil {
+				return fmt.Errorf("serve health checks: %w", healthErr)
+			}
+			if ctx.Err() == nil {
+				return fmt.Errorf("health server stopped unexpectedly")
+			}
+			return nil
+		default:
+		}
+		worked, runErr := runtime.worker.RunOne(ctx)
+		if runErr != nil && ctx.Err() == nil {
+			logger.Warn("worker attempt failed", "category", "internal", "error", runErr)
 			waitFor(ctx, time.Second)
 		} else if !worked {
 			waitFor(ctx, 100*time.Millisecond)
 		}
 	}
-}
-func waitFor(ctx context.Context, duration time.Duration) {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-timer.C:
+	if healthErr := <-healthDone; healthErr != nil {
+		return fmt.Errorf("serve health checks: %w", healthErr)
 	}
+	return nil
 }
+
+func healthHandler(worker *modworker.Worker, clockOffset time.Duration) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health/live", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/health/ready", func(writer http.ResponseWriter, _ *http.Request) {
+		if worker == nil || !worker.Ready() {
+			http.Error(writer, "result_path_unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !modworker.ClockHealthy(clockOffset, 5*time.Second) {
+			http.Error(writer, "clock_unsynchronized", http.StatusServiceUnavailable)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, request *http.Request) {
+		metrics, err := worker.JournalMetrics(request.Context())
+		if err != nil {
+			http.Error(writer, "journal_unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(metrics)
+	})
+	return mux
+}
+
 func maintain(ctx context.Context, worker *modworker.Worker) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
@@ -70,184 +213,12 @@ func maintain(ctx context.Context, worker *modworker.Worker) {
 		}
 	}
 }
-func build(ctx context.Context, logger *slog.Logger) (*modworker.Worker, func(), error) {
-	pool := required("WATCHTRACE_WORKER_POOL_ID")
-	workerID := required("WATCHTRACE_WORKER_ID")
-	encBytes, err := readKey("WATCHTRACE_WORKER_ENCRYPTION_KEY")
-	if err != nil {
-		return nil, nil, err
+
+func waitFor(ctx context.Context, duration time.Duration) {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
 	}
-	enc, err := ecdh.X25519().NewPrivateKey(encBytes)
-	if err != nil {
-		return nil, nil, err
-	}
-	result, err := readKey("WATCHTRACE_WORKER_RESULT_KEY")
-	if err != nil {
-		return nil, nil, err
-	}
-	platform, err := readKey("WATCHTRACE_PLATFORM_SIGNING_PUBLIC_KEY")
-	if err != nil {
-		return nil, nil, err
-	}
-	workerKeys := map[string]*ecdh.PrivateKey{required("WATCHTRACE_WORKER_ENCRYPTION_KEY_ID"): enc}
-	platformKeys := map[string]ed25519.PublicKey{required("WATCHTRACE_PLATFORM_SIGNING_KEY_ID"): ed25519.PublicKey(platform)}
-	revoked := map[string]struct{}{}
-	if keyringPath := strings.TrimSpace(os.Getenv("WATCHTRACE_WORKER_KEYRING")); keyringPath != "" {
-		var trusted struct {
-			WorkerEncryption map[string]string `json:"worker_encryption"`
-			PlatformSigning  map[string]string `json:"platform_signing"`
-			Revoked          []string          `json:"revoked"`
-		}
-		data, e := os.ReadFile(keyringPath)
-		if e != nil || json.Unmarshal(data, &trusted) != nil {
-			return nil, nil, errors.New("invalid worker keyring")
-		}
-		for id, path := range trusted.WorkerEncryption {
-			raw, e := readKeyPath(path)
-			if e != nil {
-				return nil, nil, e
-			}
-			key, e := ecdh.X25519().NewPrivateKey(raw)
-			if e != nil {
-				return nil, nil, errors.New("invalid worker keyring")
-			}
-			workerKeys[id] = key
-		}
-		for id, path := range trusted.PlatformSigning {
-			raw, e := readKeyPath(path)
-			if e != nil || len(raw) != ed25519.PublicKeySize {
-				return nil, nil, errors.New("invalid worker keyring")
-			}
-			platformKeys[id] = ed25519.PublicKey(raw)
-		}
-		for _, id := range trusted.Revoked {
-			revoked[id] = struct{}{}
-		}
-	}
-	journal, err := workerjournal.Open(value("WATCHTRACE_WORKER_JOURNAL", "/var/lib/watchtrace-worker/journal.sqlite"))
-	if err != nil {
-		return nil, nil, err
-	}
-	policy := destination.Policy{MaxRedirects: 3}
-	for _, raw := range strings.Split(os.Getenv("WATCHTRACE_PRIVATE_CIDRS"), ",") {
-		if strings.TrimSpace(raw) == "" {
-			continue
-		}
-		prefix, e := netip.ParsePrefix(strings.TrimSpace(raw))
-		if e != nil {
-			journal.Close()
-			return nil, nil, e
-		}
-		policy.AllowPrivateCIDRs = append(policy.AllowPrivateCIDRs, prefix)
-	}
-	engine := checkengine.New(policy, nil, nil)
-	var transport workqueue.Transport
-	transportName := value("WATCHTRACE_WORKER_TRANSPORT", "https")
-	if transportName == "direct_sqs" {
-		cfg, e := awsconfig.LoadDefaultConfig(ctx)
-		if e != nil {
-			journal.Close()
-			return nil, nil, e
-		}
-		client := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
-			if endpoint := os.Getenv("WATCHTRACE_SQS_ENDPOINT"); endpoint != "" {
-				o.BaseEndpoint = aws.String(endpoint)
-			}
-		})
-		transport = &workqueue.DirectSQS{Client: client, JobQueueURL: required("WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL"), ResultQueueURL: required("WATCHTRACE_SQS_RESULT_QUEUE_URL"), WorkerPoolID: pool}
-	} else {
-		client, e := mtlsClient()
-		if e != nil {
-			journal.Close()
-			return nil, nil, e
-		}
-		transport = &workqueue.HTTPS{BaseURL: required("WATCHTRACE_GATEWAY_URL"), Client: client, PoolToken: os.Getenv("WATCHTRACE_POOL_TOKEN")}
-	}
-	transport = loggingTransport{next: transport, logger: logger, transportName: transportName}
-	w, err := modworker.New(transport, journal, engine, modworker.Config{WorkerID: workerID, WorkerPoolID: pool, PlatformKeyID: required("WATCHTRACE_PLATFORM_SIGNING_KEY_ID"), WorkerEncryptionKeyID: required("WATCHTRACE_WORKER_ENCRYPTION_KEY_ID"), ResultKeyID: required("WATCHTRACE_RESULT_KEY_ID"), ClockTolerance: 5 * time.Second, WorkerPrivate: enc, PlatformPublic: ed25519.PublicKey(platform), ResultPrivate: ed25519.PrivateKey(result), WorkerPrivateKeys: workerKeys, PlatformPublicKeys: platformKeys, RevokedKeyIDs: revoked})
-	if err != nil {
-		journal.Close()
-		return nil, nil, err
-	}
-	return w, func() { journal.Close() }, nil
-}
-func mtlsClient() (*http.Client, error) {
-	certPath, keyPath, caPath := os.Getenv("WATCHTRACE_MTLS_CERT"), os.Getenv("WATCHTRACE_MTLS_KEY"), os.Getenv("WATCHTRACE_GATEWAY_CA")
-	if certPath == "" || keyPath == "" || caPath == "" {
-		return nil, errors.New("mTLS certificate, key, and CA are required for HTTPS transport")
-	}
-	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-	if err != nil {
-		return nil, err
-	}
-	caData, err := os.ReadFile(caPath)
-	if err != nil {
-		return nil, err
-	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(caData) {
-		return nil, errors.New("invalid gateway CA")
-	}
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{Certificates: []tls.Certificate{cert}, RootCAs: roots, MinVersion: tls.VersionTLS12}}, Timeout: 30 * time.Second}, nil
-}
-func health(ctx context.Context, worker *modworker.Worker) {
-	address := value("WATCHTRACE_WORKER_HEALTH_ADDRESS", "127.0.0.1:8090")
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, _ *http.Request) {
-		if worker == nil || !worker.Ready() {
-			http.Error(w, "result_path_unavailable", 503)
-			return
-		}
-		offset, _ := time.ParseDuration(value("WATCHTRACE_CLOCK_OFFSET", "0s"))
-		if !modworker.ClockHealthy(offset, 5*time.Second) {
-			http.Error(w, "clock_unsynchronized", 503)
-			return
-		}
-		w.WriteHeader(200)
-	})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		metrics, err := worker.JournalMetrics(r.Context())
-		if err != nil {
-			http.Error(w, "journal_unavailable", 503)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(metrics)
-	})
-	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdown)
-	}()
-	_ = server.ListenAndServe()
-}
-func readKey(name string) ([]byte, error) {
-	return readKeyPath(required(name))
-}
-func readKeyPath(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
-	if err != nil {
-		return nil, fmt.Errorf("invalid key file")
-	}
-	return decoded, nil
-}
-func required(name string) string {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		panic(name + " is required")
-	}
-	return value
-}
-func value(name, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
-		return v
-	}
-	return fallback
 }

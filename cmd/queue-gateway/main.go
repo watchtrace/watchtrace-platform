@@ -4,117 +4,106 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
-	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/watchtrace/watchtrace-platform/internal/gatewayconfig"
+	platformconfig "github.com/watchtrace/watchtrace-platform/internal/platform/config"
+	"github.com/watchtrace/watchtrace-platform/internal/platform/httpserver"
 	"github.com/watchtrace/watchtrace-platform/internal/queuegateway"
 	"github.com/watchtrace/watchtrace-platform/internal/workqueue"
-	"log/slog"
-	"net/http"
-	"os"
-	"os/signal"
-	"strings"
-	"syscall"
-	"time"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if err := runCommand(); err != nil {
+		logger.Error("queue gateway stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func runCommand() error {
+	configuration, err := platformconfig.LoadQueueGateway()
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	handler, tlsConfig, address, err := build(ctx)
+
+	handler, err := build(ctx, configuration)
 	if err != nil {
-		logger.Error("configure queue gateway")
-		os.Exit(1)
+		return fmt.Errorf("build queue gateway: %w", err)
 	}
-	server := &http.Server{Addr: address, Handler: handler, TLSConfig: tlsConfig, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdown)
-	}()
-	if err = server.ListenAndServeTLS(required("WATCHTRACE_GATEWAY_CERT"), required("WATCHTRACE_GATEWAY_KEY")); err != nil && err != http.ErrServerClosed {
-		logger.Error("queue gateway stopped")
-		os.Exit(1)
-	}
-}
-func build(ctx context.Context) (http.Handler, *tls.Config, string, error) {
-	data, err := os.ReadFile(required("WATCHTRACE_GATEWAY_CONFIG"))
+	listener, err := net.Listen("tcp", configuration.Address)
 	if err != nil {
-		return nil, nil, "", err
+		return fmt.Errorf("listen: %w", err)
 	}
-	configPublic, err := readKey(required("WATCHTRACE_GATEWAY_CONFIG_SIGNING_PUBLIC_KEY"))
-	if err != nil {
-		return nil, nil, "", err
-	}
-	c, err := gatewayconfig.Verify(data, ed25519.PublicKey(configPublic), time.Now().UTC())
-	if err != nil {
-		return nil, nil, "", err
-	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	client := sqs.NewFromConfig(awsCfg, func(o *sqs.Options) {
-		if endpoint := os.Getenv("WATCHTRACE_SQS_ENDPOINT"); endpoint != "" {
-			o.BaseEndpoint = aws.String(endpoint)
-		}
+	tlsListener := tls.NewListener(listener, configuration.ServerTLS.Clone())
+	server := httpserver.NewConfigured(handler, httpserver.Config{
+		ShutdownTimeout:   10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      35 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	})
-	pools := make([]queuegateway.Pool, 0, len(c.Pools))
-	for _, p := range c.Pools {
-		public, err := base64.StdEncoding.DecodeString(p.ResultPublicKey)
-		if err != nil {
-			return nil, nil, "", err
-		}
-		revoked := make(map[string]struct{}, len(p.RevokedCertificateSerials))
-		for _, serial := range p.RevokedCertificateSerials {
-			revoked[serial] = struct{}{}
-		}
-		pools = append(pools, queuegateway.Pool{ID: p.ID, ResultKeyID: p.ResultKeyID, ResultPublic: ed25519.PublicKey(public), SchemaMin: p.SchemaMin, SchemaMax: p.SchemaMax, MaxRequestsPerMinute: p.Limits.RequestsPerMinute, MaxBytesPerMinute: p.Limits.BytesPerMinute, MaxConcurrentPulls: p.Limits.ConcurrentPulls, MaxResultsPerMinute: p.Limits.ResultsPerMinute, RevokedCertificateSerials: revoked, Transport: &workqueue.DirectSQS{Client: client, JobQueueURL: p.JobQueueURL, ResultQueueURL: c.ResultQueueURL, WorkerPoolID: p.ID}})
+	if err = server.Serve(ctx, tlsListener); err != nil {
+		return fmt.Errorf("serve: %w", err)
 	}
-	lease, err := readKey(required("WATCHTRACE_GATEWAY_LEASE_KEY"))
-	if err != nil {
-		return nil, nil, "", err
-	}
-	gateway, err := queuegateway.New(pools, lease, 5*time.Second)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	caData, err := os.ReadFile(required("WATCHTRACE_GATEWAY_CLIENT_CA"))
-	if err != nil {
-		return nil, nil, "", err
-	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(caData) {
-		return nil, nil, "", errors.New("invalid client CA")
-	}
-	tlsConfig := &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: roots, MinVersion: tls.VersionTLS12}
-	address := value("WATCHTRACE_GATEWAY_ADDRESS", "127.0.0.1:8443")
-	return gateway.Handler(), tlsConfig, address, nil
+	return nil
 }
-func readKey(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+
+func build(ctx context.Context, configuration platformconfig.QueueGatewayConfig) (http.Handler, error) {
+	verified, err := gatewayconfig.Verify(configuration.SignedConfig, configuration.SigningPublicKey, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
-	return base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
-}
-func required(name string) string {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		panic(name + " required")
+	awsConfiguration, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return v
-}
+	client := sqs.NewFromConfig(awsConfiguration, func(options *sqs.Options) {
+		if configuration.SQSEndpoint != "" {
+			options.BaseEndpoint = aws.String(configuration.SQSEndpoint)
+		}
+	})
 
-func value(name, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
-		return v
+	pools := make([]queuegateway.Pool, 0, len(verified.Pools))
+	for _, configuredPool := range verified.Pools {
+		publicKey, decodeErr := base64.StdEncoding.DecodeString(configuredPool.ResultPublicKey)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		revoked := make(map[string]struct{}, len(configuredPool.RevokedCertificateSerials))
+		for _, serial := range configuredPool.RevokedCertificateSerials {
+			revoked[serial] = struct{}{}
+		}
+		pools = append(pools, queuegateway.Pool{
+			ID: configuredPool.ID, ResultKeyID: configuredPool.ResultKeyID,
+			ResultPublic: ed25519.PublicKey(publicKey), SchemaMin: configuredPool.SchemaMin, SchemaMax: configuredPool.SchemaMax,
+			MaxRequestsPerMinute:      configuredPool.Limits.RequestsPerMinute,
+			MaxBytesPerMinute:         configuredPool.Limits.BytesPerMinute,
+			MaxConcurrentPulls:        configuredPool.Limits.ConcurrentPulls,
+			MaxResultsPerMinute:       configuredPool.Limits.ResultsPerMinute,
+			RevokedCertificateSerials: revoked,
+			Transport: &workqueue.DirectSQS{
+				Client: client, JobQueueURL: configuredPool.JobQueueURL,
+				ResultQueueURL: verified.ResultQueueURL, WorkerPoolID: configuredPool.ID,
+			},
+		})
 	}
-	return fallback
+	gateway, err := queuegateway.New(pools, configuration.LeaseKey, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return gateway.Handler(), nil
 }

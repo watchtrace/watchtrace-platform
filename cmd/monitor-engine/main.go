@@ -2,146 +2,207 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"regexp"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/fifo"
 	"github.com/watchtrace/watchtrace-platform/internal/operations"
+	platformconfig "github.com/watchtrace/watchtrace-platform/internal/platform/config"
+	"github.com/watchtrace/watchtrace-platform/internal/platform/httpserver"
 	"github.com/watchtrace/watchtrace-platform/internal/quarantine"
 	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 	"github.com/watchtrace/watchtrace-platform/internal/secureheaders"
-	"log/slog"
-	"net/http"
-	"os"
-	"os/signal"
-	"regexp"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"syscall"
-	"time"
 )
 
 var receiptHandlePattern = regexp.MustCompile(`Value [^ ]+ for parameter ReceiptHandle`)
 
+type engineRuntime struct {
+	database      *pgxpool.Pool
+	scheduler     *fifo.Scheduler
+	publisher     *fifo.Publisher
+	consumer      *fifo.ResultConsumer
+	dlq           *fifo.DLQReconciler
+	reports       *reliability.Service
+	operations    *operations.Service
+	healthAddress string
+}
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if err := runCommand(logger); err != nil {
+		logger.Error("monitor engine stopped", "error", safeError(err))
+		os.Exit(1)
+	}
+}
+
+func runCommand(logger *slog.Logger) error {
+	configuration, err := platformconfig.LoadMonitorEngine()
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	db, err := pgxpool.New(ctx, required("WATCHTRACE_DATABASE_URL"))
+
+	runtime, err := build(ctx, configuration, logger)
 	if err != nil {
-		logger.Error("configure database")
-		os.Exit(1)
+		return fmt.Errorf("build monitor engine: %w", err)
 	}
-	defer db.Close()
-	signing, err := readKey(required("WATCHTRACE_PLATFORM_SIGNING_KEY"))
+	defer runtime.database.Close()
+	return runtime.run(ctx, logger)
+}
+
+func build(ctx context.Context, configuration platformconfig.MonitorEngineConfig, logger *slog.Logger) (*engineRuntime, error) {
+	database, err := pgxpool.New(ctx, configuration.DatabaseURL)
 	if err != nil {
-		logger.Error("configure signing key")
-		os.Exit(1)
+		return nil, err
 	}
-	header, err := readKey(required("WATCHTRACE_MONITOR_HEADER_KEY_FILE"))
+	fail := func(buildErr error) (*engineRuntime, error) {
+		database.Close()
+		return nil, buildErr
+	}
+
+	quarantineSealer, err := quarantine.New(configuration.QuarantineKey)
 	if err != nil {
-		logger.Error("configure header key")
-		os.Exit(1)
+		return fail(err)
 	}
-	quarantineKey, err := readKey(required("WATCHTRACE_QUARANTINE_KEY"))
+	headers, err := secureheaders.New(1, map[int32][]byte{1: configuration.HeaderKey})
 	if err != nil {
-		logger.Error("configure quarantine encryption")
-		os.Exit(1)
+		return fail(err)
 	}
-	quarantineSealer, err := quarantine.New(quarantineKey)
+	scheduler, err := fifo.NewScheduler(database, configuration.SigningKey, configuration.SigningKeyID, headers)
 	if err != nil {
-		logger.Error("configure quarantine encryption")
-		os.Exit(1)
+		return fail(err)
 	}
-	headers, err := secureheaders.New(1, map[int32][]byte{1: header})
+	awsConfiguration, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
-		logger.Error("configure header encryption")
-		os.Exit(1)
+		return fail(err)
 	}
-	scheduler, err := fifo.NewScheduler(db, ed25519.PrivateKey(signing), value("WATCHTRACE_PLATFORM_SIGNING_KEY_ID", "platform-v1"), headers)
-	if err != nil {
-		logger.Error("configure scheduler")
-		os.Exit(1)
-	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		logger.Error("configure AWS")
-		os.Exit(1)
-	}
-	client := sqs.NewFromConfig(awsCfg, func(o *sqs.Options) {
-		if endpoint := os.Getenv("WATCHTRACE_SQS_ENDPOINT"); endpoint != "" {
-			o.BaseEndpoint = aws.String(endpoint)
+	client := sqs.NewFromConfig(awsConfiguration, func(options *sqs.Options) {
+		if configuration.SQSEndpoint != "" {
+			options.BaseEndpoint = aws.String(configuration.SQSEndpoint)
 		}
 	})
-	queueURLs := operations.QueueURLs{Jobs: required("WATCHTRACE_SQS_HOSTED_JOB_QUEUE_URL"), Results: required("WATCHTRACE_SQS_RESULT_QUEUE_URL"), JobDLQ: required("WATCHTRACE_SQS_HOSTED_JOB_DLQ_URL"), ResultDLQ: required("WATCHTRACE_SQS_RESULT_DLQ_URL")}
+	queueURLs := operations.QueueURLs{
+		Jobs: configuration.JobQueueURL, Results: configuration.ResultQueueURL,
+		JobDLQ: configuration.JobDLQURL, ResultDLQ: configuration.ResultDLQURL,
+	}
 	if err = queueURLs.Validate(); err != nil {
-		logger.Error("configure SQS queue URLs", "error", safeError(err))
-		os.Exit(1)
+		return fail(err)
 	}
-	publisher := fifo.NewPublisher(db, loggingSender{next: fifo.SQSSender{Client: client}, logger: logger})
-	consumer, err := fifo.NewResultConsumer(db, loggingResultSource{next: fifo.ResultSQS{Client: client, QueueURL: queueURLs.Results}, logger: logger}, quarantineSealer)
+	publisher := fifo.NewPublisher(database, loggingSender{next: fifo.SQSSender{Client: client}, logger: logger})
+	consumer, err := fifo.NewResultConsumer(
+		database,
+		loggingResultSource{next: fifo.ResultSQS{Client: client, QueueURL: queueURLs.Results}, logger: logger},
+		quarantineSealer,
+	)
 	if err != nil {
-		logger.Error("configure result consumer")
-		os.Exit(1)
+		return fail(err)
 	}
-	dlq, err := fifo.NewDLQReconciler(db, &fifo.SQSDLQSource{Client: client, JobDLQURL: queueURLs.JobDLQ, ResultDLQURL: queueURLs.ResultDLQ}, quarantineSealer)
+	dlq, err := fifo.NewDLQReconciler(database, &fifo.SQSDLQSource{
+		Client: client, JobDLQURL: queueURLs.JobDLQ, ResultDLQURL: queueURLs.ResultDLQ,
+	}, quarantineSealer)
 	if err != nil {
-		logger.Error("configure DLQ reconciler")
-		os.Exit(1)
+		return fail(err)
 	}
-	operationsService := operations.NewWithSQS(db, client, queueURLs)
+	return &engineRuntime{
+		database: database, scheduler: scheduler, publisher: publisher, consumer: consumer, dlq: dlq,
+		reports: reliability.New(database), operations: operations.NewWithSQS(database, client, queueURLs),
+		healthAddress: configuration.HealthAddress,
+	}, nil
+}
+
+func (runtime *engineRuntime) run(ctx context.Context, logger *slog.Logger) error {
+	listener, err := net.Listen("tcp", runtime.healthAddress)
+	if err != nil {
+		return fmt.Errorf("listen for health checks: %w", err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var ready atomic.Bool
+	ready.Store(true)
+	defer ready.Store(false)
+	healthDone := make(chan error, 1)
+
 	var workers sync.WaitGroup
-	start := func(run func()) { workers.Add(1); go func() { defer workers.Done(); run() }() }
-	start(func() { runScheduler(ctx, scheduler, logger) })
-	start(func() { runPublisher(ctx, publisher, logger) })
-	start(func() { runConsumer(ctx, consumer, logger) })
-	start(func() { runDLQ(ctx, dlq, logger) })
-	start(func() { runHealth(ctx, db, operationsService) })
-	runMaintenance(ctx, db, consumer, reliability.New(db), operationsService, logger)
+	start := func(run func()) {
+		workers.Add(1)
+		go func() { defer workers.Done(); run() }()
+	}
+	start(func() { runScheduler(runCtx, runtime.scheduler, logger) })
+	start(func() { runPublisher(runCtx, runtime.publisher, logger) })
+	start(func() { runConsumer(runCtx, runtime.consumer, logger) })
+	start(func() { runDLQ(runCtx, runtime.dlq, logger) })
+	start(func() {
+		healthErr := httpserver.New(healthHandler(runtime.database, runtime.operations, &ready), 5*time.Second).Serve(runCtx, listener)
+		healthDone <- healthErr
+		if runCtx.Err() == nil {
+			cancel()
+		}
+	})
+
+	runMaintenance(runCtx, runtime.database, runtime.consumer, runtime.reports, runtime.operations, logger)
+	ready.Store(false)
+	cancel()
 	done := make(chan struct{})
 	go func() { workers.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		logger.Warn("monitor engine shutdown deadline reached")
+		return nil
 	}
+
+	select {
+	case healthErr := <-healthDone:
+		if healthErr != nil {
+			return fmt.Errorf("serve health checks: %w", healthErr)
+		}
+		if ctx.Err() == nil {
+			return errors.New("health server stopped unexpectedly")
+		}
+	default:
+	}
+	return nil
 }
-func runHealth(ctx context.Context, db *pgxpool.Pool, operationsService *operations.Service) {
-	var ready atomic.Bool
-	ready.Store(true)
-	go func() { <-ctx.Done(); ready.Store(false) }()
+
+func healthHandler(database *pgxpool.Pool, operationsService *operations.Service, ready *atomic.Bool) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health/live", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, r *http.Request) {
-		if !ready.Load() || db.Ping(r.Context()) != nil {
-			http.Error(w, "not_ready", 503)
+	mux.HandleFunc("/health/live", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/health/ready", func(writer http.ResponseWriter, request *http.Request) {
+		if !ready.Load() || database.Ping(request.Context()) != nil {
+			http.Error(writer, "not_ready", http.StatusServiceUnavailable)
 			return
 		}
-		w.WriteHeader(200)
+		writer.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		metrics, err := operationsService.Read(r.Context())
+	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, request *http.Request) {
+		metrics, err := operationsService.Read(request.Context())
 		if err != nil {
-			http.Error(w, "metrics_unavailable", 503)
+			http.Error(writer, "metrics_unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(metrics)
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(metrics)
 	})
-	server := &http.Server{Addr: value("WATCHTRACE_ENGINE_HEALTH_ADDRESS", "127.0.0.1:8091"), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdown)
-	}()
-	_ = server.ListenAndServe()
+	return mux
 }
 
 func runDLQ(ctx context.Context, reconciler *fifo.DLQReconciler, logger *slog.Logger) {
@@ -195,14 +256,14 @@ func runConsumer(ctx context.Context, consumer *fifo.ResultConsumer, logger *slo
 	}
 }
 
-func runMaintenance(ctx context.Context, db *pgxpool.Pool, consumer *fifo.ResultConsumer, reports *reliability.Service, operationsService *operations.Service, logger *slog.Logger) {
+func runMaintenance(ctx context.Context, database *pgxpool.Pool, consumer *fifo.ResultConsumer, reports *reliability.Service, operationsService *operations.Service, logger *slog.Logger) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	maintain := func(now time.Time) {
 		started := time.Now().UTC()
-		leased, firstErr := fifo.ReclaimPublisherLeases(ctx, db)
+		leased, firstErr := fifo.ReclaimPublisherLeases(ctx, database)
 		expired, secondErr := consumer.SweepDeadlines(ctx)
-		deleted, thirdErr := fifo.CleanupLedger(ctx, db, now)
+		deleted, thirdErr := fifo.CleanupLedger(ctx, database, now)
 		queueErr := errors.Join(firstErr, secondErr, thirdErr)
 		_ = operationsService.Record(context.Background(), "queue_maintenance", started, leased+expired+deleted, queueErr)
 		started = time.Now().UTC()
@@ -238,25 +299,4 @@ func safeError(err error) string {
 		return ""
 	}
 	return receiptHandlePattern.ReplaceAllString(err.Error(), "Value [redacted] for parameter ReceiptHandle")
-}
-
-func readKey(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
-}
-func required(name string) string {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		panic(name + " required")
-	}
-	return v
-}
-func value(name, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
-		return v
-	}
-	return fallback
 }

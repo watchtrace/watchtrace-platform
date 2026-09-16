@@ -2,54 +2,115 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/watchtrace/watchtrace-platform/internal/notification"
+	platformconfig "github.com/watchtrace/watchtrace-platform/internal/platform/config"
+	"github.com/watchtrace/watchtrace-platform/internal/platform/httpserver"
 )
+
+type notificationRuntime struct {
+	database      *pgxpool.Pool
+	worker        *notification.Worker
+	healthAddress string
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if err := runCommand(logger); err != nil {
+		logger.Error("notification worker stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func runCommand(logger *slog.Logger) error {
+	configuration, err := platformconfig.LoadNotificationWorker()
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	databaseURL := strings.TrimSpace(os.Getenv("WATCHTRACE_DATABASE_URL"))
-	if databaseURL == "" {
-		logger.Error("notification database configuration missing")
-		os.Exit(1)
-	}
-	db, err := pgxpool.New(ctx, databaseURL)
+
+	runtime, err := build(ctx, configuration)
 	if err != nil {
-		logger.Error("configure notification database")
-		os.Exit(1)
+		return fmt.Errorf("build notification worker: %w", err)
 	}
-	defer db.Close()
-	provider, err := configuredProvider()
+	defer runtime.database.Close()
+	return runtime.run(ctx, logger)
+}
+
+func build(ctx context.Context, configuration platformconfig.NotificationWorkerConfig) (*notificationRuntime, error) {
+	database, err := pgxpool.New(ctx, configuration.DatabaseURL)
 	if err != nil {
-		logger.Error("configure notification provider")
-		os.Exit(1)
+		return nil, err
 	}
-	go runHealth(ctx, db)
-	workerID := setting("WATCHTRACE_NOTIFICATION_WORKER_ID", "notification-worker-1")
-	worker, err := notification.NewWorker(db, provider, notification.Config{WorkerID: workerID, LeaseDuration: 30 * time.Second})
+	provider, err := configuredProvider(configuration)
 	if err != nil {
-		logger.Error("configure notification worker")
-		os.Exit(1)
+		database.Close()
+		return nil, err
 	}
+	worker, err := notification.NewWorker(database, provider, notification.Config{
+		WorkerID: configuration.WorkerID, LeaseDuration: 30 * time.Second,
+	})
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+	return &notificationRuntime{database: database, worker: worker, healthAddress: configuration.HealthAddress}, nil
+}
+
+func configuredProvider(configuration platformconfig.NotificationWorkerConfig) (notification.Provider, error) {
+	if configuration.Provider == "oci" {
+		return notification.NewOCIEmailDeliveryProvider(
+			configuration.SMTPAddress, configuration.SMTPUsername,
+			configuration.SMTPPassword, configuration.From,
+		)
+	}
+	return notification.NewLocalSMTPProvider(configuration.SMTPAddress, configuration.From)
+}
+
+func (runtime *notificationRuntime) run(ctx context.Context, logger *slog.Logger) error {
+	listener, err := net.Listen("tcp", runtime.healthAddress)
+	if err != nil {
+		return fmt.Errorf("listen for health checks: %w", err)
+	}
+	healthDone := make(chan error, 1)
+	go func() {
+		healthDone <- httpserver.New(healthHandler(runtime.database), 5*time.Second).Serve(ctx, listener)
+	}()
+
 	for ctx.Err() == nil {
-		worked, deliveryErr := worker.DeliverNext(ctx)
-		if deliveryErr != nil {
+		select {
+		case healthErr := <-healthDone:
+			if healthErr != nil {
+				return fmt.Errorf("serve health checks: %w", healthErr)
+			}
+			if ctx.Err() == nil {
+				return fmt.Errorf("health server stopped unexpectedly")
+			}
+			return nil
+		default:
+		}
+		worked, deliveryErr := runtime.worker.DeliverNext(ctx)
+		if deliveryErr != nil && ctx.Err() == nil {
 			logger.Warn("notification delivery cycle failed")
 			waitFor(ctx, time.Second)
 		} else if !worked {
 			waitFor(ctx, 500*time.Millisecond)
 		}
 	}
+	if healthErr := <-healthDone; healthErr != nil {
+		return fmt.Errorf("serve health checks: %w", healthErr)
+	}
+	return nil
 }
 
 type databasePinger interface {
@@ -71,21 +132,6 @@ func healthHandler(database databasePinger) http.Handler {
 	return mux
 }
 
-func runHealth(ctx context.Context, database databasePinger) {
-	server := &http.Server{
-		Addr:              setting("WATCHTRACE_NOTIFICATION_HEALTH_ADDRESS", "127.0.0.1:8092"),
-		Handler:           healthHandler(database),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdown)
-	}()
-	_ = server.ListenAndServe()
-}
-
 func waitFor(ctx context.Context, duration time.Duration) {
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
@@ -93,26 +139,4 @@ func waitFor(ctx context.Context, duration time.Duration) {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
-}
-
-func configuredProvider() (notification.Provider, error) {
-	provider := strings.ToLower(setting("WATCHTRACE_NOTIFICATION_PROVIDER", "local"))
-	address := setting("WATCHTRACE_NOTIFICATION_SMTP_ADDRESS", "127.0.0.1:1025")
-	from := setting("WATCHTRACE_NOTIFICATION_FROM", "watchtrace@localhost")
-	if provider == "oci" {
-		return notification.NewOCIEmailDeliveryProvider(address,
-			strings.TrimSpace(os.Getenv("WATCHTRACE_NOTIFICATION_SMTP_USERNAME")),
-			strings.TrimSpace(os.Getenv("WATCHTRACE_NOTIFICATION_SMTP_PASSWORD")), from)
-	}
-	if provider == "local" {
-		return notification.NewLocalSMTPProvider(address, from)
-	}
-	return nil, notification.ErrInvalidConfiguration
-}
-
-func setting(name, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value
-	}
-	return fallback
 }

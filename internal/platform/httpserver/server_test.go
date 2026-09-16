@@ -80,3 +80,21 @@ func TestServeGracefullyWaitsForActiveRequest(t *testing.T) {
 		t.Fatal("Serve did not return after the request finished")
 	}
 }
+
+func TestNewConfiguredAppliesGatewayTimeouts(t *testing.T) {
+	server := NewConfigured(http.NotFoundHandler(), Config{
+		ShutdownTimeout:   3 * time.Second,
+		ReadHeaderTimeout: 4 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      6 * time.Second,
+		IdleTimeout:       7 * time.Second,
+	})
+
+	if server.shutdownTimeout != 3*time.Second ||
+		server.httpServer.ReadHeaderTimeout != 4*time.Second ||
+		server.httpServer.ReadTimeout != 5*time.Second ||
+		server.httpServer.WriteTimeout != 6*time.Second ||
+		server.httpServer.IdleTimeout != 7*time.Second {
+		t.Fatalf("configured timeouts were not applied: %+v", server.httpServer)
+	}
+}
