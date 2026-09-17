@@ -126,8 +126,8 @@ token:
 ```
 
 Access tokens expire after 15 minutes and are sent as `Authorization: Bearer
-<token>` to authenticated endpoints. Existing `wt_local_` access tokens issued
-before this migration remain valid until their original expiry.
+<token>` to authenticated endpoints. Access tokens use the `wt_access_` prefix;
+the expired pre-production `wt_local_` format is rejected.
 
 The refresh token is never included in JSON. It is an opaque random token with
 a 30-day expiry delivered only through `Set-Cookie`. The cookie is `HttpOnly`,

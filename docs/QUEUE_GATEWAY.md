@@ -3,8 +3,7 @@
 The queue gateway has Amazon SQS access but no PostgreSQL driver, database URL,
 or product-data API. Its Ed25519-signed, expiring configuration snapshot maps an authenticated worker-pool
 identity to exactly one job FIFO and the shared result FIFO. Mutual TLS is
-mandatory in the shipped command; a short-lived external pool-token validator
-can be injected at the package boundary when an approved issuer is available.
+mandatory; bearer pool-token authentication is not accepted.
 
 Pull responses replace the raw SQS receipt handle with a short-lived AES-GCM
 lease token bound to the pool, job ID, snapshot hash, trusted expiry, and

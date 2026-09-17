@@ -318,10 +318,7 @@ SET state = 'completed',
     completed_at = sqlc.arg(completed_at),
     worker_id = sqlc.arg(worker_id),
     execution_attempt_id = sqlc.arg(execution_attempt_id)::text::uuid,
-    last_safe_error = NULL,
-    lease_owner = NULL,
-    lease_token = NULL,
-    lease_expires_at = NULL
+    last_safe_error = NULL
 WHERE id = sqlc.arg(job_id)::text::uuid;
 
 -- name: DeleteRecoveredCoverageGaps :exec

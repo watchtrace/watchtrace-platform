@@ -114,12 +114,3 @@ func TestNormalizeCreateInputRejectsInvalidValues(t *testing.T) {
 		})
 	}
 }
-
-func TestStateFromLatestScheduledResultUsesSharedVocabulary(t *testing.T) {
-	if state := stateFromLatestScheduledResult(true); state != StateHealthy {
-		t.Fatalf("successful latest result state = %q, want %q", state, StateHealthy)
-	}
-	if state := stateFromLatestScheduledResult(false); state != StateDegraded {
-		t.Fatalf("failed latest result state = %q, want %q", state, StateDegraded)
-	}
-}

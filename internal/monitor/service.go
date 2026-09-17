@@ -228,6 +228,9 @@ func (s *Service) Create(
 	if err := queries.OpenMonitorSchedulePeriod(ctx, created.ID); err != nil {
 		return Monitor{}, fmt.Errorf("record monitor schedule period: %w", err)
 	}
+	if err := queries.EnsureMonitorReliabilityState(ctx, created.ID); err != nil {
+		return Monitor{}, fmt.Errorf("initialize monitor reliability state: %w", err)
+	}
 	if err = recordRefresh(ctx, tx, organizationID, environmentID, "monitor.changed", "monitor", created.ID); err != nil {
 		return Monitor{}, err
 	}

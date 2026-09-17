@@ -133,7 +133,7 @@ func buildTransport(ctx context.Context, configuration platformconfig.WorkerConf
 		Transport: &http.Transport{TLSClientConfig: configuration.ClientTLS.Clone()},
 		Timeout:   30 * time.Second,
 	}
-	return &workqueue.HTTPS{BaseURL: configuration.GatewayURL, Client: client, PoolToken: configuration.PoolToken}, nil
+	return &workqueue.HTTPS{BaseURL: configuration.GatewayURL, Client: client}, nil
 }
 
 func (runtime *workerRuntime) run(ctx context.Context, logger *slog.Logger) error {

@@ -13,8 +13,8 @@ import (
 )
 
 type HTTPS struct {
-	BaseURL, PoolToken string
-	Client             *http.Client
+	BaseURL string
+	Client  *http.Client
 }
 type httpPull struct {
 	Body         string              `json:"body"`
@@ -64,9 +64,6 @@ func (h *HTTPS) call(ctx context.Context, path string, input any, output any) (i
 		return 0, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if h.PoolToken != "" {
-		request.Header.Set("Authorization", "Bearer "+h.PoolToken)
-	}
 	response, err := client.Do(request)
 	if err != nil {
 		return 0, err

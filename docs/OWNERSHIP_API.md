@@ -8,7 +8,7 @@ tenant hierarchy.
 The endpoint requires the short-lived session from the authentication API:
 
 ```text
-Authorization: Bearer wt_local_<opaque-value>
+Authorization: Bearer wt_access_<opaque-value>
 Content-Type: application/json
 ```
 

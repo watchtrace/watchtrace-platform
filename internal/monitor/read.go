@@ -95,32 +95,13 @@ func (s *Service) Get(ctx context.Context, userID, environmentID, monitorID stri
 		return Detail{}, fmt.Errorf("get environment monitor: %w", err)
 	}
 
-	state := StateUnknown
 	durable, err := queries.GetDurableMonitorState(ctx, database.GetDurableMonitorStateParams{
 		OrganizationID: organizationID, EnvironmentID: environmentID, MonitorID: monitorID,
 	})
-	if err == nil && durable.LastObservedScheduledAt.Valid {
-		state = State(durable.DisplayState)
-	} else if err == nil || errors.Is(err, pgx.ErrNoRows) {
-		// Compatibility for results created before the ordered evaluator first
-		// runs. Once an evaluation exists, an explicit unknown state caused by
-		// a missing newest slot must not be replaced by the latest observation.
-		latestSucceeded, latestErr := queries.GetLatestScheduledMonitorResult(
-			ctx,
-			database.GetLatestScheduledMonitorResultParams{
-				OrganizationID: organizationID,
-				EnvironmentID:  environmentID,
-				MonitorID:      monitorID,
-			},
-		)
-		if latestErr == nil {
-			state = stateFromLatestScheduledResult(latestSucceeded)
-		} else if !errors.Is(latestErr, pgx.ErrNoRows) {
-			return Detail{}, fmt.Errorf("get latest scheduled monitor result: %w", latestErr)
-		}
-	} else {
+	if err != nil {
 		return Detail{}, fmt.Errorf("get durable monitor state: %w", err)
 	}
+	state := State(durable.DisplayState)
 
 	rows, err := queries.ListRecentMonitorResults(ctx, database.ListRecentMonitorResultsParams{
 		OrganizationID: organizationID,
@@ -202,13 +183,6 @@ func monitorFromGetRow(row database.GetEnvironmentMonitorRow) Monitor {
 		CreatedAt:         row.CreatedAt.Time,
 		UpdatedAt:         row.UpdatedAt.Time,
 	}
-}
-
-func stateFromLatestScheduledResult(succeeded bool) State {
-	if succeeded {
-		return StateHealthy
-	}
-	return StateDegraded
 }
 
 func checkResultFromRow(row database.ListRecentMonitorResultsRow) CheckResult {

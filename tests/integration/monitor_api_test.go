@@ -17,6 +17,7 @@ import (
 	"github.com/watchtrace/watchtrace-platform/internal/auth"
 	"github.com/watchtrace/watchtrace-platform/internal/httpapi"
 	"github.com/watchtrace/watchtrace-platform/internal/monitor"
+	"github.com/watchtrace/watchtrace-platform/internal/reliability"
 )
 
 func TestMonitorAPIWithPostgreSQL(t *testing.T) {
@@ -124,11 +125,21 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 		t.Fatalf("new monitor recent checks must be a non-null array: %s", unknownDetail.RawBody)
 	}
 
-	baseCheckTime := time.Date(2026, 8, 8, 13, 0, 0, 0, time.UTC)
+	var baseCheckTime time.Time
+	if err := pool.QueryRow(ctx, `SELECT first_slot_at FROM monitor_schedule_periods
+WHERE monitor_id=$1::uuid AND ends_at IS NULL`, createdDefault.Body.ID).Scan(&baseCheckTime); err != nil {
+		t.Fatalf("read monitor first scheduled slot: %v", err)
+	}
 	failedJobID := insertMonitorAPIResult(
 		t, ctx, pool, firstOwnership.Body.Organization.ID, firstOwnership.Body.Environment.ID,
 		createdDefault.Body.ID, "scheduled", baseCheckTime, false, int16(503), "unexpected_status",
 	)
+	if _, err := reliability.New(pool).EvaluateAccepted(
+		ctx, createdDefault.Body.ID, failedJobID, baseCheckTime,
+		baseCheckTime.Add(2*time.Minute), baseCheckTime.Add(time.Second),
+	); err != nil {
+		t.Fatalf("evaluate monitor API result: %v", err)
+	}
 	failedDetail := performMonitorGet(
 		t, router, firstSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, createdDefault.Body.ID,
 	)
@@ -161,8 +172,14 @@ func TestMonitorAPIWithPostgreSQL(t *testing.T) {
 
 	successJobID := insertMonitorAPIResult(
 		t, ctx, pool, firstOwnership.Body.Organization.ID, firstOwnership.Body.Environment.ID,
-		createdDefault.Body.ID, "scheduled", baseCheckTime.Add(22*time.Minute), true, int16(200), nil,
+		createdDefault.Body.ID, "scheduled", baseCheckTime.Add(25*time.Minute), true, int16(200), nil,
 	)
+	if _, err := reliability.New(pool).EvaluateAccepted(
+		ctx, createdDefault.Body.ID, successJobID, baseCheckTime.Add(25*time.Minute),
+		baseCheckTime.Add(27*time.Minute), baseCheckTime.Add(25*time.Minute+time.Second),
+	); err != nil {
+		t.Fatalf("evaluate successful monitor API result: %v", err)
+	}
 	healthyDetail := performMonitorGet(
 		t, router, firstSignup.Body.Session.Token, firstOwnership.Body.Environment.ID, createdDefault.Body.ID,
 	)

@@ -5,7 +5,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
+	"math/big"
+	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
@@ -84,12 +90,9 @@ func TestHTTPSTransportUsesSameImmutableContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gateway.WithTokenValidator(func(context.Context, string) (string, bool) { return "pool-a", true })
-	server := httptest.NewUnstartedServer(gateway.Handler())
-	server.StartTLS()
+	server, client := startMTLSServer(t, gateway.Handler(), "pool-a")
 	defer server.Close()
-	client := server.Client()
-	transport := &workqueue.HTTPS{BaseURL: server.URL, Client: client, PoolToken: "test"}
+	transport := &workqueue.HTTPS{BaseURL: server.URL, Client: client}
 	delivery, err := transport.Pull(context.Background(), 20*time.Second)
 	if err != nil || !bytes.Equal(delivery.Body, inner.delivery.Body) || delivery.Attributes != attrs || delivery.ReceiveCount != 2 {
 		t.Fatalf("pull=%+v err=%v", delivery, err)
@@ -128,11 +131,9 @@ func TestDirectSQSAndHTTPSTransportsPassTheSameExecutedJobContract(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		gateway.WithTokenValidator(func(context.Context, string) (string, bool) { return attrs.WorkerPoolID, true })
-		server := httptest.NewUnstartedServer(gateway.Handler())
-		server.StartTLS()
+		server, client := startMTLSServer(t, gateway.Handler(), attrs.WorkerPoolID)
 		defer server.Close()
-		transport := &workqueue.HTTPS{BaseURL: server.URL, Client: server.Client(), PoolToken: "test"}
+		transport := &workqueue.HTTPS{BaseURL: server.URL, Client: client}
 		assertExecutedContract(t, transport, delivery, result)
 		if !inner.acked || !bytes.Equal(inner.published, result) {
 			t.Fatal("HTTPS gateway did not publish before acknowledging")
@@ -155,3 +156,57 @@ func assertExecutedContract(t *testing.T, transport workqueue.Transport, want wo
 }
 
 func int16Ptr(v int16) *int16 { return &v }
+
+func startMTLSServer(t *testing.T, handler http.Handler, poolID string) (*httptest.Server, *http.Client) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate mTLS key: %v", err)
+	}
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: poolID},
+		NotBefore:             now.Add(-time.Minute),
+		NotAfter:              now.Add(30 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
+	if err != nil {
+		t.Fatalf("create mTLS certificate: %v", err)
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("marshal mTLS key: %v", err)
+	}
+	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+	certificate, err := tls.X509KeyPair(certificatePEM, privatePEM)
+	if err != nil {
+		t.Fatalf("load mTLS certificate: %v", err)
+	}
+	parsedCertificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse mTLS certificate: %v", err)
+	}
+	clientCAs := x509.NewCertPool()
+	clientCAs.AddCert(parsedCertificate)
+
+	server := httptest.NewUnstartedServer(handler)
+	server.TLS = &tls.Config{
+		ClientAuth: tls.RequireAndVerifyClientCert,
+		ClientCAs:  clientCAs,
+		MinVersion: tls.VersionTLS12,
+	}
+	server.StartTLS()
+
+	client := server.Client()
+	transport := client.Transport.(*http.Transport).Clone()
+	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	transport.TLSClientConfig.Certificates = []tls.Certificate{certificate}
+	client.Transport = transport
+	return server, client
+}

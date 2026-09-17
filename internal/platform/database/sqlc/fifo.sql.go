@@ -89,10 +89,7 @@ SET state = 'completed',
     completed_at = $2,
     worker_id = $3,
     execution_attempt_id = $4::text::uuid,
-    last_safe_error = NULL,
-    lease_owner = NULL,
-    lease_token = NULL,
-    lease_expires_at = NULL
+    last_safe_error = NULL
 WHERE id = $5::text::uuid
 `
 

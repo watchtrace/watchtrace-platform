@@ -31,7 +31,6 @@ const (
 	workerResultQueueEnvironment     = "WATCHTRACE_SQS_RESULT_QUEUE_URL"
 	workerSQSEndpointEnvironment     = "WATCHTRACE_SQS_ENDPOINT"
 	workerGatewayURLEnvironment      = "WATCHTRACE_GATEWAY_URL"
-	workerPoolTokenEnvironment       = "WATCHTRACE_POOL_TOKEN"
 	workerMTLSCertificateEnvironment = "WATCHTRACE_MTLS_CERT"
 	workerMTLSKeyEnvironment         = "WATCHTRACE_MTLS_KEY"
 	workerGatewayCAEnvironment       = "WATCHTRACE_GATEWAY_CA"
@@ -54,7 +53,7 @@ type WorkerConfig struct {
 	PrivateCIDRs                                                  []netip.Prefix
 	Transport                                                     string
 	JobQueueURL, ResultQueueURL, SQSEndpoint                      string
-	GatewayURL, PoolToken                                         string
+	GatewayURL                                                    string
 	ClientTLS                                                     *tls.Config
 	HealthAddress                                                 string
 	ClockOffset                                                   time.Duration
@@ -131,7 +130,6 @@ func loadWorker(source commandSource) (WorkerConfig, error) {
 		if err = validateHTTPSURL(workerGatewayURLEnvironment, configuration.GatewayURL); err != nil {
 			return WorkerConfig{}, err
 		}
-		configuration.PoolToken = source.optional(workerPoolTokenEnvironment)
 		configuration.ClientTLS, err = source.clientTLS(workerMTLSCertificateEnvironment, workerMTLSKeyEnvironment, workerGatewayCAEnvironment)
 		if err != nil {
 			return WorkerConfig{}, err

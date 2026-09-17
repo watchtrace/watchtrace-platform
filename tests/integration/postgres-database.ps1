@@ -36,6 +36,9 @@ $previousExpectedReliableEngineSchemaAbsent = $env:WATCHTRACE_EXPECT_RELIABLE_EN
 $previousExpectedReliabilityReportingSchemaAbsent = $env:WATCHTRACE_EXPECT_RELIABILITY_REPORTING_SCHEMA_ABSENT
 $previousExpectedIncidentNotificationSchemaAbsent = $env:WATCHTRACE_EXPECT_INCIDENT_NOTIFICATION_SCHEMA_ABSENT
 $previousExpectedBackendPhase14SchemaAbsent = $env:WATCHTRACE_EXPECT_BACKEND_PHASE14_SCHEMA_ABSENT
+$previousExpectedLegacyCompatibilityRestored = $env:WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_SCHEMA_RESTORED
+$previousPrepareLegacyCompatibilityUpgrade = $env:WATCHTRACE_PREPARE_LEGACY_COMPATIBILITY_UPGRADE
+$previousExpectedLegacyCompatibilityUpgraded = $env:WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_UPGRADED
 
 function Invoke-Compose {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
@@ -83,11 +86,38 @@ try {
 
     Invoke-Go run ./cmd/migrate up
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $version -ne "version 14 (clean)") {
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 15 (clean)") {
         throw "Unexpected migration version after up: $version"
     }
 
     Invoke-Go test ./tests/integration -count=1
+
+    Invoke-Go run ./cmd/migrate down
+    $version = (& go run ./cmd/migrate version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 14 (clean)") {
+        throw "Unexpected migration version after compatibility down: $version"
+    }
+    $env:WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_SCHEMA_RESTORED = "1"
+    Invoke-Go test ./tests/integration -run '^TestLegacyCompatibilityMigrationRollback$' -count=1
+    $env:WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_SCHEMA_RESTORED = $previousExpectedLegacyCompatibilityRestored
+    $env:WATCHTRACE_PREPARE_LEGACY_COMPATIBILITY_UPGRADE = "1"
+    Invoke-Go test ./tests/integration -run '^(TestLegacyCompatibilityActiveSessionAudit|TestPrepareLegacyCompatibilityUpgrade)$' -count=1
+    $env:WATCHTRACE_PREPARE_LEGACY_COMPATIBILITY_UPGRADE = $previousPrepareLegacyCompatibilityUpgrade
+
+    Invoke-Go run ./cmd/migrate up
+    $version = (& go run ./cmd/migrate version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 15 (clean)") {
+        throw "Unexpected migration version after compatibility upgrade: $version"
+    }
+    $env:WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_UPGRADED = "1"
+    Invoke-Go test ./tests/integration -run '^TestLegacyCompatibilityUpgradeBackfillsReliability$' -count=1
+    $env:WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_UPGRADED = $previousExpectedLegacyCompatibilityUpgraded
+
+    Invoke-Go run ./cmd/migrate down
+    $version = (& go run ./cmd/migrate version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $version -ne "version 14 (clean)") {
+        throw "Unexpected migration version after second compatibility down: $version"
+    }
 
     Invoke-Go run ./cmd/migrate down
     $version = (& go run ./cmd/migrate version | Out-String).Trim()
@@ -196,4 +226,7 @@ finally {
 	$env:WATCHTRACE_EXPECT_RELIABILITY_REPORTING_SCHEMA_ABSENT = $previousExpectedReliabilityReportingSchemaAbsent
 	$env:WATCHTRACE_EXPECT_INCIDENT_NOTIFICATION_SCHEMA_ABSENT = $previousExpectedIncidentNotificationSchemaAbsent
 	$env:WATCHTRACE_EXPECT_BACKEND_PHASE14_SCHEMA_ABSENT = $previousExpectedBackendPhase14SchemaAbsent
+	$env:WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_SCHEMA_RESTORED = $previousExpectedLegacyCompatibilityRestored
+	$env:WATCHTRACE_PREPARE_LEGACY_COMPATIBILITY_UPGRADE = $previousPrepareLegacyCompatibilityUpgrade
+	$env:WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_UPGRADED = $previousExpectedLegacyCompatibilityUpgraded
 }

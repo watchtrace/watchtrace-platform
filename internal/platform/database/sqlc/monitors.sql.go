@@ -397,30 +397,6 @@ func (q *Queries) GetEnvironmentMonitor(ctx context.Context, arg GetEnvironmentM
 	return i, err
 }
 
-const getLatestScheduledMonitorResult = `-- name: GetLatestScheduledMonitorResult :one
-SELECT succeeded
-FROM health_checks
-WHERE organization_id = $1::text::uuid
-  AND environment_id = $2::text::uuid
-  AND monitor_id = $3::text::uuid
-  AND job_type = 'scheduled'
-ORDER BY scheduled_at DESC, job_id
-LIMIT 1
-`
-
-type GetLatestScheduledMonitorResultParams struct {
-	OrganizationID string
-	EnvironmentID  string
-	MonitorID      string
-}
-
-func (q *Queries) GetLatestScheduledMonitorResult(ctx context.Context, arg GetLatestScheduledMonitorResultParams) (bool, error) {
-	row := q.db.QueryRow(ctx, getLatestScheduledMonitorResult, arg.OrganizationID, arg.EnvironmentID, arg.MonitorID)
-	var succeeded bool
-	err := row.Scan(&succeeded)
-	return succeeded, err
-}
-
 const getManualDispatchWorkerPool = `-- name: GetManualDispatchWorkerPool :one
 SELECT encryption_key_id, encryption_public_key, network_policy_version, job_queue_url
 FROM worker_pools

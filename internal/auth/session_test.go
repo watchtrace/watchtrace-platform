@@ -45,6 +45,13 @@ func TestNewOpaqueTokenPropagatesRandomnessFailure(t *testing.T) {
 	}
 }
 
+func TestLegacyAccessTokenIsRejectedAfterCompatibilityWindow(t *testing.T) {
+	legacy := "wt_local_" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, sessionTokenBytes))
+	if validAccessToken(legacy) {
+		t.Fatal("expired legacy access-token format was accepted")
+	}
+}
+
 type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) {

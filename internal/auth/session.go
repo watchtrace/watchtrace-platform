@@ -10,10 +10,9 @@ import (
 )
 
 const (
-	accessTokenPrefix       = "wt_access_"
-	legacyAccessTokenPrefix = "wt_local_"
-	refreshTokenPrefix      = "wt_refresh_"
-	sessionTokenBytes       = 32
+	accessTokenPrefix  = "wt_access_"
+	refreshTokenPrefix = "wt_refresh_"
+	sessionTokenBytes  = 32
 )
 
 func newAccessToken() (string, []byte, error) {
@@ -40,8 +39,7 @@ func tokenDigest(token string) []byte {
 }
 
 func validAccessToken(token string) bool {
-	return validOpaqueToken(token, accessTokenPrefix) ||
-		validOpaqueToken(token, legacyAccessTokenPrefix)
+	return validOpaqueToken(token, accessTokenPrefix)
 }
 
 func validRefreshToken(token string) bool {

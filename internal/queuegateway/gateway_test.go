@@ -129,6 +129,25 @@ func TestGatewayExposesSafeReadinessAndHealth(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsBearerAuthenticationWithoutClientCertificate(t *testing.T) {
+	public, _, _ := ed25519.GenerateKey(rand.Reader)
+	gateway, err := New([]Pool{{
+		ID: "pool-a", ResultKeyID: "result-v1", Transport: &fakeTransport{}, ResultPublic: public,
+	}}, bytes.Repeat([]byte{1}, 32), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/jobs/pull", nil)
+	request.Header.Set("Authorization", "Bearer obsolete-pool-token")
+	response := httptest.NewRecorder()
+
+	gateway.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("bearer-only request status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
 func authenticatedRequest(method, path string, body *bytes.Reader, pool string) *http.Request {
 	if body == nil {
 		body = bytes.NewReader(nil)

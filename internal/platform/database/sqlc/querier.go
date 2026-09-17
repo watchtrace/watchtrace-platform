@@ -96,7 +96,6 @@ type Querier interface {
 	GetFirstEnvironmentRollupInvalidation(ctx context.Context, arg GetFirstEnvironmentRollupInvalidationParams) (pgtype.Timestamptz, error)
 	GetFirstMonitorRollupInvalidation(ctx context.Context, arg GetFirstMonitorRollupInvalidationParams) (pgtype.Timestamptz, error)
 	GetIncidentTenant(ctx context.Context, incidentID string) (GetIncidentTenantRow, error)
-	GetLatestScheduledMonitorResult(ctx context.Context, arg GetLatestScheduledMonitorResultParams) (bool, error)
 	GetManualDispatchWorkerPool(ctx context.Context, arg GetManualDispatchWorkerPoolParams) (GetManualDispatchWorkerPoolRow, error)
 	GetMonitorAlertThresholds(ctx context.Context, monitorID string) (GetMonitorAlertThresholdsRow, error)
 	GetMonitorEvaluationAtSlot(ctx context.Context, arg GetMonitorEvaluationAtSlotParams) (GetMonitorEvaluationAtSlotRow, error)

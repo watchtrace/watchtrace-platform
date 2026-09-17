@@ -2,7 +2,6 @@
 package queuegateway
 
 import (
-	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ed25519"
@@ -13,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -32,13 +30,11 @@ type Pool struct {
 	MaxConcurrentPulls, MaxResultsPerMinute int64
 	RevokedCertificateSerials               map[string]struct{}
 }
-type TokenValidator func(context.Context, string) (string, bool)
 type Gateway struct {
 	pools                      map[string]Pool
 	aead                       cipher.AEAD
 	now                        func() time.Time
 	tolerance                  time.Duration
-	tokens                     TokenValidator
 	limits                     map[string]*poolLimit
 	dependencyUnavailableUntil time.Time
 	mu                         sync.Mutex
@@ -106,7 +102,6 @@ func New(pools []Pool, key []byte, tolerance time.Duration) (*Gateway, error) {
 		limits:    limits,
 	}, nil
 }
-func (g *Gateway) WithTokenValidator(v TokenValidator) *Gateway { g.tokens = v; return g }
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/jobs/pull", g.pull)
@@ -164,10 +159,6 @@ func (g *Gateway) pool(r *http.Request) (Pool, bool) {
 				return Pool{}, false
 			}
 		}
-	}
-	if id == "" && g.tokens != nil {
-		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		id, _ = g.tokens(r.Context(), token)
 	}
 	p, ok := g.pools[id]
 	return p, ok
@@ -374,5 +365,3 @@ func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
-
-var _ = context.Background

@@ -14,16 +14,16 @@ The main architecture matches `DESIGN_SPECIFICATION.md`:
 
 Those areas are necessarily more complex than an ordinary CRUD Go service.
 
-The genuine over-engineering is mostly evolutionary residue:
+The genuine over-engineering was mostly evolutionary residue:
 
 1. Two monitoring implementations exist at the same time.
 2. Services can be partially configured, causing routes to appear or disappear at runtime.
 3. Database logic is divided between SQLC files and roughly 176 inline query calls.
 4. Several packages have very large, multi-purpose files.
 5. SMTP and process-configuration code is duplicated.
-6. A few compatibility paths no longer have clear removal dates.
+6. Several time-bounded compatibility paths remained after their operational window.
 
-The codebase is therefore harder to follow than necessary, but the main problem is **duplicate paths and inconsistent organization**, not widespread misuse of interfaces or dependency injection.
+Before this refactoring plan, the codebase was harder to follow than necessary, but the main problem was **duplicate paths and inconsistent organization**, not widespread misuse of interfaces or dependency injection.
 
 ## Scope and measurements
 
@@ -32,7 +32,7 @@ The review covered:
 - All 14 `cmd` entry points.
 - All 30 original top-level `internal` packages. Task 1 reduced the active set to 28.
 - All SQLC query files and generated code.
-- All 14 migrations.
+- All 15 migrations.
 - Deployment definitions and Phase 1 documentation.
 - Worker, SQS, reliability, incident, notification, security, ownership, API, and operations tests.
 
@@ -43,13 +43,13 @@ Approximate size:
 | Hand-written non-test Go | 12,993 lines |
 | Generated SQLC Go | 1,414 lines |
 | Go tests | 10,106 lines |
-| Hand-written interfaces | 35 |
+| Hand-written interfaces | 34 |
 | Top-level internal packages | 28 |
 | Commands | 14 |
 
-Thirty-five interfaces in a backend of this size is not inherently excessive. Most represent PostgreSQL, SQS, SMTP, HTTP, DNS, or worker transport boundaries.
+Thirty-four interfaces in a backend of this size is not inherently excessive. Most represent PostgreSQL, SQS, SMTP, HTTP, DNS, or worker transport boundaries.
 
-After Task 1, the full race-enabled Go test suite, `go vet`, `go build`, SQLC generation, and the Docker/PostgreSQL migration and integration workflow all pass.
+After Tasks 1–8, the full race-enabled Go test suite, `go vet`, `go build`, vulnerability scan, reproducible SQLC generation, container smoke tests, and the fresh/upgrade/rollback PostgreSQL workflow all pass.
 
 ## Task 1 implementation report — completed 2026-09-14
 
@@ -565,31 +565,27 @@ These are not automatically dead:
 
 ---
 
-### 8. Compatibility behavior needs explicit expiry conditions
+### 8. Compatibility behavior needed explicit expiry conditions
 
-**Classification: Revisit later**
+**Classification: Can remove — completed by Task 8**
 
-Examples:
+The completed audit found four expired or replaceable compatibility paths:
 
 - Legacy `wt_local_` access tokens remain valid in `internal/auth/session.go`.
 - Monitor reads fall back to the latest observation when no ordered reliability state exists in `internal/monitor/service.go`.
 - Old PostgreSQL worker lease columns remain on `check_jobs`.
 - The gateway contains an optional bearer-token identity adapter used by tests, while production requires mTLS.
 
-These paths may have been justified during migration, but none has a clear removal date.
+These paths were justified during earlier migrations, but their operational conditions had ended or could be closed safely with a backfill.
 
-#### Simpler design
+#### Implemented simpler design
 
-Record an explicit condition for each compatibility path:
+- Removed legacy token acceptance after confirming the 15-minute window had expired and added a migration guard for anomalous active sessions.
+- Backfilled and initialized durable reliability state before removing the latest-result fallback.
+- Added forward migration 15 to drop the retired checker columns without rewriting migration history.
+- Replaced token-based gateway parity tests with real mTLS identity tests and removed bearer pool-token support.
 
-- Remove legacy token acceptance after every possible old access token has expired.
-- Backfill or initialize reliability state, then remove the latest-result fallback.
-- After removing the old checker, add a new forward migration that drops its lease columns.
-- Replace token-based gateway parity tests with mTLS identity tests, then remove or clearly isolate the token adapter.
-
-Do not rewrite old migrations. Use a new forward migration for deployed databases.
-
-**Risk: Medium-high**, because premature removal can invalidate sessions or produce incorrect monitor states.
+The risk was **medium-high**, so fresh, upgraded, rollback, authentication, reliability, and mTLS tests were required before marking the task complete.
 
 ## Complexity that should remain
 
@@ -771,19 +767,19 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 - Repeated command configuration and startup code.
 - Ambiguous names such as `backendapi` and `modworker`.
 
-### Can remove — completed in Task 1
+### Can remove — completed in Tasks 1 and 8
 
 - `internal/scheduler`.
 - `internal/checker`.
 - Their SQLC query files and generated output.
 - Tests and documentation that exclusively describe those obsolete paths.
+- Legacy access-token parsing.
+- Raw-result monitor-state fallback.
+- Gateway bearer pool-token adapter.
+- Retired PostgreSQL checker attempt/lease columns.
 
 ### Revisit later
 
-- Old `check_jobs` lease columns.
-- Legacy access-token prefix.
-- Monitor-state compatibility fallback.
-- Gateway bearer-token test adapter.
 - Migration squashing.
 - Grouping or consolidation of operator commands.
 - Phase 4-oriented maintenance/tooling that is not currently deployed.
@@ -963,7 +959,7 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
   **Verification completed:** Go 1.26.6 repository-wide race tests; `go vet ./...`; `go build ./...`; `go mod verify`; `go mod tidy -diff`; `govulncheck` with zero reachable vulnerabilities; focused command/configuration/lifecycle tests; worker and gateway no-PostgreSQL dependency tests; a fresh PostgreSQL integration suite; Coolify Compose rendering; control-plane and worker ARM64 Docker builds; API liveness and graceful-SIGTERM container smoke testing; and `git diff --check` all passed.
 
-- [ ] **Task 8 — Retire time-bounded compatibility and legacy schema**
+- [x] **Task 8 — Retire time-bounded compatibility and legacy schema**
 
   **Goal:** Remove transitional behavior only after its operational need has ended.
 
@@ -975,19 +971,32 @@ The important reductions are the removal of `scheduler` and `checker`, consolida
 
   **Verification:** Fresh and upgraded database migrations, active-session expiry audit, reliability-state backfill tests, mTLS gateway tests, and a full deployment smoke test.
 
+  **Completion:** Finished on 2026-09-17. Every transitional path was retired only after its expiry, backfill, or production-authentication condition was proven.
+
+  **Implementation report:**
+
+  - Removed acceptance of the pre-production `wt_local_` access-token prefix. Git history confirms its issuer was replaced on 2026-08-08 and access sessions last 15 minutes; migration 15 also refuses to run if an unexpectedly long-lived, unrevoked pre-cutover session still exists.
+  - Made worker-pool authentication unambiguously mTLS-only. Removed the gateway token-validator hook, worker pool-token configuration, and HTTPS bearer header; the transport parity tests now use a real client certificate whose common name identifies the worker pool.
+  - Removed the monitor API's raw-result state fallback. New monitors now receive their durable reliability row inside the creation transaction, and migration 15 creates missing rows and deterministically replays historical scheduled results in timestamp/job order using each monitor's configured alert thresholds.
+  - Corrected the evaluation-history counter constraints from the old fixed 3/2 limits to the supported configurable 0–20 range before backfill. The durable state and evaluation history therefore agree for monitors with custom alert thresholds.
+  - Dropped the obsolete `check_jobs` attempt and PostgreSQL lease columns. The current dispatch lease remains in `check_dispatch_outbox`, while SQS receipt handling remains in the worker/gateway flow. The reversible down migration restores the historical columns and compatible constraints.
+  - Removed the unused SQLC latest-result query and the final production write references to the retired columns, then regenerated SQLC. Authentication, queue-gateway, worker, monitor, and schema documentation now describe only the active contracts.
+
+  **Verification completed:** Actual migration expiry-guard rejection; fresh v15 migration; v14→v15 historical reliability backfill with a threshold of five; v15→v14 rollback and the complete historical rollback chain; final restored-v15 PostgreSQL integration suite; real-mTLS gateway parity and bearer-only rejection tests; reproducible SQLC generation; `go test -race ./... -count=1`; `go vet ./...`; `go build ./...`; `go mod verify`; `go mod tidy -diff`; `govulncheck` with zero reachable vulnerabilities; Coolify Compose/deployment-helper validation; control-plane image liveness/graceful-shutdown smoke testing; worker ARM64 image testing; and `git diff --check` all passed.
+
 ## Priority recommendation
 
 The largest immediate improvement would come from:
 
 1. ~~Removing the old scheduler/checker.~~ Completed in Task 1.
-2. Removing partial runtime composition.
-3. Splitting the largest files without behavioral changes.
+2. ~~Removing partial runtime composition.~~ Completed in Task 2.
+3. ~~Splitting the largest files without behavioral changes.~~ Completed in Task 3.
 4. ~~Standardizing SQL location.~~ Completed in Tasks 4 and 5.
-5. ~~Consolidating command configuration.~~ SMTP consolidation and command startup standardization were completed in Tasks 6 and 7.
-6. Removing compatibility branches only after explicit expiry/backfill checks.
+5. ~~Consolidating SMTP and command configuration.~~ Completed in Tasks 6 and 7.
+6. ~~Removing compatibility branches after explicit expiry/backfill checks.~~ Completed in Task 8.
 
 ## Final assessment
 
 WatchTrace is **not fundamentally over-engineered relative to its design specification**. It is a security- and reliability-sensitive distributed backend, so substantial complexity is legitimate.
 
-It is, however, carrying obsolete and transitional code that makes the real architecture much harder for a Go beginner to see. Removing that second story—and making configuration and SQL organization consistent—would deliver more clarity than collapsing the necessary queue, security, or worker boundaries.
+The completed eight-task plan removed the obsolete and transitional second story and made composition, SQL, mail, and command startup consistent. The remaining complexity is primarily the necessary queue, security, reliability, tenant-isolation, and worker-boundary architecture described by the design specification; collapsing those boundaries would make the system less correct, not meaningfully easier to maintain.

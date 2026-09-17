@@ -52,13 +52,44 @@ cd "$repository_root"
 
 env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate up
 version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)
-if [ "$version" != "version 14 (clean)" ]; then
+if [ "$version" != "version 15 (clean)" ]; then
     echo "Migration version after up was '$version'." >&2
     exit 1
 fi
 
 env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
     go test ./tests/integration -count=1
+
+env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate down
+version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)
+if [ "$version" != "version 14 (clean)" ]; then
+    echo "Migration version after compatibility down was '$version'." >&2
+    exit 1
+fi
+env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
+    WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_SCHEMA_RESTORED=1 \
+    go test ./tests/integration -run '^TestLegacyCompatibilityMigrationRollback$' -count=1
+env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
+    WATCHTRACE_PREPARE_LEGACY_COMPATIBILITY_UPGRADE=1 \
+    go test ./tests/integration \
+    -run '^(TestLegacyCompatibilityActiveSessionAudit|TestPrepareLegacyCompatibilityUpgrade)$' -count=1
+
+env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate up
+version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)
+if [ "$version" != "version 15 (clean)" ]; then
+    echo "Migration version after compatibility upgrade was '$version'." >&2
+    exit 1
+fi
+env WATCHTRACE_TEST_DATABASE_URL="$database_url" \
+    WATCHTRACE_EXPECT_LEGACY_COMPATIBILITY_UPGRADED=1 \
+    go test ./tests/integration -run '^TestLegacyCompatibilityUpgradeBackfillsReliability$' -count=1
+
+env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate down
+version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)
+if [ "$version" != "version 14 (clean)" ]; then
+    echo "Migration version after second compatibility down was '$version'." >&2
+    exit 1
+fi
 
 env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate down
 version=$(env WATCHTRACE_DATABASE_URL="$database_url" go run ./cmd/migrate version)

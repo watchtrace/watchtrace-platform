@@ -116,16 +116,6 @@ WHERE organization_id = sqlc.arg(organization_id)::text::uuid
   AND id = sqlc.arg(monitor_id)::text::uuid
   AND deleted_at IS NULL;
 
--- name: GetLatestScheduledMonitorResult :one
-SELECT succeeded
-FROM health_checks
-WHERE organization_id = sqlc.arg(organization_id)::text::uuid
-  AND environment_id = sqlc.arg(environment_id)::text::uuid
-  AND monitor_id = sqlc.arg(monitor_id)::text::uuid
-  AND job_type = 'scheduled'
-ORDER BY scheduled_at DESC, job_id
-LIMIT 1;
-
 -- name: ListRecentMonitorResults :many
 SELECT
     job_id::text AS job_id,
